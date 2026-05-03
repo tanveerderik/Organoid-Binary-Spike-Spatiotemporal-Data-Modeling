@@ -608,7 +608,9 @@ def fit_vqvae(
                     pred_patches_raw=out["pred_patches_raw"],
                     blank_mask=out["blank_mask"],
                     margin=blank_logit_margin,
-                ) 
+                    tau=0.25,
+                    sharpness=10.0,
+                )
                 
                 # --- blank-active decoder latent separation ---
                 t_blank_sep = (epoch - blank_sep_start_epoch) / max(1, blank_sep_warmup_epochs)

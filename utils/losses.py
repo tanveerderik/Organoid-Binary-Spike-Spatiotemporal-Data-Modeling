@@ -337,17 +337,14 @@ def blank_patch_logit_hinge_loss(
     pred_patches_raw,
     blank_mask,
     margin: float = -6.0,
+    tau: float = 0.25,
+    sharpness: float = 10.0,
+    bad_buffer: float = 0.0,
     detach_mask: bool = True,
 ):
-    """
-    Enforce blank-routed patches to decode as near-zero.
+    import torch
+    import torch.nn.functional as F
 
-    Args:
-        pred_patches_raw: (B, N, P) raw renderer logits before output biases
-        blank_mask: (B, N) bool, True = blank patch
-        margin: desired upper bound for blank logits.
-                margin=-6 means sigmoid(logit) ~= 0.0025.
-    """
     if blank_mask is None:
         return pred_patches_raw.new_zeros(())
 
@@ -359,12 +356,19 @@ def blank_patch_logit_hinge_loss(
     if blank_mask.sum() == 0:
         return pred_patches_raw.new_zeros(())
 
-    blank_logits = pred_patches_raw[blank_mask]  # (num_blank, P)
+    blank_logits = pred_patches_raw[blank_mask]  # (M_blank, P)
 
-    # penalize only logits above margin
-    loss = torch.nn.functional.softplus(blank_logits - margin).mean()
+    patch_score = tau * torch.logsumexp(blank_logits / tau, dim=1)
 
-    return loss
+    bad = patch_score > (margin + bad_buffer)
+
+    if bad.sum() == 0:
+        return pred_patches_raw.new_zeros(())
+
+    bad_scores = patch_score[bad]
+
+    loss = F.softplus(sharpness * (bad_scores - margin)) / sharpness
+    return loss.mean()
 
 # -------- blank-active decoder latent separation ----------
 
