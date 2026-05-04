@@ -21,7 +21,6 @@ os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 from glob import glob
 import copy
 import json
-import math
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -58,12 +57,14 @@ from .visualization.reports_data import export_base_finetune_flat_xlsx
 #   (2,)       -> load stage-1 ckpt, train context-conditioned decoder only
 #   (1, 2, 3)  -> run the whole pipeline sequentially
 #   (0,)     -> run spatial-map pretraining only
-RUN_STAGES = (1,2)  # allowed: 0, 1, 2, 3
+RUN_STAGES = (0,1,2,)  # allowed: 0, 1, 2, 3
 
 RUN_EVAL_AFTER_STAGE = True
 RUN_VIZ_AFTER_STAGE = True
 RUN_PLOTTER_AFTER_STAGE = True
-RUN_CODEBOOK_DEBUG = True
+RUN_CODEBOOK_DEBUG_AFTER_STAGE = True
+
+RUN_FULL_EVAL_PREVIOUS_SKIPPED_STAGE = True
 
 # Stage-0 spatial map checkpoint. If this file exists, it will be loaded before
 # stages 1/2/3. If RUN_STAGES contains 0.5, it will be overwritten/trained first.
@@ -92,7 +93,7 @@ VIZ_ROOTS = {
 }
 
 # Data
-patch_size = (16, 16, 16)
+patch_size = (4, 16, 16)
 temporal_crop = 6000
 temporal_pool = 120
 batch_size = 8
@@ -110,9 +111,10 @@ num_assays_for_emb = 1000
 dim_assay_for_emb = 64
 max_viz_samples = 1000
 
-# Physiology / losses
-Fs = 20000
-refractory_ms = 5.0
+# ISI adjacency firing constraint
+max_gap = 3
+
+# Tolerance for spike location in a voxel (for training loss and val metrics)
 recon_tolerance = (2, 2, 2)
 metric_tolerance = (0, 1, 1)
 
@@ -446,7 +448,7 @@ def common_fit_kwargs(model):
         recon_tolerance=recon_tolerance,
         metric_tolerance=metric_tolerance,
 
-        isi_max_gap=3,
+        isi_max_gap=max_gap,
         isi_tau=0.25,
         isi_margin=0.25,
         lambda_isi=1e-4,
@@ -456,7 +458,7 @@ def common_fit_kwargs(model):
         memory_adj=getattr(model, "memory_adj", None),
         memory_adj_conf_den_scale=100.0,
 
-        level2_start_epoch=10,
+        level2_start_epoch=1,
         level2_full_loss_epoch=20,
         lambda_sp_token=1e-3,
         lambda_sp_pixel=1e-4,
@@ -674,9 +676,11 @@ def make_viz_loader(test_loader):
 def evaluate_and_visualize(model, test_loader, stage: int, assay_indices, assay_codebook):
     if stage not in (1, 2):
         return
-
-    ckpt_key = "stage1_best" if stage == 1 else "stage2_best"
-    ckpt = CKPTS[ckpt_key]
+    
+    if stage == 1:
+        ckpt = CKPTS["stage1_best"] if CKPTS["stage1_best"].exists() else CKPTS["stage1_last"]
+    elif stage == 2:
+        ckpt = CKPTS["stage2_best"] if CKPTS["stage2_best"].exists() else CKPTS["stage2_last"]
     if not ckpt.exists():
         print(f"Skipping eval/viz; checkpoint missing: {ckpt}")
         return
@@ -685,7 +689,7 @@ def evaluate_and_visualize(model, test_loader, stage: int, assay_indices, assay_
     model.load_checkpoint(str(ckpt), map_location=device)
 
     if RUN_EVAL_AFTER_STAGE:
-        print(f"Evaluating VQVAE stage {stage}...")
+        print(f"Evaluating VQVAE stage {stage} using {ckpt} ...")
         test_metrics = evaluate_vqvae(
             model,
             test_loader,
@@ -809,7 +813,7 @@ def main():
 
     isi_target_gap_rates = compute_short_gap_target_rates_from_loader(
         train_loader,
-        max_gap=3,
+        max_gap=max_gap,
         max_batches=None,
     )
 
@@ -859,9 +863,20 @@ def main():
                 assay_indices=assay_indices,
                 assay_codebook=test_loader.dataset.dataset.assay_codebook,
             )
-            if RUN_CODEBOOK_DEBUG:
+            if RUN_CODEBOOK_DEBUG_AFTER_STAGE:
                 debug_vq_codebooks(model)
         elif stage == 2:
+            if 1 not in RUN_STAGES and RUN_FULL_EVAL_PREVIOUS_SKIPPED_STAGE:
+                print("Skipped stage 1. Loading available checkpoint and running evaluation...")
+                evaluate_and_visualize(
+                    model,
+                    test_loader,
+                    stage=1,
+                    assay_indices=assay_indices,
+                    assay_codebook=test_loader.dataset.dataset.assay_codebook,
+                )
+                debug_vq_codebooks(model)
+        
             run_stage2(model, train_loader, val_loader)
             evaluate_and_visualize(
                 model,
@@ -870,9 +885,20 @@ def main():
                 assay_indices=assay_indices,
                 assay_codebook=test_loader.dataset.dataset.assay_codebook,
             )
-            if RUN_CODEBOOK_DEBUG:
+            if RUN_CODEBOOK_DEBUG_AFTER_STAGE:
                 debug_vq_codebooks(model)
         elif stage == 3:
+            if 2 not in RUN_STAGES and RUN_FULL_EVAL_PREVIOUS_SKIPPED_STAGE:
+                print("Skipped stage 2. Loading available checkpoint and running evaluation...")
+                evaluate_and_visualize(
+                    model,
+                    test_loader,
+                    stage=2,
+                    assay_indices=assay_indices,
+                    assay_codebook=test_loader.dataset.dataset.assay_codebook,
+                )
+                debug_vq_codebooks(model)
+                
             run_stage3_prior(model, train_loader, val_loader, device)
         else:
             raise ValueError(f"Unsupported RUN_STAGE={stage}")

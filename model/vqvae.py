@@ -201,7 +201,7 @@ class TransformerVQVAE(nn.Module):
             token_dim=decoder_embed_dim,
             out_chans=out_chans,
             patch_size=patch_size,
-            refine_layers=1,      # start with 0 first
+            refine_layers=0,      # start with 0 first
             refine_hidden=32,
         )
         
@@ -479,10 +479,19 @@ class TransformerVQVAE(nn.Module):
     ):
         _, pos_dec = self._get_pos_embed(grid, z_q.device, z_q.dtype)
     
-        z_core = self.code_to_dec(z_q)
-        z_d = z_core + pos_dec
-        z_d = self._add_decoder_token_type(z_d, active_mask=active_mask)
-    
+        # Position-free typed latent:
+        # blank  = code_to_dec(blank_token) + blank_type_embed
+        # active = code_to_dec(sum_active_codebook_entries) + active_type_embed
+        z_typed_no_pos = self.code_to_dec(z_q)
+        z_typed_no_pos = self._add_decoder_token_type(
+            z_typed_no_pos,
+            active_mask=active_mask,
+        )
+        
+        # Actual pre-transformer decoder input still receives positional embedding
+        z_decoder_input = z_typed_no_pos + pos_dec
+        z_d = z_decoder_input
+        
         ctx_tokens, ctx_key_padding_mask = self._prepare_ctx_tokens(
             local_ctx=local_ctx,
             global_ctx=global_ctx,
@@ -517,8 +526,8 @@ class TransformerVQVAE(nn.Module):
         return {
             "z_q": z_q,
             "active_mask": active_mask,
-            "z_core_dec": z_core,
-            "z_dec_typed": z_d,
+            "z_typed_no_pos": z_typed_no_pos,
+            "z_decoder_input": z_decoder_input,
             "logits_vol": logits_vol,
             "logits_vol_raw": logits_vol_raw,
             "pred_patches": pred_patches,
@@ -822,9 +831,14 @@ class TransformerVQVAE(nn.Module):
         pad_hw=None,
     ):
         B, C, T, H, W = x.shape
-            
-        x = self.stem(x)
-        tokens, grid, blank_mask, active_mask = self.patch_embed(x)  # (B,N,D_enc), grid=(t_tok,h_tok,w_tok)
+        
+        x_orig = x
+        x_stem = self.stem(x_orig)
+        
+        tokens, grid, _, _ = self.patch_embed(x_stem)
+        
+        blank_mask = self.compute_blank_mask(x_orig, grid)
+        active_mask = ~blank_mask
         
         if tuple(grid) != tuple(self.token_grid):
             raise ValueError(
@@ -910,8 +924,9 @@ class TransformerVQVAE(nn.Module):
         pred_patches = final_dec["pred_patches"]
         logits_vol = final_dec["logits_vol"]
         spatial_diag = final_dec["spatial_diag"]
-        z_core_dec = final_dec["z_core_dec"]
-        z_dec_typed = final_dec["z_dec_typed"]
+        
+        z_typed_no_pos = final_dec["z_typed_no_pos"]
+        z_decoder_input = final_dec["z_decoder_input"]
         
         # ----- Token-level supervision mask -----
         N = t_tok * h_tok * w_tok
@@ -954,8 +969,8 @@ class TransformerVQVAE(nn.Module):
             "x_enc_full": x_enc_full,
             "active_mask": active_mask,
             
-            "z_core_dec": z_core_dec,
-            "z_dec_typed": z_dec_typed,
+            "z_typed_no_pos": z_typed_no_pos,
+            "z_decoder_input": z_decoder_input,
         
             "refinements": refinements,
         }

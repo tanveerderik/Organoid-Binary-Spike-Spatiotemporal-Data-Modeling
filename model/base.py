@@ -65,7 +65,7 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
 
         active_quantizers: Optional[int] = None,
 
-        sep_cos_thresh: float = 0.95,
+        sep_cos_thresh: float = 0.8,
         sep_margin_weight_l0: float = 5e-2,
         sep_margin_weight_later: float = 5e-3,
 
@@ -328,7 +328,7 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
         offdiag = sim[~eye]
     
         # only punish positive near-duplicates
-        return F.relu(offdiag - cos_thresh).pow(2).mean()
+        return F.relu(offdiag.abs() - cos_thresh).pow(2).mean()
     
     @torch.no_grad()
     def _maybe_restart_dead_codes(

@@ -12,7 +12,6 @@ import torch
 import imageio.v2 as iio
 import json
 from matplotlib import cm
-
 from ..utils.recon import compute_activity_ctx
 from ..utils.metrics import f1_from_bool
 
@@ -300,10 +299,6 @@ def make_model_videos_vqvae(
       - results.json
       - arrays.npz
     """
-    import os
-    import json
-    import numpy as np
-    import torch
 
     model.eval()
     device = next(model.parameters()).device
@@ -358,8 +353,48 @@ def make_model_videos_vqvae(
             pad_hw=batch.get("pad_hw", None),
         )
         grid = out["grid"]
-        logits = model.unpatchify(out["pred_patches"], grid)
+        
+        with torch.no_grad():
+            blank_mask = out["blank_mask"].detach().bool()
+            thr_debug = float(thr)
+        
+            raw_blank_logits = out["pred_patches_raw"][blank_mask]
+            final_blank_logits = out["pred_patches"][blank_mask]
+        
+            raw_blank_prob = torch.sigmoid(raw_blank_logits)
+            final_blank_prob = torch.sigmoid(final_blank_logits)
+        
+            print("\n[BLANK DEBUG]")
+            print("thr =", thr_debug)
+            print("blank patch frac =", blank_mask.float().mean().item())
+        
+            print("RAW blank max logit =", raw_blank_logits.max().item())
+            print("RAW blank max prob  =", raw_blank_prob.max().item())
+            print("RAW blank voxels > thr =", (raw_blank_prob > thr_debug).sum().item())
+            print("RAW blank patches any > thr =",
+                  (raw_blank_prob.amax(dim=-1) > thr_debug).sum().item(),
+                  "/", raw_blank_prob.shape[0])
+        
+            print("FINAL blank max logit =", final_blank_logits.max().item())
+            print("FINAL blank max prob  =", final_blank_prob.max().item())
+            print("FINAL blank voxels > thr =", (final_blank_prob > thr_debug).sum().item())
+            print("FINAL blank patches any > thr =",
+                  (final_blank_prob.amax(dim=-1) > thr_debug).sum().item(),
+                  "/", final_blank_prob.shape[0])
+        
+            patch_score = 0.25 * torch.logsumexp(raw_blank_logits / 0.25, dim=1)
+            print("RAW patch_score max =", patch_score.max().item())
+            print("RAW patch_score > -6 =", (patch_score > -6.0).sum().item())
+        
+        
+        logits = out["logits_vol"]
         prob = torch.sigmoid(logits)
+        
+        logits_from_patches = model.unpatchify(out["pred_patches"], grid)
+        logits_direct = out["logits_vol"]
+        
+        print("unpatchify mismatch:",
+              (logits_from_patches - logits_direct).abs().max().item())
 
         # This should already be in HW token-space or token-space 2D map from your model output
         sp_bias_hw = out.get("assay_spatial_pix2d_support", None)
@@ -380,6 +415,16 @@ def make_model_videos_vqvae(
         prob_u8 = (np.clip(recon_prob, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
         bin_u8 = (recon_prob >= thr).astype(np.uint8) * 255
         pred_bin_bool = (recon_prob >= thr)
+        
+        # voxel-space blank patch mask: 1 where the full 16x16x16 target patch is blank
+        blank_patch_u8 = out["blank_mask"].float().unsqueeze(-1).expand_as(out["pred_patches"])
+        blank_vox = model.unpatchify(blank_patch_u8, grid)  # (B,1,T,H,W)
+        
+        blank_vol = blank_vox[0, 0].float().cpu().numpy().transpose(1, 2, 0)
+        blank_vol = temporal_maxpool_np(blank_vol, pool_t)
+        
+        blank_u8 = (blank_vol > 0.5).astype(np.uint8) * 255
+        
 
         global_ctx = None
         local_ctx_list = None
@@ -402,10 +447,12 @@ def make_model_videos_vqvae(
         grid_path = os.path.join(out_dir, "grid_1x3.mp4")
         heatmap_path = os.path.join(out_dir, "heatmap_prob.mp4")
         overlay_path = os.path.join(out_dir, "heatmap_prob+pred.mp4")
+        blank_mask_path = os.path.join(out_dir, "blank_patch_mask.mp4")
 
         save_volume_as_mp4_imageio(ref_u8, ref_path, fps=fps)
         save_volume_as_mp4_imageio(prob_u8, prob_path, fps=fps)
         save_volume_as_mp4_imageio(bin_u8, bin_path, fps=fps)
+        save_volume_as_mp4_imageio(blank_u8, blank_mask_path, fps=fps)
 
         grid_1x3_u8 = make_three_panel_from_two(ref_u8, bin_u8)
         save_volume_as_mp4_imageio(grid_1x3_u8, grid_path, fps=fps)

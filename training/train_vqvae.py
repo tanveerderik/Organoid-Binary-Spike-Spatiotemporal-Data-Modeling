@@ -70,8 +70,8 @@ def fit_vqvae(
     refinement_use_raw_logits: bool = True,
     
     # ---- hierarchical VQ schedule ----
-    level2_start_epoch: int = 20,
-    level2_full_loss_epoch: int = 40,
+    level2_start_epoch: int = 1,
+    level2_full_loss_epoch: int = 20,
     
     # ---- CFG FiLM conditioning dropout schedule (per-sample) ----
     cfg_ctx_drop_start: float = 0.0,     # start p(drop conditioning)
@@ -621,19 +621,19 @@ def fit_vqvae(
                 active_mask_sep = out["active_mask"].detach()
                 
                 if active_mask_sep.any():
-                    z_active_dec = out["z_dec_typed"][active_mask_sep].detach()
+                    z_active_dec = out["z_typed_no_pos"][active_mask_sep].detach()
                 
                     blank_type = model.token_type_embed.weight[0:1].to(
-                        device=out["z_dec_typed"].device,
-                        dtype=out["z_dec_typed"].dtype,
+                        device=out["z_typed_no_pos"].device,
+                        dtype=out["z_typed_no_pos"].dtype,
                     )
                 
                     z_blank_core = model.code_to_dec(
                         model.vq.blank_token.to(
-                            device=out["z_dec_typed"].device,
-                            dtype=out["z_dec_typed"].dtype,
+                            device=out["z_typed_no_pos"].device,
+                            dtype=out["z_typed_no_pos"].dtype,
                         ).view(1, -1)
-                    ).detach()
+                    )
                 
                     z_blank_dec = z_blank_core + model.token_type_scale * blank_type
                 
@@ -750,7 +750,7 @@ def fit_vqvae(
                 + lambda_enc_var * loss_enc_var
                 + lambda_ctx_eff * loss_ctx
                 + loss_sp_cons
-                + lambda_blank_eff * loss_blank + + lambda_blank_sep_eff * loss_blank_sep
+                + lambda_blank_eff * loss_blank + lambda_blank_sep_eff * loss_blank_sep
             )
             
             scaler.scale(loss / grad_accum_steps).backward()
