@@ -354,47 +354,47 @@ def make_model_videos_vqvae(
         )
         grid = out["grid"]
         
-        with torch.no_grad():
-            blank_mask = out["blank_mask"].detach().bool()
-            thr_debug = float(thr)
+        # with torch.no_grad():
+        #     blank_mask = out["blank_mask"].detach().bool()
+        #     thr_debug = float(thr)
         
-            raw_blank_logits = out["pred_patches_raw"][blank_mask]
-            final_blank_logits = out["pred_patches"][blank_mask]
+        #     raw_blank_logits = out["pred_patches_raw"][blank_mask]
+        #     final_blank_logits = out["pred_patches"][blank_mask]
         
-            raw_blank_prob = torch.sigmoid(raw_blank_logits)
-            final_blank_prob = torch.sigmoid(final_blank_logits)
+        #     raw_blank_prob = torch.sigmoid(raw_blank_logits)
+        #     final_blank_prob = torch.sigmoid(final_blank_logits)
         
-            print("\n[BLANK DEBUG]")
-            print("thr =", thr_debug)
-            print("blank patch frac =", blank_mask.float().mean().item())
+        #     print("\n[BLANK DEBUG]")
+        #     print("thr =", thr_debug)
+        #     print("blank patch frac =", blank_mask.float().mean().item())
         
-            print("RAW blank max logit =", raw_blank_logits.max().item())
-            print("RAW blank max prob  =", raw_blank_prob.max().item())
-            print("RAW blank voxels > thr =", (raw_blank_prob > thr_debug).sum().item())
-            print("RAW blank patches any > thr =",
-                  (raw_blank_prob.amax(dim=-1) > thr_debug).sum().item(),
-                  "/", raw_blank_prob.shape[0])
+        #     print("RAW blank max logit =", raw_blank_logits.max().item())
+        #     print("RAW blank max prob  =", raw_blank_prob.max().item())
+        #     print("RAW blank voxels > thr =", (raw_blank_prob > thr_debug).sum().item())
+        #     print("RAW blank patches any > thr =",
+        #           (raw_blank_prob.amax(dim=-1) > thr_debug).sum().item(),
+        #           "/", raw_blank_prob.shape[0])
         
-            print("FINAL blank max logit =", final_blank_logits.max().item())
-            print("FINAL blank max prob  =", final_blank_prob.max().item())
-            print("FINAL blank voxels > thr =", (final_blank_prob > thr_debug).sum().item())
-            print("FINAL blank patches any > thr =",
-                  (final_blank_prob.amax(dim=-1) > thr_debug).sum().item(),
-                  "/", final_blank_prob.shape[0])
+        #     print("FINAL blank max logit =", final_blank_logits.max().item())
+        #     print("FINAL blank max prob  =", final_blank_prob.max().item())
+        #     print("FINAL blank voxels > thr =", (final_blank_prob > thr_debug).sum().item())
+        #     print("FINAL blank patches any > thr =",
+        #           (final_blank_prob.amax(dim=-1) > thr_debug).sum().item(),
+        #           "/", final_blank_prob.shape[0])
         
-            patch_score = 0.25 * torch.logsumexp(raw_blank_logits / 0.25, dim=1)
-            print("RAW patch_score max =", patch_score.max().item())
-            print("RAW patch_score > -6 =", (patch_score > -6.0).sum().item())
+        #     patch_score = 0.25 * torch.logsumexp(raw_blank_logits / 0.25, dim=1)
+        #     print("RAW patch_score max =", patch_score.max().item())
+        #     print("RAW patch_score > -6 =", (patch_score > -6.0).sum().item())
         
         
         logits = out["logits_vol"]
         prob = torch.sigmoid(logits)
         
-        logits_from_patches = model.unpatchify(out["pred_patches"], grid)
-        logits_direct = out["logits_vol"]
+        # logits_from_patches = model.unpatchify(out["pred_patches"], grid)
+        # logits_direct = out["logits_vol"]
         
-        print("unpatchify mismatch:",
-              (logits_from_patches - logits_direct).abs().max().item())
+        # print("unpatchify mismatch:",
+        #       (logits_from_patches - logits_direct).abs().max().item())
 
         # This should already be in HW token-space or token-space 2D map from your model output
         sp_bias_hw = out.get("assay_spatial_pix2d_support", None)
@@ -423,7 +423,7 @@ def make_model_videos_vqvae(
         blank_vol = blank_vox[0, 0].float().cpu().numpy().transpose(1, 2, 0)
         blank_vol = temporal_maxpool_np(blank_vol, pool_t)
         
-        blank_u8 = (blank_vol > 0.5).astype(np.uint8) * 255
+        active_u8 = (blank_vol < 0.5).astype(np.uint8) * 255
         
 
         global_ctx = None
@@ -447,12 +447,12 @@ def make_model_videos_vqvae(
         grid_path = os.path.join(out_dir, "grid_1x3.mp4")
         heatmap_path = os.path.join(out_dir, "heatmap_prob.mp4")
         overlay_path = os.path.join(out_dir, "heatmap_prob+pred.mp4")
-        blank_mask_path = os.path.join(out_dir, "blank_patch_mask.mp4")
+        active_mask_path = os.path.join(out_dir, "active_patch_mask.mp4")
 
         save_volume_as_mp4_imageio(ref_u8, ref_path, fps=fps)
         save_volume_as_mp4_imageio(prob_u8, prob_path, fps=fps)
         save_volume_as_mp4_imageio(bin_u8, bin_path, fps=fps)
-        save_volume_as_mp4_imageio(blank_u8, blank_mask_path, fps=fps)
+        save_volume_as_mp4_imageio(active_u8, active_mask_path, fps=fps)
 
         grid_1x3_u8 = make_three_panel_from_two(ref_u8, bin_u8)
         save_volume_as_mp4_imageio(grid_1x3_u8, grid_path, fps=fps)

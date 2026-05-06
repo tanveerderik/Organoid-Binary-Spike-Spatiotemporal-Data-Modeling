@@ -57,7 +57,7 @@ from .visualization.reports_data import export_base_finetune_flat_xlsx
 #   (2,)       -> load stage-1 ckpt, train context-conditioned decoder only
 #   (1, 2, 3)  -> run the whole pipeline sequentially
 #   (0,)     -> run spatial-map pretraining only
-RUN_STAGES = (0,1,2,)  # allowed: 0, 1, 2, 3
+RUN_STAGES = (0,1,2)  # allowed: 0, 1, 2, 3
 
 RUN_EVAL_AFTER_STAGE = True
 RUN_VIZ_AFTER_STAGE = True
@@ -93,12 +93,13 @@ VIZ_ROOTS = {
 }
 
 # Data
-patch_size = (4, 16, 16)
+patch_size = (4, 8, 8)
 temporal_crop = 6000
 temporal_pool = 120
-batch_size = 8
+batch_size = 1
+grad_accum_steps = 32
 num_workers = 2
-per_assay_quota_stage12 = 10
+per_assay_quota_stage12 = 30
 
 cache_dir = "../_cache_spike_thw_run1"
 cache_mode = "uint8"
@@ -237,8 +238,8 @@ def make_vqvae(img_size, device: str, *, full_spatial_size=None, use_decoder_cro
         full_spatial_size=full_spatial_size,
         patch_size=patch_size,
 
-        encoder_embed_dim=128,
-        encoder_depth=4,
+        encoder_embed_dim=64,
+        encoder_depth=2,
         encoder_num_heads=4,
         code_dim=64,
         num_codes=num_codes,
@@ -435,6 +436,7 @@ def run_stage0_spatial_pretrain(model, train_loader, device):
         memory_mode="max",
         lambda_sep=1e-4,
         early_stop_patience=20,
+        adj_max_gap=max_gap,
     )
 
     set_all_trainable(model, True)
@@ -444,7 +446,7 @@ def run_stage0_spatial_pretrain(model, train_loader, device):
 def common_fit_kwargs(model):
     return dict(
         use_amp=True,
-        grad_accum_steps=4,
+        grad_accum_steps=grad_accum_steps,
         recon_tolerance=recon_tolerance,
         metric_tolerance=metric_tolerance,
 
@@ -496,14 +498,14 @@ def run_stage1(model, train_loader, val_loader, baseline_prob, logit_baseline):
         # This lets ctx losses shape encoder/codebook/decoder motifs,
         # without allowing cross-attention shortcuts.
         lambda_ctx=1e-1,
-        ctx_start_epoch=15,
-        ctx_warmup_epochs=25,
+        ctx_start_epoch=10,
+        ctx_warmup_epochs=10,
         ctx_epoch_schedule={
-            0: 15,
-            1: 60,
-            2: 60,
-            3: 90,
-            4: 120,
+            0: 10,
+            1: 30,
+            2: 30,
+            3: 20,
+            4: 50,
         },
         
         # CFG context dropout is irrelevant in Stage 1 because cross-attn is OFF.
@@ -520,7 +522,7 @@ def run_stage1(model, train_loader, val_loader, baseline_prob, logit_baseline):
         use_logit_bias_schedule=False,
         logit_bias_start=logit_baseline,
         logit_bias_end=-0.01,
-        logit_bias_decay_epochs=10,
+        logit_bias_decay_epochs=5,
         save_start_epoch = 125,
         **common_fit_kwargs(model),
     )
