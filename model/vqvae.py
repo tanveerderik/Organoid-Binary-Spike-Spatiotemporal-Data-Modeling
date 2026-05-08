@@ -598,7 +598,6 @@ class TransformerVQVAE(nn.Module):
         
         if return_all_refinements:
             final_dec["refinements"] = refinements + [final_dec]
-        final_dec["grid"] = grid
     
         return final_dec
         

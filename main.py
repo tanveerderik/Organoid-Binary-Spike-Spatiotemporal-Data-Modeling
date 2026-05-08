@@ -776,48 +776,147 @@ def evaluate_and_visualize(model, test_loader, stage: int, assay_indices, assay_
             )
 
 
+
+
 @torch.no_grad()
-def debug_vq_codebooks(model, near_zero_thresh=1e-6, duplicate_cos_thresh=0.995, print_topk_pairs=10, blank_topk=10):
+def debug_vq_codebooks(
+    model,
+    near_zero_thresh=1e-6,
+    duplicate_cos_thresh=0.995,
+    print_topk_pairs=10,
+    blank_topk=10,
+    save_txt_path=None,
+    save_json_path=None,
+):
     if not hasattr(model, "vq"):
         print("No hierarchical VQ codebooks found.")
         return
 
-    print("=" * 80)
-    print("VQ CODEBOOK DEBUG")
-    print("=" * 80)
+    lines = []
+    out_json = {
+        "levels": [],
+    }
+
+    def log(msg):
+        print(msg)
+        lines.append(str(msg))
+
+    log("=" * 80)
+    log("VQ CODEBOOK DEBUG")
+    log("=" * 80)
 
     blank = model.vq.blank_token.detach().cpu().flatten()
-    print("\n[Blank token]")
-    print(f"norm: {blank.norm().item():.6g}")
+
+    log("\n[Blank token]")
+    log(f"norm: {blank.norm().item():.6g}")
+
+    out_json["blank"] = {
+        "norm": float(blank.norm().item()),
+    }
 
     for lvl in range(int(model.vq.num_quantizers)):
+
         if hasattr(model.vq, "get_effective_codebook_weight"):
             cb = model.vq.get_effective_codebook_weight(lvl).detach().cpu()
         else:
             cb = model.vq.embeds[lvl].weight.detach().cpu()
+
         K, D = cb.shape
+
         norms = cb.norm(dim=1)
         alive = norms >= near_zero_thresh
-        print(f"\n[Level {lvl}] shape=({K},{D}) alive={int(alive.sum())}/{K}")
-        print(f"norm min={norms.min().item():.6g} max={norms.max().item():.6g} mean={norms.mean().item():.6g}")
 
-        if int(alive.sum()) <= 1:
+        alive_count = int(alive.sum())
+
+        log(f"\n[Level {lvl}] shape=({K},{D}) alive={alive_count}/{K}")
+        log(
+            f"norm min={norms.min().item():.6g} "
+            f"max={norms.max().item():.6g} "
+            f"mean={norms.mean().item():.6g}"
+        )
+
+        level_json = {
+            "level": int(lvl),
+            "shape": [int(K), int(D)],
+            "alive": alive_count,
+            "dead": int(K - alive_count),
+            "norm_min": float(norms.min().item()),
+            "norm_max": float(norms.max().item()),
+            "norm_mean": float(norms.mean().item()),
+            "top_pairs": [],
+        }
+
+        if alive_count <= 1:
+            out_json["levels"].append(level_json)
             continue
 
         cb_alive = cb[alive]
         alive_idx = torch.nonzero(alive, as_tuple=False).squeeze(1)
-        sim = torch.nn.functional.normalize(cb_alive, dim=1) @ torch.nn.functional.normalize(cb_alive, dim=1).T
+
+        sim = (
+            torch.nn.functional.normalize(cb_alive, dim=1)
+            @ torch.nn.functional.normalize(cb_alive, dim=1).T
+        )
+
         eye = torch.eye(sim.size(0), dtype=torch.bool)
         off = sim[~eye]
-        print(f"cos alive min={off.min().item():+.4f} max={off.max().item():+.4f} mean={off.mean().item():+.4f}")
+
+        log(
+            f"cos alive min={off.min().item():+.4f} "
+            f"max={off.max().item():+.4f} "
+            f"mean={off.mean().item():+.4f}"
+        )
+
+        level_json["cos_min"] = float(off.min().item())
+        level_json["cos_max"] = float(off.max().item())
+        level_json["cos_mean"] = float(off.mean().item())
 
         pairs = []
+
         for i in range(sim.size(0)):
             for j in range(i + 1, sim.size(0)):
-                pairs.append((abs(sim[i, j].item()), sim[i, j].item(), int(alive_idx[i]), int(alive_idx[j])))
+                pairs.append((
+                    abs(sim[i, j].item()),
+                    sim[i, j].item(),
+                    int(alive_idx[i]),
+                    int(alive_idx[j]),
+                ))
+
         pairs.sort(reverse=True, key=lambda z: z[0])
-        for rank, (_, s, i, j) in enumerate(pairs[:print_topk_pairs], start=1):
-            print(f"  {rank:2d}. codes ({i},{j}) cos={s:+.6f}")
+
+        for rank, (_, s, i, j) in enumerate(
+            pairs[:print_topk_pairs],
+            start=1,
+        ):
+            log(f"  {rank:2d}. codes ({i},{j}) cos={s:+.6f}")
+
+            level_json["top_pairs"].append({
+                "rank": int(rank),
+                "code_i": int(i),
+                "code_j": int(j),
+                "cosine": float(s),
+                "duplicate_like": bool(abs(s) >= duplicate_cos_thresh),
+            })
+
+        out_json["levels"].append(level_json)
+
+    # ---------------- save txt ----------------
+
+    if save_txt_path is not None:
+        save_txt_path = Path(save_txt_path)
+        save_txt_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(save_txt_path, "w") as f:
+            f.write("\n".join(lines))
+
+    # ---------------- save json ----------------
+
+    if save_json_path is not None:
+        save_json_path = Path(save_json_path)
+        save_json_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(save_json_path, "w") as f:
+            json.dump(out_json, f, indent=2)
 
 
 # =============================================================================
@@ -946,7 +1045,17 @@ def main():
             )
     
             if RUN_CODEBOOK_DEBUG:
-                debug_vq_codebooks(model)
+                if stage == 1:
+                    save_txt_path="../viz_out_vqvae/vqvae_stage1/codebook_debug.txt"
+                    save_json_path="../viz_out_vqvae/vqvae_stage1/codebook_debug.json"
+                elif stage == 2:
+                    save_txt_path="../viz_out_vqvae/vqvae_stage2/codebook_debug.txt"
+                    save_json_path="../viz_out_vqvae/vqvae_stage2/codebook_debug.json"
+                debug_vq_codebooks(
+                    model,
+                    save_txt_path=save_txt_path,
+                    save_json_path=save_json_path,
+                )
     
         else:
             raise ValueError(f"Unsupported EVAL_STAGE={stage}")
