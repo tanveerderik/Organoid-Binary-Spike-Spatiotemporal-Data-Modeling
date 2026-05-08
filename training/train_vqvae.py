@@ -230,6 +230,10 @@ def fit_vqvae(
             "blank_frac": 0.0,
             "num_nonblank": 0.0,
             "residual_norm": 0.0,
+            "commit_loss": 0.0,
+            "usage_loss": 0.0,
+            "loss_cb_norm": 0.0,
+            "loss_sep": 0.0,
         }
         
         sum_pred_mean_p = 0.0
@@ -307,6 +311,10 @@ def fit_vqvae(
                     vq_metric_sums["blank_frac"] += float(vq_aux.get("blank_frac", 0.0))
                     vq_metric_sums["num_nonblank"] += float(vq_aux.get("num_nonblank", 0.0))
                     vq_metric_sums["residual_norm"] += float(vq_aux.get("residual_norm", 0.0))
+                    vq_metric_sums["commit_loss"] += float(vq_aux.get("commit_loss", 0.0))
+                    vq_metric_sums["usage_loss"] += float(vq_aux.get("usage_loss", 0.0))
+                    vq_metric_sums["loss_cb_norm"] += float(vq_aux.get("loss_cb_norm", 0.0))
+                    vq_metric_sums["loss_sep"] += float(vq_aux.get("loss_sep", 0.0))
                 
                 levels_aux = vq_aux.get("levels", []) if vq_aux else []
                 for lvl, lvl_aux in enumerate(levels_aux):
@@ -811,6 +819,10 @@ def fit_vqvae(
             # vq information
             "avg_vq_blank_frac": vq_metric_sums["blank_frac"] / max(1, num_batches),
             "avg_vq_residual_norm": vq_metric_sums["residual_norm"] / max(1, num_batches),
+            "avg_vq_commit": vq_metric_sums["commit_loss"] / max(1, num_batches),
+            "avg_vq_usage": vq_metric_sums["usage_loss"] / max(1, num_batches),
+            "avg_vq_cb_norm": vq_metric_sums["loss_cb_norm"] / max(1, num_batches),
+            "avg_vq_sep": vq_metric_sums["loss_sep"] / max(1, num_batches),
 
             # schedules
             "pos_weight_eff": float(pos_weight_eff),
@@ -912,7 +924,11 @@ def fit_vqvae(
             f"\n\n"
             
             f"avg_vq_blank_frac={train_log.get('avg_vq_blank_frac', 0):.3f} "
-            f"avg_vq_resid={train_log.get('avg_vq_residual_norm', 0):.5f}\n"
+            f"avg_vq_resid={train_log.get('avg_vq_residual_norm', 0):.5f} "
+            f"vq_commit={train_log.get('avg_vq_commit', 0):.5f} "
+            f"vq_usage={train_log.get('avg_vq_usage', 0):.5f} "
+            f"vq_cb_norm={train_log.get('avg_vq_cb_norm', 0):.5f} "
+            f"vq_sep={train_log.get('avg_vq_sep', 0):.5f}\n"
             f"\n"
             
             f"vq_l1_ppl={train_log.get('perplexity_nonblank_l1', 0):.2f} "

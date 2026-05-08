@@ -213,6 +213,7 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
         residual_norm: torch.Tensor,
         level_norms: list[torch.Tensor],
         loss_cb_norm: torch.Tensor,
+        loss_sep: torch.Tensor,
     ):
         """
         active_codes_levels: (M, L) long.
@@ -240,12 +241,14 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
             "residual_norm": float(residual_norm.detach().item()),
             "level_norms": [float(n.detach().item()) for n in level_norms],
             "loss_cb_norm": float(loss_cb_norm.detach().item()),
+            "loss_sep": float(loss_sep.detach().item()),
             "levels": [],
         }
     
         if active_codes_levels.numel() == 0:
             aux["level_norms"] = [0.0 for _ in range(L_total)]
             aux["loss_cb_norm"] = 0.0
+            aux["loss_sep"] = 0.0
             for lvl in range(L_total):
                 aux["levels"].append({
                     "perplexity_nonblank": 1.0,
@@ -580,6 +583,8 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
                     "commit_loss": 0.0,
                     "usage_loss": 0.0,
                     "residual_norm": 0.0,
+                    "loss_cb_norm": 0.0,
+                    "loss_sep": 0.0,
                     "levels": [
                         {
                             "perplexity_nonblank": 1.0,
@@ -789,6 +794,7 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
                 residual_norm=residual_norm,
                 level_norms=level_norms,
                 loss_cb_norm=loss_cb_norm,
+                loss_sep=loss_sep,
             )
 
         if return_logits:
