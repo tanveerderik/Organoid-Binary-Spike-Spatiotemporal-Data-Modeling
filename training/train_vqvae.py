@@ -315,7 +315,6 @@ def fit_vqvae(
                     metric_keys = [
                         f"perplexity_nonblank_l{lvl_id}",
                         f"active_codes_nonblank_l{lvl_id}",
-                        f"path_active_codes_nonblank_l{lvl_id}",
                         f"child_per_active_parent_l{lvl_id}",
                     ]
 
@@ -325,7 +324,6 @@ def fit_vqvae(
 
                     vq_metric_sums[f"perplexity_nonblank_l{lvl_id}"] += float(lvl_aux.get("perplexity_nonblank", 0.0))
                     vq_metric_sums[f"active_codes_nonblank_l{lvl_id}"] += float(lvl_aux.get("active_codes_nonblank", 0.0))
-                    vq_metric_sums[f"path_active_codes_nonblank_l{lvl_id}"] += float(lvl_aux.get("path_active_codes_nonblank", 0.0))
                     vq_metric_sums[f"child_per_active_parent_l{lvl_id}"] += float(lvl_aux.get("child_per_active_parent", 0.0))
                                     
                                 
@@ -834,11 +832,16 @@ def fit_vqvae(
             train_log[f"loss_recon_l{ridx}_tol"] = sums[f"loss_recon_l{ridx}_tol"] / max(1, num_batches)
             
         for lvl in range(1, max_ref_levels + 1):
-            train_log[f"perplexity_nonblank_l{lvl}"] = vq_metric_sums.get(f"perplexity_nonblank_l{lvl}", 0.0) / max(1, num_batches)
-            train_log[f"active_codes_nonblank_l{lvl}"] = vq_metric_sums.get(f"active_codes_nonblank_l{lvl}", 0.0) / max(1, num_batches)
-            train_log[f"path_active_codes_nonblank_l{lvl}"] = vq_metric_sums.get(f"path_active_codes_nonblank_l{lvl}", 0.0) / max(1, num_batches)
-            train_log[f"child_per_active_parent_l{lvl}"] = vq_metric_sums.get(f"child_per_active_parent_l{lvl}", 0.0) / max(1, num_batches)
-        
+            train_log[f"perplexity_nonblank_l{lvl}"] = (
+                vq_metric_sums.get(f"perplexity_nonblank_l{lvl}", 0.0) / max(1, num_batches)
+            )
+            train_log[f"active_codes_nonblank_l{lvl}"] = (
+                vq_metric_sums.get(f"active_codes_nonblank_l{lvl}", 0.0) / max(1, num_batches)
+            )
+            train_log[f"child_per_active_parent_l{lvl}"] = (
+                vq_metric_sums.get(f"child_per_active_parent_l{lvl}", 0.0) / max(1, num_batches)
+            )
+            
         cb_stats = get_vq_codebook_stats(model)
         train_log.update(cb_stats)
     
@@ -915,8 +918,7 @@ def fit_vqvae(
             f"vq_l1_ppl={train_log.get('perplexity_nonblank_l1', 0):.2f} "
             f"vq_l2_ppl={train_log.get('perplexity_nonblank_l2', 0):.2f} "
             f"vq_l1_act={train_log.get('active_codes_nonblank_l1', 0):.1f} "
-            f"vq_l2_child_act={train_log.get('active_codes_nonblank_l2', 0):.1f} "
-            f"vq_l2_pair_act={train_log.get('path_active_codes_nonblank_l2', 0):.1f} "
+            f"vq_l2_flat_act={train_log.get('active_codes_nonblank_l2', 0):.1f} "
             f"child/parent={train_log.get('child_per_active_parent_l2', 0):.2f}\n"
             f"\n"
 

@@ -582,11 +582,23 @@ class TransformerVQVAE(nn.Module):
             dec_i["level"] = lvl_idx
             refinements.append(dec_i)
     
-        final_dec = refinements[-1]
+        final_dec = self._decode_quantized_latent(
+            z_q=z_q_list[-1],
+            active_mask=active_mask_list[-1],
+            grid=grid,
+            global_ctx=global_ctx,
+            local_ctx=local_ctx,
+            cfg_ctx_drop_p=cfg_ctx_drop_p,
+            cfg_ctx_force_unc=cfg_ctx_force_unc,
+            roi_hw=roi_hw,
+            pad_hw=pad_hw,
+        )
+        final_dec["level"] = L_active
         final_dec["grid"] = grid
-    
+        
         if return_all_refinements:
-            final_dec["refinements"] = refinements
+            final_dec["refinements"] = refinements + [final_dec]
+        final_dec["grid"] = grid
     
         return final_dec
         

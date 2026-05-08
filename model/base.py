@@ -215,12 +215,18 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
         loss_cb_norm: torch.Tensor,
     ):
         """
-        active_codes_levels: (M, L) long, values in [0, K-1]
+        active_codes_levels: (M, L) long.
+    
+        Metrics are computed over the flattened effective table at each level:
+          lvl 0: k0
+          lvl 1: k0*K1 + k1
+          lvl 2: (k0*K1 + k1)*K2 + k2
+    
+        Therefore L2 perplexity/entropy/active codes measure actual used
+        flattened branches, not reused child IDs alone.
         """
-        Kmax = self.max_num_codes
         L_total = self.num_quantizers
-        
-
+    
         aux = {
             "num_nonblank": int(active_codes_levels.shape[0]),
             "num_blank": int(num_blank_tokens),
@@ -236,7 +242,7 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
             "loss_cb_norm": float(loss_cb_norm.detach().item()),
             "levels": [],
         }
-
+    
         if active_codes_levels.numel() == 0:
             aux["level_norms"] = [0.0 for _ in range(L_total)]
             aux["loss_cb_norm"] = 0.0
@@ -251,28 +257,54 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
                     "soft_usage_entropy": 0.0,
                     "soft_usage_perplexity": 1.0,
                     "soft_usage_loss": 0.0,
+                    "active_parents_nonblank": 0,
+                    "child_per_active_parent": 0.0,
                 })
             return aux
-
+    
         per_level_perplexity = []
         per_level_entropy = []
         per_level_active_codes = []
         per_level_active_frac = []
-        
+    
         L_active = active_codes_levels.shape[1]
-
+    
         for lvl in range(L_active):
-            codes_l = active_codes_levels[:, lvl]  # (M,)
-            K_l = self.num_codes_per_level[lvl]
-            counts = torch.bincount(codes_l, minlength=K_l).to(device=device, dtype=torch.float32)
+            n_entries = self.level_num_entries[lvl]
+    
+            flat_idx = self._prefix_flat_index(
+                active_codes_levels[:, :lvl + 1],
+                upto_level=lvl,
+            )
+    
+            counts = torch.bincount(
+                flat_idx,
+                minlength=n_entries,
+            ).to(device=device, dtype=torch.float32)
+    
             probs = counts / counts.sum().clamp_min(1.0)
-
             nz = probs > 0
+    
             entropy = -(probs[nz] * probs[nz].log()).sum()
             perplexity = entropy.exp()
             active_codes = int(nz.sum().item())
-            active_frac = float(active_codes / max(1, K_l))
-
+            active_frac = float(active_codes / max(1, n_entries))
+    
+            if lvl == 0:
+                active_parents = active_codes
+                child_per_parent = 1.0 if active_codes > 0 else 0.0
+            else:
+                parent_idx = self._prefix_flat_index(
+                    active_codes_levels[:, :lvl],
+                    upto_level=lvl - 1,
+                )
+                parent_counts = torch.bincount(
+                    parent_idx,
+                    minlength=self.level_num_entries[lvl - 1],
+                )
+                active_parents = int((parent_counts > 0).sum().item())
+                child_per_parent = float(active_codes / max(1, active_parents))
+    
             lvl_aux = {
                 "perplexity_nonblank": float(perplexity.item()),
                 "entropy_nonblank": float(entropy.item()),
@@ -280,66 +312,28 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
                 "active_frac_nonblank": active_frac,
                 "commit_loss": float(commit_losses[lvl].detach().item()),
                 "usage_loss": float((self.usage_loss_weight * usage_losses[lvl]).detach().item()),
+                "active_parents_nonblank": active_parents,
+                "child_per_active_parent": child_per_parent,
+    
                 **usage_aux_levels[lvl],
             }
+    
             aux["levels"].append(lvl_aux)
-            
-        # ---- hierarchical path / flattened-pair diagnostics ----
-        # For lvl=1 with K0=64, K1=16:
-        # path index = parent_l1 * 16 + child_l2, range [0, 1023]
-        if L_active >= 2:
-            for lvl in range(1, L_active):
-                K_child = self.num_codes_per_level[lvl]
-                n_entries = self.level_num_entries[lvl]
-        
-                path_idx = self._prefix_flat_index(
-                    active_codes_levels[:, :lvl + 1],
-                    upto_level=lvl,
-                )
-        
-                path_counts = torch.bincount(
-                    path_idx,
-                    minlength=n_entries,
-                ).to(device=device, dtype=torch.float32)
-        
-                path_probs = path_counts / path_counts.sum().clamp_min(1.0)
-                path_nz = path_probs > 0
-        
-                path_entropy = -(path_probs[path_nz] * path_probs[path_nz].log()).sum()
-                path_perplexity = path_entropy.exp()
-                path_active = int(path_nz.sum().item())
-        
-                parent_idx = self._prefix_flat_index(
-                    active_codes_levels[:, :lvl],
-                    upto_level=lvl - 1,
-                )
-        
-                parent_counts = torch.bincount(
-                    parent_idx,
-                    minlength=self.level_num_entries[lvl - 1],
-                )
-        
-                active_parents = int((parent_counts > 0).sum().item())
-                child_per_parent = float(path_active / max(1, active_parents))
-        
-                aux["levels"][lvl]["path_active_codes_nonblank"] = path_active
-                aux["levels"][lvl]["path_active_frac_nonblank"] = float(path_active / max(1, n_entries))
-                aux["levels"][lvl]["path_perplexity_nonblank"] = float(path_perplexity.item())
-                aux["levels"][lvl]["path_entropy_nonblank"] = float(path_entropy.item())
-                aux["levels"][lvl]["active_parents_nonblank"] = active_parents
-                aux["levels"][lvl]["child_per_active_parent"] = child_per_parent
-
+    
             per_level_perplexity.append(float(perplexity.item()))
             per_level_entropy.append(float(entropy.item()))
             per_level_active_codes.append(float(active_codes))
             per_level_active_frac.append(float(active_frac))
-
-        aux["perplexity_nonblank"] = float(sum(per_level_perplexity) / L_active)
-        aux["entropy_nonblank"] = float(sum(per_level_entropy) / L_active)
-        aux["active_codes_nonblank"] = float(sum(per_level_active_codes) / L_active)
-        aux["active_frac_nonblank"] = float(sum(per_level_active_frac) / L_active)
+    
+        aux["perplexity_nonblank"] = float(sum(per_level_perplexity) / max(1, L_active))
+        aux["entropy_nonblank"] = float(sum(per_level_entropy) / max(1, L_active))
+        aux["active_codes_nonblank"] = float(sum(per_level_active_codes) / max(1, L_active))
+        aux["active_frac_nonblank"] = float(sum(per_level_active_frac) / max(1, L_active))
         aux["commit_loss"] = float(torch.stack([c.detach() for c in commit_losses]).mean().item())
-        aux["usage_loss"] = float((self.usage_loss_weight * torch.stack([u.detach() for u in usage_losses]).mean()).item())
+        aux["usage_loss"] = float(
+            (self.usage_loss_weight * torch.stack([u.detach() for u in usage_losses]).mean()).item()
+        )
+    
         return aux
 
     def _soft_usage_loss_from_d2(self, d2: torch.Tensor, num_codes_this_level: int):
