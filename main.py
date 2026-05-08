@@ -59,7 +59,7 @@ from .visualization.reports_data import export_base_finetune_flat_xlsx
 #   (2,)       -> load stage-1 ckpt, train context-conditioned decoder only
 #   (1, 2, 3)  -> run the whole pipeline sequentially
 #   (0,)     -> run spatial-map pretraining only
-TRAIN_STAGES = ()        # 0,1,2,3
+TRAIN_STAGES = (1,2)        # 0,1,2,3
 EVAL_STAGES  = (0,1,2)   # 0 = pre-stage-1 spatial maps
 
 RUN_EVAL = True
@@ -109,7 +109,7 @@ cache_max_gb = 80
 cache_write_prob = 1.0
 
 # Model
-num_codes = [32, 128]
+num_codes = [64, 16]
 num_assays_for_emb = 1000
 dim_assay_for_emb = 64
 max_viz_samples = 1000
@@ -778,7 +778,7 @@ def evaluate_and_visualize(model, test_loader, stage: int, assay_indices, assay_
 
 @torch.no_grad()
 def debug_vq_codebooks(model, near_zero_thresh=1e-6, duplicate_cos_thresh=0.995, print_topk_pairs=10, blank_topk=10):
-    if not hasattr(model, "vq") or not hasattr(model.vq, "embeds"):
+    if not hasattr(model, "vq"):
         print("No hierarchical VQ codebooks found.")
         return
 
@@ -790,8 +790,11 @@ def debug_vq_codebooks(model, near_zero_thresh=1e-6, duplicate_cos_thresh=0.995,
     print("\n[Blank token]")
     print(f"norm: {blank.norm().item():.6g}")
 
-    for lvl, emb in enumerate(model.vq.embeds):
-        cb = emb.weight.detach().cpu()
+    for lvl in range(int(model.vq.num_quantizers)):
+        if hasattr(model.vq, "get_effective_codebook_weight"):
+            cb = model.vq.get_effective_codebook_weight(lvl).detach().cpu()
+        else:
+            cb = model.vq.embeds[lvl].weight.detach().cpu()
         K, D = cb.shape
         norms = cb.norm(dim=1)
         alive = norms >= near_zero_thresh

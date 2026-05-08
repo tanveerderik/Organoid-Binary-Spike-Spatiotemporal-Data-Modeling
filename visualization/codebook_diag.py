@@ -11,7 +11,8 @@ import glob
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
-from matplotlib.colors import BoundaryNorm
+from matplotlib.colors import ListedColormap, BoundaryNorm
+
 
 
 def load_latents(viz_root, max_blank=8000, max_active=8000):
@@ -59,7 +60,7 @@ def plot_blank_active_tsne_l1(viz_root, out_png, num_l1=32):
     zb, za, l1 = data
 
     X = np.concatenate([zb, za], axis=0)
-    is_active = np.array([0]*len(zb) + [1]*len(za))
+    is_active = np.array([0] * len(zb) + [1] * len(za))
 
     Z = TSNE(
         n_components=2,
@@ -72,33 +73,43 @@ def plot_blank_active_tsne_l1(viz_root, out_png, num_l1=32):
     Zb = Z[is_active == 0]
     Za = Z[is_active == 1]
 
-    # discrete colormap
-    cmap = plt.get_cmap("turbo", num_l1)
+    # Bright-only discrete colormap.
+    # Avoids the dark purple/black region of turbo.
+
+    base = plt.cm.turbo
+    bright_colors = base(np.linspace(0.18, 1.00, num_l1))
+    cmap = ListedColormap(bright_colors, name="bright_turbo")
+
     bounds = np.arange(-0.5, num_l1 + 0.5, 1)
     norm = BoundaryNorm(bounds, cmap.N)
 
     plt.figure(figsize=(6.2, 5.2))
 
-    # blank = black
+    # blank = light gray with black edge, not black fill
     plt.scatter(
         Zb[:, 0],
         Zb[:, 1],
-        s=5,
-        c="black",
-        alpha=0.25,
+        s=10,
+        facecolors="lightgray",
+        edgecolors="black",
+        linewidths=0.35,
+        alpha=0.75,
         label="blank",
+        zorder=1,
     )
 
-    # active colored by L1
+    # active = bright colors
     sc = plt.scatter(
         Za[:, 0],
         Za[:, 1],
-        s=8,
+        s=18,
         c=l1,
         cmap=cmap,
         norm=norm,
-        alpha=0.75,
+        alpha=0.95,
+        edgecolors="none",
         label="active",
+        zorder=2,
     )
 
     cbar = plt.colorbar(sc, ticks=np.arange(num_l1))

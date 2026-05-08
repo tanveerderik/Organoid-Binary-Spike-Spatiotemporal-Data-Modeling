@@ -227,71 +227,14 @@ def fit_vqvae(
             sums[f"loss_recon_l{ridx}_tol"] = 0.0
         
         vq_metric_sums = {
-            "perplexity_nonblank": 0.0,
-            "entropy_nonblank": 0.0,
-            "active_codes_nonblank": 0.0,
-            "active_frac_nonblank": 0.0,
             "blank_frac": 0.0,
             "num_nonblank": 0.0,
-            "commit_loss": 0.0,
             "residual_norm": 0.0,
         }
         
         sum_pred_mean_p = 0.0
         sum_tgt_mean    = 0.0
         num_batches = 0
-        
-        def _encode_code_logits_only(x_in: torch.Tensor, global_ctx=None, local_ctx=None):
-            """
-            Encoder + VQ only (no decoder).
-
-            Returns:
-              codes_hat: (B,N,L) long
-              code_logits_hat: (B,N,L,K) float
-              grid: (t_tok,h_tok,w_tok)
-
-            Important:
-              - no VQ EMA update in this path
-              - x_in is expected to be logits-like / continuous, not binary
-            """
-            x_stem = model.stem(x_in)
-            tokens, grid, blank_mask, active_mask = model.patch_embed(x_stem)
-            pos_enc, _ = model._get_pos_embed(grid, tokens.device, tokens.dtype)
-
-            x_enc_full, _, _, _ = model.sparse_encoder(
-                tokens=tokens,
-                active_mask=active_mask,
-                pos_embed=pos_enc,
-                fill_value=0.0,
-            )
-
-            z_e_full = model.to_code(x_enc_full)
-
-            B2, N2, D2 = z_e_full.shape
-            active_flat2 = active_mask.reshape(B2 * N2)
-            z_e_flat2 = z_e_full.reshape(B2 * N2, D2)
-            z_e_active2 = z_e_flat2[active_flat2]
-
-            was_train = model.vq.training
-            model.vq.eval()
-            try:
-                _, _, codes_flat_hat, code_logits_flat_hat, _ = model.vq.quantize_active_only(
-                    z_e_active=z_e_active2,
-                    active_flat=active_flat2,
-                    num_total_tokens=B2 * N2,
-                    return_logits=True,
-                    return_aux=True,
-                )
-            finally:
-                model.vq.train(was_train)
-
-            codes_hat = codes_flat_hat.view(B2, N2, model.vq.num_quantizers)
-            code_logits_hat = code_logits_flat_hat.view(
-                B2, N2, model.vq.num_quantizers, model.vq.max_num_codes
-            )
-
-            return codes_hat, code_logits_hat, grid
-        
 
         cfg_p = _cosine_ramp(
             epoch_idx=epoch,
@@ -361,31 +304,31 @@ def fit_vqvae(
                 vq_aux = out.get("vq_aux", {})
                 
                 if vq_aux:
-                    vq_metric_sums["perplexity_nonblank"] += float(vq_aux.get("perplexity_nonblank", 0.0))
-                    vq_metric_sums["entropy_nonblank"] += float(vq_aux.get("entropy_nonblank", 0.0))
-                    vq_metric_sums["active_codes_nonblank"] += float(vq_aux.get("active_codes_nonblank", 0.0))
-                    vq_metric_sums["active_frac_nonblank"] += float(vq_aux.get("active_frac_nonblank", 0.0))
                     vq_metric_sums["blank_frac"] += float(vq_aux.get("blank_frac", 0.0))
                     vq_metric_sums["num_nonblank"] += float(vq_aux.get("num_nonblank", 0.0))
-                    vq_metric_sums["commit_loss"] += float(vq_aux.get("commit_loss", 0.0))
+                    vq_metric_sums["residual_norm"] += float(vq_aux.get("residual_norm", 0.0))
                 
                 levels_aux = vq_aux.get("levels", []) if vq_aux else []
                 for lvl, lvl_aux in enumerate(levels_aux):
-                    key_ppl = f"perplexity_nonblank_l{lvl+1}"
-                    key_act = f"active_codes_nonblank_l{lvl+1}"
-                    key_commit = f"commit_loss_l{lvl+1}"
-                
-                    if key_ppl not in vq_metric_sums:
-                        vq_metric_sums[key_ppl] = 0.0
-                        vq_metric_sums[key_act] = 0.0
-                        vq_metric_sums[key_commit] = 0.0
-                
-                    vq_metric_sums[key_ppl] += float(lvl_aux.get("perplexity_nonblank", 0.0))
-                    vq_metric_sums[key_act] += float(lvl_aux.get("active_codes_nonblank", 0.0))
-                    vq_metric_sums[key_commit] += float(lvl_aux.get("commit_loss", 0.0))
-                vq_metric_sums["residual_norm"] += float(vq_aux.get("residual_norm", 0.0))
-                
-            
+                    lvl_id = lvl + 1
+
+                    metric_keys = [
+                        f"perplexity_nonblank_l{lvl_id}",
+                        f"active_codes_nonblank_l{lvl_id}",
+                        f"path_active_codes_nonblank_l{lvl_id}",
+                        f"child_per_active_parent_l{lvl_id}",
+                    ]
+
+                    for k in metric_keys:
+                        if k not in vq_metric_sums:
+                            vq_metric_sums[k] = 0.0
+
+                    vq_metric_sums[f"perplexity_nonblank_l{lvl_id}"] += float(lvl_aux.get("perplexity_nonblank", 0.0))
+                    vq_metric_sums[f"active_codes_nonblank_l{lvl_id}"] += float(lvl_aux.get("active_codes_nonblank", 0.0))
+                    vq_metric_sums[f"path_active_codes_nonblank_l{lvl_id}"] += float(lvl_aux.get("path_active_codes_nonblank", 0.0))
+                    vq_metric_sums[f"child_per_active_parent_l{lvl_id}"] += float(lvl_aux.get("child_per_active_parent", 0.0))
+                                    
+                                
 
                 _, _, Tp, Hp, Wp = logits_vol.shape
                 tgt_vol = x[:, :1, :Tp, :Hp, :Wp]
@@ -868,12 +811,7 @@ def fit_vqvae(
             "adj_conf_mean": sums["adj_conf_mean"] / max(1, num_batches),
                         
             # vq information
-            "avg_vq_perp_nb": vq_metric_sums["perplexity_nonblank"] / max(1, num_batches),
-            "avg_vq_ent_nb": vq_metric_sums["entropy_nonblank"] / max(1, num_batches),
-            "avg_vq_active_nb": vq_metric_sums["active_codes_nonblank"] / max(1, num_batches),
             "avg_vq_blank_frac": vq_metric_sums["blank_frac"] / max(1, num_batches),
-            "avg_vq_commit_loss": vq_metric_sums["commit_loss"] / max(1, num_batches),
-            "active_quantizers": int(model.vq.active_quantizers),
             "avg_vq_residual_norm": vq_metric_sums["residual_norm"] / max(1, num_batches),
 
             # schedules
@@ -898,8 +836,8 @@ def fit_vqvae(
         for lvl in range(1, max_ref_levels + 1):
             train_log[f"perplexity_nonblank_l{lvl}"] = vq_metric_sums.get(f"perplexity_nonblank_l{lvl}", 0.0) / max(1, num_batches)
             train_log[f"active_codes_nonblank_l{lvl}"] = vq_metric_sums.get(f"active_codes_nonblank_l{lvl}", 0.0) / max(1, num_batches)
-            train_log[f"commit_loss_l{lvl}"] = vq_metric_sums.get(f"commit_loss_l{lvl}", 0.0) / max(1, num_batches)
-        
+            train_log[f"path_active_codes_nonblank_l{lvl}"] = vq_metric_sums.get(f"path_active_codes_nonblank_l{lvl}", 0.0) / max(1, num_batches)
+            train_log[f"child_per_active_parent_l{lvl}"] = vq_metric_sums.get(f"child_per_active_parent_l{lvl}", 0.0) / max(1, num_batches)
         
         cb_stats = get_vq_codebook_stats(model)
         train_log.update(cb_stats)
@@ -970,17 +908,16 @@ def fit_vqvae(
             f"---"
             f"\n\n"
             
-            f"avg_vq_perp_nb={train_log.get('avg_vq_perp_nb', 0):.2f} "
-            f"avg_vq_ent_nb={train_log.get('avg_vq_ent_nb', 0):.2f} "
             f"avg_vq_blank_frac={train_log.get('avg_vq_blank_frac', 0):.3f} "
             f"avg_vq_resid={train_log.get('avg_vq_residual_norm', 0):.5f}\n"
             f"\n"
             
             f"vq_l1_ppl={train_log.get('perplexity_nonblank_l1', 0):.2f} "
             f"vq_l2_ppl={train_log.get('perplexity_nonblank_l2', 0):.2f} "
-            f"(ratio={train_log.get('perplexity_nonblank_l2', 0) / (train_log.get('perplexity_nonblank_l1', 1) + 1e-6):.2f}) "
             f"vq_l1_act={train_log.get('active_codes_nonblank_l1', 0):.1f} "
-            f"vq_l2_act={train_log.get('active_codes_nonblank_l2', 0):.1f}\n"
+            f"vq_l2_child_act={train_log.get('active_codes_nonblank_l2', 0):.1f} "
+            f"vq_l2_pair_act={train_log.get('path_active_codes_nonblank_l2', 0):.1f} "
+            f"child/parent={train_log.get('child_per_active_parent_l2', 0):.2f}\n"
             f"\n"
 
             f"cb_total_alive={train_log.get('vq_total_alive', 0)}/{train_log.get('vq_total_codes', 0)} "

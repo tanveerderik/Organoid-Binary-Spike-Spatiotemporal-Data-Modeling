@@ -136,8 +136,7 @@ def pr_curve_tolerant(
 def get_vq_codebook_stats(model, near_zero_thresh: float = 1e-6):
     stats = {}
 
-    embeds = getattr(model.vq, "embeds", [])
-    num_levels = len(embeds)
+    num_levels = int(getattr(model.vq, "num_quantizers", 1))
 
     stats["vq_num_levels"] = int(num_levels)
     stats["vq_near_zero_thresh"] = float(near_zero_thresh)
@@ -146,8 +145,11 @@ def get_vq_codebook_stats(model, near_zero_thresh: float = 1e-6):
     total_dead = 0
     total_codes = 0
 
-    for lvl, emb in enumerate(embeds):
-        cb = emb.weight.detach().float()
+    for lvl in range(num_levels):
+        if hasattr(model.vq, "get_effective_codebook_weight"):
+            cb = model.vq.get_effective_codebook_weight(lvl).detach().float()
+        else:
+            cb = model.vq.embeds[lvl].weight.detach().float()
         K, D = cb.shape
         norms = cb.norm(dim=1)
         alive = norms >= near_zero_thresh

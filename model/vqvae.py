@@ -158,7 +158,7 @@ class TransformerVQVAE(nn.Module):
             num_quantizers=self.num_quantizers,
         
             # hierarchy control
-            active_quantizers=1,
+            active_quantizers=2,
         
             # duplicate control
             sep_cos_thresh=0.95,
@@ -564,7 +564,10 @@ class TransformerVQVAE(nn.Module):
         active_mask_list = active_mask_list[:L_active]
         
         refinements = []
-        for lvl_idx, (z_q_i, active_mask_i) in enumerate(zip(z_q_list, active_mask_list), start=1):
+        for lvl_idx, (z_q_i, active_mask_i) in enumerate(
+            zip(z_q_list[:-1], active_mask_list[:-1]),
+            start=1,
+        ):
             dec_i = self._decode_quantized_latent(
                 z_q=z_q_i,
                 active_mask=active_mask_i,
@@ -804,9 +807,14 @@ class TransformerVQVAE(nn.Module):
     
             z_level = torch.zeros((B, N, D_code), device=codes.device, dtype=running_sum.dtype)
             if active_l.any():
-                z_level[active_l] = self.vq.embeds[lvl](codes_l[active_l])
+                path_l = codes[..., :lvl + 1]                    # (B,N,lvl+1)
+                z_level[active_l] = self.vq.get_codebook_entry(
+                    lvl=lvl,
+                    codes_prefix=path_l[active_l],
+                )
     
-            running_sum = running_sum + z_level
+            scale = float(self.vq.level_scales[lvl])
+            running_sum = running_sum + scale * z_level
     
             z_q = blank_token.view(1, 1, D_code).expand(B, N, D_code).clone()
             if seen_active.any():
@@ -886,12 +894,12 @@ class TransformerVQVAE(nn.Module):
             return_aux=True,
         )
         
-        z_q = z_q_flat.view(B, N, D_code)                                                # (B, N, D_code)
-        codes = codes_flat.view(B, N, self.vq.num_quantizers)                            # (B, N, L)
-        code_logits = code_logits_flat.view(B, N, self.vq.num_quantizers, self.vq.max_num_codes)  # (B, N, L, K)
+        z_q_ste = z_q_flat.view(B, N, D_code)
+        codes = codes_flat.view(B, N, self.vq.num_quantizers)
+        code_logits = code_logits_flat.view(B, N, self.vq.num_quantizers, self.vq.max_num_codes)
 
         
-        # ----- decode cumulative hierarchy refinements -----
+        # ----- hard-code cumulative hierarchy refinements for diagnostics -----
         z_q_list, active_mask_list = self._codes_to_quantized_cumulative(codes)
         
         L_active = int(self.vq.active_quantizers)
@@ -899,7 +907,13 @@ class TransformerVQVAE(nn.Module):
         active_mask_list = active_mask_list[:L_active]
         
         refinements = []
-        for lvl_idx, (z_q_i, active_mask_i) in enumerate(zip(z_q_list, active_mask_list), start=1):
+        
+        # Decode only intermediate hard refinements.
+        # The final level is decoded later using the STE path.
+        for lvl_idx, (z_q_i, active_mask_i) in enumerate(
+            zip(z_q_list[:-1], active_mask_list[:-1]),
+            start=1,
+        ):
             dec_i = self._decode_quantized_latent(
                 z_q=z_q_i,
                 active_mask=active_mask_i,
@@ -914,8 +928,25 @@ class TransformerVQVAE(nn.Module):
             dec_i["level"] = lvl_idx
             refinements.append(dec_i)
         
-        # final output = last cumulative refinement
-        final_dec = refinements[-1]
+        # ----- final training decode uses STE path -----
+        final_dec = self._decode_quantized_latent(
+            z_q=z_q_ste,
+            active_mask=active_mask,
+            grid=grid,
+            global_ctx=global_ctx,
+            local_ctx=local_ctx,
+            cfg_ctx_drop_p=cfg_ctx_drop_p,
+            cfg_ctx_force_unc=cfg_ctx_force_unc,
+            roi_hw=roi_hw,
+            pad_hw=pad_hw,
+        )
+        final_dec["level"] = L_active
+        refinements.append(final_dec)
+        # Replace final hard-code refinement with STE refinement.
+        # This keeps earlier coarse refinements diagnostic/supervised,
+        # but makes the final reconstruction loss send gradients through z_q_ste -> encoder.
+        if len(refinements) > 0:
+            refinements[-1] = final_dec
         
         z_q = final_dec["z_q"]
         active_mask = final_dec["active_mask"]
