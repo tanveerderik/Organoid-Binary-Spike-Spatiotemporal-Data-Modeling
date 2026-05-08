@@ -14,7 +14,7 @@ import json
 from matplotlib import cm
 from ..utils.recon import compute_activity_ctx
 from ..utils.metrics import f1_from_bool
-
+from ..utils.losses import short_gap_excess_loss_from_logits_batch_targets
 
 
 def save_volume_as_mp4_imageio(volume_hw_t, filename, fps=30, to_rgb=True):
@@ -97,34 +97,88 @@ def _overlay_spikes(rgb: np.ndarray, spikes: np.ndarray, color=(0,255,255), r: i
             over[cy, cx] = (alpha * col + (1.0 - alpha) * over[cy, cx].astype(np.float32)).astype(np.uint8)
     return over
 
+def _overlay_pred_gt_spikes(
+    rgb: np.ndarray,
+    pred: np.ndarray,
+    gt: np.ndarray,
+    tol_r: int = 1,
+    marker_r: int = 1,
+    alpha: float = 1.0,
+) -> np.ndarray:
+    """
+    Overlay prediction/GT spike agreement on heatmap.
+
+    Yellow = predicted spike within GT tolerance
+    Red    = predicted spike with no nearby GT
+    Green  = GT spike with no nearby prediction
+    """
+    pred = pred.astype(bool)
+    gt = gt.astype(bool)
+
+    gt_near = _binary_dilate(gt, r=tol_r)
+    pred_near = _binary_dilate(pred, r=tol_r)
+
+    match = pred & gt_near
+    fp = pred & ~gt_near
+    miss = gt & ~pred_near
+
+    out = rgb.copy()
+
+    # draw misses first, FP second, matches last
+    out = _overlay_spikes(out, miss,  color=(0, 255, 0),   r=marker_r, alpha=alpha)
+    out = _overlay_spikes(out, fp,    color=(255, 0, 0),   r=marker_r, alpha=alpha)
+    out = _overlay_spikes(out, match, color=(255, 255, 0), r=marker_r, alpha=alpha)
+
+    return out
+
 
 def save_heatmap_videos(
     prob_hw_t: np.ndarray,              # (H,W,T) float in [0,1]
-    spikes_hw_t: np.ndarray,            # (H,W,T) bool
+    pred_spikes_hw_t: np.ndarray,       # (H,W,T) bool
+    gt_spikes_hw_t: np.ndarray,         # (H,W,T) bool
     out_path_heatmap: str,
     out_path_overlay: str,
     fps: int = 30,
     cmap_name: str = "magma",
-    spike_color=(0, 255, 255),          # cyan
+    tol_r: int = 1,
     spike_radius: int = 1,
     spike_alpha: float = 1.0,
 ):
     """
-    Write two MP4s: heatmap only and heatmap + spikes overlay.
+    Write two MP4s:
+      - heatmap only
+      - heatmap + pred/GT overlay
+
+    Overlay colors:
+      yellow = prediction matched to nearby GT
+      red    = prediction-only / FP
+      green  = GT-only / miss
     """
     H, W, T = prob_hw_t.shape
+
+    assert pred_spikes_hw_t.shape == prob_hw_t.shape
+    assert gt_spikes_hw_t.shape == prob_hw_t.shape
+
     os.makedirs(os.path.dirname(out_path_heatmap) or ".", exist_ok=True)
     os.makedirs(os.path.dirname(out_path_overlay) or ".", exist_ok=True)
 
     with iio.get_writer(out_path_heatmap, fps=fps, codec="libx264", macro_block_size=None) as wh, \
          iio.get_writer(out_path_overlay, fps=fps, codec="libx264", macro_block_size=None) as wo:
+
         for t in range(T):
-            heat_rgb = _colormap_rgb(prob_hw_t[..., t], cmap_name=cmap_name)          # (H,W,3) uint8
-            over_rgb = _overlay_spikes(heat_rgb, spikes_hw_t[..., t], color=spike_color,
-                                       r=spike_radius, alpha=spike_alpha)
+            heat_rgb = _colormap_rgb(prob_hw_t[..., t], cmap_name=cmap_name)
+
+            over_rgb = _overlay_pred_gt_spikes(
+                heat_rgb,
+                pred_spikes_hw_t[..., t],
+                gt_spikes_hw_t[..., t],
+                tol_r=tol_r,
+                marker_r=spike_radius,
+                alpha=spike_alpha,
+            )
+
             wh.append_data(heat_rgb)
             wo.append_data(over_rgb)
-            
             
 
 def make_three_panel_from_two(vol_ref_hw_t: np.ndarray, vol_bin_hw_t: np.ndarray) -> np.ndarray:
@@ -285,6 +339,12 @@ def make_model_videos_vqvae(
     save_spatial_bias_npy: bool = True,
     save_spatial_bias_png: bool = True,
     spatial_bias_top_k: int = 5,
+    
+    save_adj_rates: bool = True,
+    isi_max_gap: int = 3,
+    isi_tau: float = 0.25,
+    isi_margin: float = 0.25,
+    memory_adj_conf_den_scale: float = 100.0,
 ):
     """
     For each sample (expects B=1, C=1), saves:
@@ -388,7 +448,61 @@ def make_model_videos_vqvae(
         
         
         logits = out["logits_vol"]
+        logits_raw = out.get("logits_vol_raw", logits)
         prob = torch.sigmoid(logits)
+        
+        adjacency_block = None
+        adjacency_npz = {}
+        
+        if save_adj_rates and hasattr(model, "memory_adj") and model.memory_adj is not None and gct is not None:
+            try:
+                adj_target_bg = model.memory_adj.get(
+                    gct,
+                    device=device,
+                    dtype=torch.float32,
+                )
+        
+                adj_conf_bg = model.memory_adj.get_confidence(
+                    gct,
+                    device=device,
+                    dtype=torch.float32,
+                    den_scale=memory_adj_conf_den_scale,
+                )
+        
+                adj_parts = short_gap_excess_loss_from_logits_batch_targets(
+                    logits_b1thw=logits_raw.float(),
+                    target_gap_rates_bg=adj_target_bg.float(),
+                    max_gap=isi_max_gap,
+                    tau=isi_tau,
+                    margin=isi_margin,
+                    confidence_bg=adj_conf_bg.float(),
+                    return_parts=True,
+                )
+        
+                pred_gap = adj_parts["pred_gap_rates"][0].detach().cpu().numpy()
+                target_gap = adj_parts["target_gap_rates"][0].detach().cpu().numpy()
+                allowed_gap = adj_parts["allowed_gap_rates"][0].detach().cpu().numpy()
+                conf_gap = adj_parts["confidence"][0, :isi_max_gap].detach().cpu().numpy()
+        
+                adjacency_block = {
+                    "pred_gap_rates": [float(x) for x in pred_gap.tolist()],
+                    "target_gap_rates": [float(x) for x in target_gap.tolist()],
+                    "allowed_gap_rates": [float(x) for x in allowed_gap.tolist()],
+                    "confidence": [float(x) for x in conf_gap.tolist()],
+                    "isi_max_gap": int(isi_max_gap),
+                    "isi_tau": float(isi_tau),
+                    "isi_margin": float(isi_margin),
+                }
+        
+                adjacency_npz = {
+                    "adj_pred_gap_rates": pred_gap.astype(np.float32),
+                    "adj_target_gap_rates": target_gap.astype(np.float32),
+                    "adj_allowed_gap_rates": allowed_gap.astype(np.float32),
+                    "adj_confidence": conf_gap.astype(np.float32),
+                }
+        
+            except Exception as e:
+                print(f"[video adjacency] skipped: {e}")
         
         # logits_from_patches = model.unpatchify(out["pred_patches"], grid)
         # logits_direct = out["logits_vol"]
@@ -446,7 +560,7 @@ def make_model_videos_vqvae(
         bin_path = os.path.join(out_dir, "recon_bin.mp4")
         grid_path = os.path.join(out_dir, "grid_1x3.mp4")
         heatmap_path = os.path.join(out_dir, "heatmap_prob.mp4")
-        overlay_path = os.path.join(out_dir, "heatmap_prob+pred.mp4")
+        overlay_path = os.path.join(out_dir, "heatmap_prob+pred_gt.mp4")
         active_mask_path = os.path.join(out_dir, "active_patch_mask.mp4")
 
         save_volume_as_mp4_imageio(ref_u8, ref_path, fps=fps)
@@ -456,15 +570,19 @@ def make_model_videos_vqvae(
 
         grid_1x3_u8 = make_three_panel_from_two(ref_u8, bin_u8)
         save_volume_as_mp4_imageio(grid_1x3_u8, grid_path, fps=fps)
-
+        
+        gt_bin_bool = (ref_vol > 0.5)
+        pred_bin_bool = (recon_prob >= thr)
+        
         save_heatmap_videos(
             recon_prob.astype(np.float32),
             pred_bin_bool.astype(bool),
+            gt_bin_bool.astype(bool),
             out_path_heatmap=heatmap_path,
             out_path_overlay=overlay_path,
             fps=fps,
             cmap_name=cmap_name,
-            spike_color=(255, 0, 0),
+            tol_r=1,
             spike_radius=1,
             spike_alpha=1.0,
         )
@@ -508,6 +626,34 @@ def make_model_videos_vqvae(
                 mode = str(mv.detach().cpu().tolist())
 
         print("Assay ID:", assay_id, ", Mode:", mode)
+        
+        # --- VQ Codebook stuff ---
+        
+        # -----------------------------
+        # Save arrays + minimal VQ latents
+        # -----------------------------
+        z_typed = out.get("z_typed_no_pos", None)
+        active_mask_tok = out.get("active_mask", None)
+        codes = out.get("codes", None)
+        
+        latent_npz = {}
+        
+        if z_typed is not None and active_mask_tok is not None:
+            z0 = z_typed[0].detach().float().cpu().numpy()  # (N, D)
+            mask = active_mask_tok[0].detach().bool().cpu().numpy()
+        
+            latent_npz["z_active"] = z0[mask]
+            latent_npz["z_blank"] = z0[~mask]
+        
+            if codes is not None:
+                codes_0 = codes[0].detach().long().cpu().numpy()  # (N, L)
+        
+                if codes_0.ndim == 2 and codes_0.shape[1] >= 1:
+                    latent_npz["codes_l1_active"] = codes_0[mask, 0]  # coarse, 32 codes
+        
+                if codes_0.ndim == 2 and codes_0.shape[1] >= 2:
+                    latent_npz["codes_l2_active"] = codes_0[mask, 1]  # residual, 128 codes
+        
 
         # -----------------------------
         # Save numeric arrays
@@ -519,6 +665,10 @@ def make_model_videos_vqvae(
             ref_u8=ref_u8.astype(np.uint8),
             prob_u8=prob_u8.astype(np.uint8),
             pred_u8=bin_u8.astype(np.uint8),
+            gt_bool=gt_bin_bool.astype(bool),
+            pred_bool=pred_bin_bool.astype(bool),
+            **latent_npz,
+            **adjacency_npz,
         )
 
         # -----------------------------
@@ -587,6 +737,8 @@ def make_model_videos_vqvae(
 
         if spatial_bias_block is not None:
             report["spatial_bias"] = spatial_bias_block
+        if adjacency_block is not None:
+            report["adjacency_rates"] = adjacency_block
 
         with open(results_path, "w") as f:
             json.dump(report, f, indent=2)

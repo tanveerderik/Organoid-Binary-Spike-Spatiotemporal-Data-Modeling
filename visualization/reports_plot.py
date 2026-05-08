@@ -26,6 +26,29 @@ from .reports_data import (
     save_per_assay_csv
 )
 
+
+LOCAL_CTX_NAMES = [
+    "log mean firing density",
+    "temporal activity std",
+    "spatial activity std",
+    "active site ratio",
+    "temporal trend slope",
+]
+
+TASK_NAMES = {
+    0: "exact reconstruction",
+    1: "causal temporal prediction",
+    2: "noncausal temporal completion",
+    3: "spatial completion",
+}
+
+TASK_MODE_TO_NAME = {
+    "recon": "exact reconstruction",
+    "causal": "causal temporal prediction",
+    "noncausal": "noncausal temporal completion",
+    "spatial": "spatial completion",
+}
+
 def _plot_series(x, y, out_path, title, ylabel):
     if y is None or len(y) == 0:
         return
@@ -165,16 +188,28 @@ def plot_f1_box_by_assay(samples: List[SampleResult], out_dir: str, min_count: i
     plt.close()
 
 
-def plot_ctx_scatter(samples: List[SampleResult], out_dir: str, dim: int = 0):
+def plot_ctx_scatter(
+    samples,
+    out_dir,
+    dim=0,
+    ctx_names=None,
+    task_names=None,
+    color_by_task=True,
+    title_prefix="Local context agreement",
+    filename_prefix="ctx_scatter",
+):
     """
-    Scatter of ctx_pred[dim] vs ctx_ref[dim], colored by sample.mode ("recon" / "next").
-    Saves figs/ctx_scatter_dim{dim}_by_mode.png
+    Scatter of ctx_pred[dim] vs ctx_ref[dim].
+    Optionally colored by dataset task:
+      recon / causal / noncausal / spatial.
     """
     out_dir = _ensure_dir(out_dir)
+    ctx_names = ctx_names or LOCAL_CTX_NAMES
+    task_names = task_names or TASK_NAMES
 
-    xs_recon, ys_recon = [], []
-    xs_next,  ys_next  = [], []
-    xs_other, ys_other = [], []
+    ctx_name = ctx_names[dim] if dim < len(ctx_names) else f"ctx[{dim}]"
+
+    groups = {}
 
     for s in samples:
         if s.ctx_ref is None or s.ctx_pred is None:
@@ -184,49 +219,258 @@ def plot_ctx_scatter(samples: List[SampleResult], out_dir: str, dim: int = 0):
 
         xr = float(s.ctx_ref[dim])
         yp = float(s.ctx_pred[dim])
-        m  = (s.mode or "").lower()
 
-        if m == "recon":
-            xs_recon.append(xr); ys_recon.append(yp)
-        elif m == "next":
-            xs_next.append(xr);  ys_next.append(yp)
+        mode = (s.mode or "").lower().strip()
+
+        if s.task_id is not None and int(s.task_id) in task_names:
+            label = task_names[int(s.task_id)]
+        elif mode in TASK_MODE_TO_NAME:
+            label = TASK_MODE_TO_NAME[mode]
+        elif mode:
+            label = mode
         else:
-            xs_other.append(xr); ys_other.append(yp)
+            label = "unknown task"
 
-    # no data?
-    N = len(xs_recon) + len(xs_next) + len(xs_other)
-    if N == 0:
+        groups.setdefault(label, {"x": [], "y": []})
+        groups[label]["x"].append(xr)
+        groups[label]["y"].append(yp)
+
+    if not groups:
         return
 
-    import numpy as np
-    import matplotlib.pyplot as plt
+    all_x = np.asarray(
+        [v for g in groups.values() for v in g["x"]],
+        dtype=float,
+    )
+    all_y = np.asarray(
+        [v for g in groups.values() for v in g["y"]],
+        dtype=float,
+    )
 
-    all_x = np.array(xs_recon + xs_next + xs_other, dtype=float)
-    all_y = np.array(ys_recon + ys_next + ys_other, dtype=float)
-    vmin, vmax = float(min(all_x.min(), all_y.min())), float(max(all_x.max(), all_y.max()))
+    vmin = float(min(all_x.min(), all_y.min()))
+    vmax = float(max(all_x.max(), all_y.max()))
     pad = 0.02 * (vmax - vmin + 1e-12)
     lim = (vmin - pad, vmax + pad)
 
-    plt.figure()
-    if xs_recon:
-        plt.scatter(xs_recon, ys_recon, s=10, alpha=0.7, label="recon")
-    if xs_next:
-        plt.scatter(xs_next, ys_next, s=10, alpha=0.7, label="next")
-    if xs_other:
-        plt.scatter(xs_other, ys_other, s=10, alpha=0.7, label="other")
+    plt.figure(figsize=(4.5, 4.5))
 
-    # 45-degree line
-    plt.plot(lim, lim, linewidth=1.0)
-    plt.xlim(lim); plt.ylim(lim)
-    plt.xlabel(f"Reference ctx[{dim}]")
-    plt.ylabel(f"Predicted ctx[{dim}]")
-    plt.title(f"Context agreement (dim {dim})")
+    if color_by_task:
+        for label, g in groups.items():
+            plt.scatter(
+                g["x"],
+                g["y"],
+                s=10,
+                alpha=0.7,
+                label=label,
+            )
+    else:
+        plt.scatter(all_x, all_y, s=10, alpha=0.7, label="samples")
+
+    plt.plot(lim, lim, linewidth=1.0, linestyle="--")
+    plt.xlim(lim)
+    plt.ylim(lim)
+
+    plt.xlabel(f"Reference: {ctx_name}")
+    plt.ylabel(f"Predicted: {ctx_name}")
+    plt.title(f"{title_prefix}: {ctx_name}")
+
+    if color_by_task:
+        plt.legend(loc="best", frameon=False, fontsize=8)
+
+    plt.tight_layout()
+
+    plt.savefig(
+        os.path.join(out_dir, f"{filename_prefix}_{dim}_{_safe_name(ctx_name)}.png"),
+        dpi=160,
+    )
+    plt.close()
+    
+    
+def plot_ctx_scatter_stage_overlay(
+    samples_stage1,
+    samples_stage2,
+    out_dir,
+    dim=0,
+    ctx_names=None,
+    stage1_label="Stage 1",
+    stage2_label="Stage 2",
+):
+    out_dir = _ensure_dir(out_dir)
+    ctx_names = ctx_names or LOCAL_CTX_NAMES
+    ctx_name = ctx_names[dim] if dim < len(ctx_names) else f"ctx[{dim}]"
+
+    def collect(samples):
+        xs, ys = [], []
+        for s in samples:
+            if s.ctx_ref is None or s.ctx_pred is None:
+                continue
+            if len(s.ctx_ref) <= dim or len(s.ctx_pred) <= dim:
+                continue
+            xs.append(float(s.ctx_ref[dim]))
+            ys.append(float(s.ctx_pred[dim]))
+        return np.asarray(xs, dtype=float), np.asarray(ys, dtype=float)
+
+    x1, y1 = collect(samples_stage1)
+    x2, y2 = collect(samples_stage2)
+
+    if len(x1) + len(x2) == 0:
+        return
+
+    all_x = np.concatenate([x1, x2]) if len(x1) and len(x2) else (x1 if len(x1) else x2)
+    all_y = np.concatenate([y1, y2]) if len(y1) and len(y2) else (y1 if len(y1) else y2)
+
+    vmin = float(min(all_x.min(), all_y.min()))
+    vmax = float(max(all_x.max(), all_y.max()))
+    pad = 0.02 * (vmax - vmin + 1e-12)
+    lim = (vmin - pad, vmax + pad)
+
+    plt.figure(figsize=(4.5, 4.5))
+
+    if len(x1):
+        plt.scatter(x1, y1, s=12, alpha=0.45, label=stage1_label)
+
+    if len(x2):
+        plt.scatter(x2, y2, s=12, alpha=0.45, label=stage2_label)
+
+    plt.plot(lim, lim, linewidth=1.0, linestyle="--")
+    plt.xlim(lim)
+    plt.ylim(lim)
+
+    plt.xlabel(f"Reference: {ctx_name}")
+    plt.ylabel(f"Predicted: {ctx_name}")
+    plt.title(f"Local context: {ctx_name}")
     plt.legend(loc="best", frameon=False)
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, f"ctx_scatter_dim{dim}.png"), dpi=160)
+
+    plt.savefig(
+        os.path.join(out_dir, f"ctx_stage_overlay_{dim}_{_safe_name(ctx_name)}.png"),
+        dpi=180,
+    )
+    plt.close()
+    
+    
+def plot_adjacency_scatter(
+    samples,
+    out_dir,
+    gap_idx=0,
+    title_prefix="Adjacency / short-gap agreement",
+    filename_prefix="adj_scatter",
+):
+    out_dir = _ensure_dir(out_dir)
+    gap = gap_idx + 1
+
+    xs, ys, allowed = [], [], []
+
+    for s in samples:
+        if s.adj_target is None or s.adj_pred is None:
+            continue
+        if len(s.adj_target) <= gap_idx or len(s.adj_pred) <= gap_idx:
+            continue
+
+        xs.append(float(s.adj_target[gap_idx]))
+        ys.append(float(s.adj_pred[gap_idx]))
+
+        if s.adj_allowed is not None and len(s.adj_allowed) > gap_idx:
+            allowed.append(float(s.adj_allowed[gap_idx]))
+
+    if len(xs) == 0:
+        return
+
+    x = np.asarray(xs, dtype=float)
+    y = np.asarray(ys, dtype=float)
+
+    vmax = float(max(x.max(), y.max()))
+    if allowed:
+        vmax = max(vmax, float(np.max(allowed)))
+    vmax = max(vmax, 1e-8)
+    lim = (0.0, vmax * 1.08)
+
+    plt.figure(figsize=(4.6, 4.6))
+    plt.scatter(x, y, s=14, alpha=0.65, label="samples")
+    plt.plot(lim, lim, linestyle="--", linewidth=1.0, label="target")
+
+    if allowed:
+        margin_eff = np.mean(np.asarray(allowed) / np.maximum(x, 1e-12) - 1.0)
+        plt.plot(
+            lim,
+            [v * (1.0 + margin_eff) for v in lim],
+            linestyle=":",
+            linewidth=1.0,
+            label="allowed",
+        )
+
+    plt.xlim(lim)
+    plt.ylim(lim)
+    plt.xlabel(f"Reference gap-{gap} rate")
+    plt.ylabel(f"Predicted gap-{gap} rate")
+    plt.title(f"{title_prefix}: gap {gap}")
+    plt.legend(frameon=False, fontsize=8)
+    plt.tight_layout()
+    plt.savefig(
+        os.path.join(out_dir, f"{filename_prefix}_gap{gap}.png"),
+        dpi=180,
+    )
     plt.close()
 
 
+def plot_adjacency_scatter_stage_overlay(
+    samples_stage1,
+    samples_stage2,
+    out_dir,
+    gap_idx=0,
+    stage1_label="Stage 1",
+    stage2_label="Stage 2",
+):
+    out_dir = _ensure_dir(out_dir)
+    gap = gap_idx + 1
+
+    def collect(samples):
+        xs, ys = [], []
+        for s in samples:
+            if s.adj_target is None or s.adj_pred is None:
+                continue
+            if len(s.adj_target) <= gap_idx or len(s.adj_pred) <= gap_idx:
+                continue
+            xs.append(float(s.adj_target[gap_idx]))
+            ys.append(float(s.adj_pred[gap_idx]))
+        return np.asarray(xs, dtype=float), np.asarray(ys, dtype=float)
+
+    x1, y1 = collect(samples_stage1)
+    x2, y2 = collect(samples_stage2)
+
+    if len(x1) + len(x2) == 0:
+        return
+
+    all_x = np.concatenate([a for a in [x1, x2] if len(a)])
+    all_y = np.concatenate([a for a in [y1, y2] if len(a)])
+
+    vmax = float(max(all_x.max(), all_y.max(), 1e-8))
+    lim = (0.0, vmax * 1.08)
+
+    plt.figure(figsize=(4.6, 4.6))
+
+    if len(x1):
+        plt.scatter(x1, y1, s=14, alpha=0.45, label=stage1_label)
+
+    if len(x2):
+        plt.scatter(x2, y2, s=14, alpha=0.45, label=stage2_label)
+
+    plt.plot(lim, lim, linestyle="--", linewidth=1.0, label="target")
+
+    plt.xlim(lim)
+    plt.ylim(lim)
+    plt.xlabel(f"Reference gap-{gap} rate")
+    plt.ylabel(f"Predicted gap-{gap} rate")
+    plt.title(f"Adjacency / short-gap rate: gap {gap}")
+    plt.legend(frameon=False, fontsize=8)
+    plt.tight_layout()
+    plt.savefig(
+        os.path.join(out_dir, f"adj_stage_overlay_gap{gap}.png"),
+        dpi=180,
+    )
+    plt.close()
+    
+    
 def sweep_all(npzs: List[str], out_dir: str, max_items: int = 200):
     out_dir = _ensure_dir(out_dir)
     curves = []
@@ -318,8 +562,22 @@ def run_plotter(train_report: Optional[str],
     stats = per_assay_stats(samples)
     save_per_assay_csv(stats, out_dir, "per_assay.csv")
     plot_f1_box_by_assay(samples, os.path.join(out_dir, "eval"))
-    for dim in range(5):  # compute_activity_ctx returns 5 dims in your utils/recon.py
-        plot_ctx_scatter(samples, os.path.join(out_dir, "eval"), dim=dim)
+    for dim in range(5):  # compute_activity_ctx returns 5 dims in utils/recon.py
+        plot_ctx_scatter(
+            samples,
+            out_dir=os.path.join(out_dir, "eval"),
+            dim=dim,
+            ctx_names=LOCAL_CTX_NAMES,
+            task_names=TASK_NAMES,
+            color_by_task=False,
+        )
+    adj_dir = _ensure_dir(os.path.join(out_dir, "eval", "adjacency"))
+    for gap_idx in range(3):
+        plot_adjacency_scatter(
+            samples,
+            out_dir=adj_dir,
+            gap_idx=gap_idx,
+        )
 
     # you can call plot_ctx_scatter for other dims manually if you want
 
@@ -345,8 +603,10 @@ def plot_base_then_finetune(
     train_skip=("epoch", "time_sec"),
     val_skip=("epoch",),
     # labels
-    base_label="Base (no prior)",
-    ft_label="Prior-guided finetune",
+    base_label="Stage 1: context-agnostic VQ-VAE",
+    ft_label="Stage 2: decoder context adaptation",
+    base_eval_roots=None,
+    ft_eval_roots=None,
 ):
     out_dir = _ensure_dir(out_dir)
 
@@ -443,6 +703,37 @@ def plot_base_then_finetune(
             base_best_epoch=None if truncate_base_at_best else base_best,
             ft_best_epoch_global=None,  # usually not needed for train
         )
+
+
+        # ---- Local context scatter overlays: base vs finetune ----
+    if base_eval_roots is not None and ft_eval_roots is not None:
+        samples_base = find_results(base_eval_roots)
+        samples_ft = find_results(ft_eval_roots)
+
+        ctx_dir = _ensure_dir(os.path.join(out_dir, "ctx_stage_overlay"))
+
+        for dim in range(5):
+            plot_ctx_scatter_stage_overlay(
+                samples_base,
+                samples_ft,
+                out_dir=ctx_dir,
+                dim=dim,
+                ctx_names=LOCAL_CTX_NAMES,
+                stage1_label=base_label,
+                stage2_label=ft_label,
+            )
+            
+        adj_dir = _ensure_dir(os.path.join(out_dir, "adj_stage_overlay"))
+
+        for gap_idx in range(3):
+            plot_adjacency_scatter_stage_overlay(
+                samples_base,
+                samples_ft,
+                out_dir=adj_dir,
+                gap_idx=gap_idx,
+                stage1_label=base_label,
+                stage2_label=ft_label,
+            )
 
     # Quick audit print
     only_base_val = sorted(base_val_keys - ft_val_keys)

@@ -37,7 +37,13 @@ def _safe_name(s: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_\-\.]+", "_", str(s))
 
 class SampleResult:
-    __slots__ = ("assay_name","assay_id","mode","task_id","f1","thr","ctx_ref","ctx_pred","json_path","npz_path")
+    __slots__ = (
+        "assay_name", "assay_id", "mode", "task_id",
+        "f1", "thr",
+        "ctx_ref", "ctx_pred",
+        "adj_target", "adj_pred", "adj_allowed", "adj_confidence",
+        "json_path", "npz_path",
+    )
     def __init__(self, **kw): 
         for k,v in kw.items(): setattr(self, k, v)
         
@@ -54,6 +60,7 @@ def find_results(eval_roots: List[str]) -> List[SampleResult]:
             if npz_path and not os.path.isabs(npz_path):
                 npz_path = os.path.join(os.path.dirname(jpath), os.path.basename(npz_path))
             if npz_path and not os.path.isfile(npz_path): npz_path = None
+            adj = j.get("adjacency_rates", {}) or {}
             out.append(SampleResult(
                 assay_name=str(j.get("assay_name","")),
                 assay_id=(int(j["assay_id"]) if "assay_id" in j and j["assay_id"] is not None else None),
@@ -63,6 +70,10 @@ def find_results(eval_roots: List[str]) -> List[SampleResult]:
                 thr=(float(j["threshold"]) if "threshold" in j and j["threshold"] is not None else None),
                 ctx_ref=j.get("ctx_ref_on_window"),
                 ctx_pred=j.get("ctx_pred_on_window"),
+                adj_target=adj.get("target_gap_rates"),
+                adj_pred=adj.get("pred_gap_rates"),
+                adj_allowed=adj.get("allowed_gap_rates"),
+                adj_confidence=adj.get("confidence"),
                 json_path=jpath,
                 npz_path=npz_path
             ))

@@ -45,7 +45,9 @@ from .visualization import (
     run_plotter,
     plot_base_then_finetune,
     save_assaywise_spatial_maps,
+    save_assaywise_adjacency_diagnostics,
 )
+from .visualization.codebook_diag import plot_blank_active_tsne_l1
 from .visualization.reports_data import export_base_finetune_flat_xlsx
 
 # =============================================================================
@@ -57,14 +59,14 @@ from .visualization.reports_data import export_base_finetune_flat_xlsx
 #   (2,)       -> load stage-1 ckpt, train context-conditioned decoder only
 #   (1, 2, 3)  -> run the whole pipeline sequentially
 #   (0,)     -> run spatial-map pretraining only
-RUN_STAGES = (0,1,2)  # allowed: 0, 1, 2, 3
+TRAIN_STAGES = ()        # 0,1,2,3
+EVAL_STAGES  = (0,1,2)   # 0 = pre-stage-1 spatial maps
 
-RUN_EVAL_AFTER_STAGE = True
-RUN_VIZ_AFTER_STAGE = True
-RUN_PLOTTER_AFTER_STAGE = True
-RUN_CODEBOOK_DEBUG_AFTER_STAGE = True
-
-RUN_FULL_EVAL_PREVIOUS_SKIPPED_STAGE = True
+RUN_EVAL = True
+RUN_VIZ  = True
+RUN_PLOTTER = True
+RUN_CODEBOOK_DEBUG = True
+RUN_SKIP_MISSING_EVAL = True
 
 # Stage-0 spatial map checkpoint. If this file exists, it will be loaded before
 # stages 1/2/3. If RUN_STAGES contains 0.5, it will be overwritten/trained first.
@@ -468,7 +470,26 @@ def common_fit_kwargs(model):
         sp_pixel_warmup_epochs=60,
     )
 
+def select_ckpt(stage: int, prefer_best: bool = True) -> Path:
+    if stage == 1:
+        best = CKPTS["stage1_best"]
+        last = CKPTS["stage1_last"]
+    elif stage == 2:
+        best = CKPTS["stage2_best"]
+        last = CKPTS["stage2_last"]
+    else:
+        raise ValueError(f"No VQVAE checkpoint defined for stage={stage}")
 
+    if prefer_best and best.exists():
+        return best
+    if last.exists():
+        return last
+    if best.exists():
+        return best
+
+    raise FileNotFoundError(f"No checkpoint found for stage {stage}: {best} or {last}")
+    
+    
 def run_stage1(model, train_loader, val_loader, baseline_prob, logit_baseline):
     print("\n" + "=" * 80)
     print("STAGE 1: context-agnostic VQVAE motif learning")
@@ -538,8 +559,9 @@ def run_stage2(model, train_loader, val_loader):
     print("STAGE 2: context-conditioned decoder calibration")
     print("=" * 80)
 
-    stage1_ckpt = CKPTS["stage1_best"] if CKPTS["stage1_best"].exists() else CKPTS["stage1_last"]
+    stage1_ckpt = select_ckpt(1, prefer_best=True)
     model.load_checkpoint(str(stage1_ckpt), map_location=next(model.parameters()).device)
+    print(f"Loaded Stage 1 checkpoint for Stage 2: {stage1_ckpt}")
 
     freeze_for_stage(model, 2)
 
@@ -635,10 +657,14 @@ def run_stage3_prior(model, train_loader, val_loader, device):
     print("STAGE 3: MAGVIT/MaskGIT prior learning")
     print("=" * 80)
 
-    ckpt = CKPTS["stage2_best"] if CKPTS["stage2_best"].exists() else CKPTS["stage1_last"]
-    if not ckpt.exists():
-        raise FileNotFoundError(f"Stage 3 needs a VQVAE checkpoint, but missing: {ckpt}")
+    try:
+        ckpt = select_ckpt(2, prefer_best=True)
+    except FileNotFoundError:
+        ckpt = select_ckpt(1, prefer_best=True)
+    
     model.load_checkpoint(str(ckpt), map_location=device)
+    print(f"Loaded VQVAE checkpoint for Stage 3 prior: {ckpt}")
+    
     freeze_for_stage(model, 3)
 
     prior = build_prior_from_model(model, device)
@@ -679,18 +705,18 @@ def evaluate_and_visualize(model, test_loader, stage: int, assay_indices, assay_
     if stage not in (1, 2):
         return
     
-    if stage == 1:
-        ckpt = CKPTS["stage1_best"] if CKPTS["stage1_best"].exists() else CKPTS["stage1_last"]
-    elif stage == 2:
-        ckpt = CKPTS["stage2_best"] if CKPTS["stage2_best"].exists() else CKPTS["stage2_last"]
-    if not ckpt.exists():
-        print(f"Skipping eval/viz; checkpoint missing: {ckpt}")
-        return
+    try:
+        ckpt = select_ckpt(stage, prefer_best=True)
+    except FileNotFoundError as e:
+        if RUN_SKIP_MISSING_EVAL:
+            print(f"Skipping eval/viz: {e}")
+            return
+        raise
 
     device = next(model.parameters()).device
     model.load_checkpoint(str(ckpt), map_location=device)
 
-    if RUN_EVAL_AFTER_STAGE:
+    if RUN_EVAL:
         print(f"Evaluating VQVAE stage {stage} using {ckpt} ...")
         test_metrics = evaluate_vqvae(
             model,
@@ -701,13 +727,20 @@ def evaluate_and_visualize(model, test_loader, stage: int, assay_indices, assay_
         )
         print(f"TEST stage {stage}:", test_metrics)
 
-    if RUN_VIZ_AFTER_STAGE:
+    if RUN_VIZ:
         out_root = VIZ_ROOTS[stage]
         out_root.mkdir(parents=True, exist_ok=True)
         viz_loader = make_viz_loader(test_loader)
 
         if model.spatial_map_prior is not None:
             save_assaywise_spatial_maps(
+                model,
+                assay_indices=assay_indices,
+                n_assays=num_assays_for_emb,
+                out_dir=str(out_root / "viz_spatial_bias"),
+                assay_codebook=assay_codebook,
+            )
+            save_assaywise_adjacency_diagnostics(
                 model,
                 assay_indices=assay_indices,
                 n_assays=num_assays_for_emb,
@@ -725,8 +758,14 @@ def evaluate_and_visualize(model, test_loader, stage: int, assay_indices, assay_
             thr=None,
             cmap_name="viridis",
         )
+                
+        plot_blank_active_tsne_l1(
+            viz_root=str(out_root),
+            out_png=str(out_root / "blank_active_tsne_l1.png"),
+            num_l1=32,
+        )
 
-    if RUN_PLOTTER_AFTER_STAGE:
+    if RUN_PLOTTER:
         report_path = REPORTS["stage1"] if stage == 1 else REPORTS["stage2"]
         if report_path.exists():
             run_plotter(
@@ -830,80 +869,84 @@ def main():
         decoder_cross_attn_layers=(),
     )
 
-    if 0 in RUN_STAGES:
+    # =========================
+    # TRAINING
+    # =========================
+    if 0 in TRAIN_STAGES:
         run_stage0_spatial_pretrain(model, train_loader, device)
-
-    # Always try to load stage-0.5 before VQVAE/prior stages.
-    if any(s in RUN_STAGES for s in (1, 2, 3)):
+    
+    # Load Stage-0 pretrained GCT/spatial/memory banks before VQVAE/prior training or evaluation.
+    if any(s in TRAIN_STAGES for s in (1, 2, 3)) or any(s in EVAL_STAGES for s in (0, 1, 2)):
         load_spatial_pretrain_if_available(model)
-        
-        if RUN_VIZ_AFTER_STAGE:
-            pre_stage1_dir = Path("../viz_out_vqvae/pre_stage1_spatial_maps")
-            pre_stage1_dir.mkdir(parents=True, exist_ok=True)
+    
+    for stage in TRAIN_STAGES:
+        if stage == 0:
+            continue
+    
+        elif stage == 1:
+            run_stage1(model, train_loader, val_loader, baseline_prob, logit_baseline)
+    
+        elif stage == 2:
+            run_stage2(model, train_loader, val_loader)
+    
+        elif stage == 3:
+            run_stage3_prior(model, train_loader, val_loader, device)
+    
+        else:
+            raise ValueError(f"Unsupported TRAIN_STAGE={stage}")
+    
+    
+    # =========================
+    # EVALUATION / VISUALIZATION
+    # =========================
+    for stage in EVAL_STAGES:
+    
+        if stage == 0:
+            if not RUN_VIZ:
+                continue
+    
+            if model.spatial_map_prior is None:
+                print("Skipping stage 0 eval/viz: model has no spatial_map_prior.")
+                continue
+    
+            out_dir = Path("../viz_out_vqvae/pre_stage1_spatial_maps")
+            out_dir.mkdir(parents=True, exist_ok=True)
     
             save_assaywise_spatial_maps(
                 model,
                 assay_indices=assay_indices,
                 n_assays=num_assays_for_emb,
-                out_dir=str(pre_stage1_dir),
+                out_dir=str(out_dir),
+                assay_codebook=train_loader.dataset.dataset.assay_codebook,
+            )
+            save_assaywise_adjacency_diagnostics(
+                model,
+                assay_indices=assay_indices,
+                n_assays=num_assays_for_emb,
+                out_dir=str(out_dir),
                 assay_codebook=train_loader.dataset.dataset.assay_codebook,
             )
     
-            print(f"Saved pre-stage-1 spatial maps to: {pre_stage1_dir}")
-            
-            model.memory_adj.debug_print(max_items=5)
-
-    for stage in RUN_STAGES:
-        if stage == 0:
+            if hasattr(model, "memory_adj") and model.memory_adj is not None:
+                model.memory_adj.debug_print(max_items=5)
+    
+            print(f"Saved stage 0 spatial maps to: {out_dir}")
             continue
-        if stage == 1:
-            run_stage1(model, train_loader, val_loader, baseline_prob, logit_baseline)
+    
+        if stage in (1, 2):
             evaluate_and_visualize(
                 model,
                 test_loader,
-                stage=1,
+                stage=stage,
                 assay_indices=assay_indices,
                 assay_codebook=test_loader.dataset.dataset.assay_codebook,
             )
-            if RUN_CODEBOOK_DEBUG_AFTER_STAGE:
+    
+            if RUN_CODEBOOK_DEBUG:
                 debug_vq_codebooks(model)
-        elif stage == 2:
-            if 1 not in RUN_STAGES and RUN_FULL_EVAL_PREVIOUS_SKIPPED_STAGE:
-                print("Skipped stage 1. Loading available checkpoint and running evaluation...")
-                evaluate_and_visualize(
-                    model,
-                    test_loader,
-                    stage=1,
-                    assay_indices=assay_indices,
-                    assay_codebook=test_loader.dataset.dataset.assay_codebook,
-                )
-                debug_vq_codebooks(model)
-        
-            run_stage2(model, train_loader, val_loader)
-            evaluate_and_visualize(
-                model,
-                test_loader,
-                stage=2,
-                assay_indices=assay_indices,
-                assay_codebook=test_loader.dataset.dataset.assay_codebook,
-            )
-            if RUN_CODEBOOK_DEBUG_AFTER_STAGE:
-                debug_vq_codebooks(model)
-        elif stage == 3:
-            if 2 not in RUN_STAGES and RUN_FULL_EVAL_PREVIOUS_SKIPPED_STAGE:
-                print("Skipped stage 2. Loading available checkpoint and running evaluation...")
-                evaluate_and_visualize(
-                    model,
-                    test_loader,
-                    stage=2,
-                    assay_indices=assay_indices,
-                    assay_codebook=test_loader.dataset.dataset.assay_codebook,
-                )
-                debug_vq_codebooks(model)
-                
-            run_stage3_prior(model, train_loader, val_loader, device)
+    
         else:
-            raise ValueError(f"Unsupported RUN_STAGE={stage}")
+            raise ValueError(f"Unsupported EVAL_STAGE={stage}")
 
     # ============================================================
     # Combined Stage 1 → Stage 2 plots/reports
@@ -919,6 +962,8 @@ def main():
             save_pdf=True,
             base_label="Stage 1: context-agnostic VQVAE",
             ft_label="Stage 2: context-conditioned decoder",
+            base_eval_roots=[str(VIZ_ROOTS[1])],
+            ft_eval_roots=[str(VIZ_ROOTS[2])],
         )
     
         export_base_finetune_flat_xlsx(
