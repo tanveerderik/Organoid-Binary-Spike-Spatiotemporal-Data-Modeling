@@ -232,8 +232,6 @@ def fit_vqvae(
             "residual_norm": 0.0,
             "commit_loss": 0.0,
             "usage_loss": 0.0,
-            "loss_cb_norm": 0.0,
-            "loss_sep": 0.0,
         }
         
         sum_pred_mean_p = 0.0
@@ -266,7 +264,6 @@ def fit_vqvae(
             model.set_logit_bias(current_logit_bias)
         
         for batch in train_loader:
-            num_batches += 1
             x = batch["x"].to(device, non_blocking=True)
             gct = batch.get("global_ctx", None)
             lct  = batch.get("local_ctx", None)
@@ -282,6 +279,12 @@ def fit_vqvae(
                 raise KeyError('Batch missing "task_id".')
             task_id = task_id.to(device, non_blocking=True).long()
             
+            do_refinement_supervision = (
+                (epoch < level2_full_loss_epoch)
+                or (num_batches % 100 == 0)
+            )
+            num_batches += 1
+            
             with torch.cuda.amp.autocast(enabled=amp_enabled):
                 out = model(
                     x,
@@ -291,6 +294,7 @@ def fit_vqvae(
                     cfg_ctx_drop_p=cfg_p,
                     roi_hw=roi_hw,
                     pad_hw=pad_hw,
+                    return_all_refinements=do_refinement_supervision,
                 )                
                 vq_loss = out["vq_loss"]
                 z_e_active = out["z_e_active"]
@@ -313,8 +317,6 @@ def fit_vqvae(
                     vq_metric_sums["residual_norm"] += float(vq_aux.get("residual_norm", 0.0))
                     vq_metric_sums["commit_loss"] += float(vq_aux.get("commit_loss", 0.0))
                     vq_metric_sums["usage_loss"] += float(vq_aux.get("usage_loss", 0.0))
-                    vq_metric_sums["loss_cb_norm"] += float(vq_aux.get("loss_cb_norm", 0.0))
-                    vq_metric_sums["loss_sep"] += float(vq_aux.get("loss_sep", 0.0))
                 
                 levels_aux = vq_aux.get("levels", []) if vq_aux else []
                 for lvl, lvl_aux in enumerate(levels_aux):
@@ -324,6 +326,9 @@ def fit_vqvae(
                         f"perplexity_nonblank_l{lvl_id}",
                         f"active_codes_nonblank_l{lvl_id}",
                         f"child_per_active_parent_l{lvl_id}",
+                        f"commit_loss_l{lvl_id}",
+                        f"usage_loss_l{lvl_id}",
+                        f"soft_usage_loss_l{lvl_id}",
                     ]
 
                     for k in metric_keys:
@@ -333,7 +338,9 @@ def fit_vqvae(
                     vq_metric_sums[f"perplexity_nonblank_l{lvl_id}"] += float(lvl_aux.get("perplexity_nonblank", 0.0))
                     vq_metric_sums[f"active_codes_nonblank_l{lvl_id}"] += float(lvl_aux.get("active_codes_nonblank", 0.0))
                     vq_metric_sums[f"child_per_active_parent_l{lvl_id}"] += float(lvl_aux.get("child_per_active_parent", 0.0))
-                                    
+                    vq_metric_sums[f"commit_loss_l{lvl_id}"] += float(lvl_aux.get("commit_loss", 0.0))
+                    vq_metric_sums[f"usage_loss_l{lvl_id}"] += float(lvl_aux.get("usage_loss", 0.0))
+                    vq_metric_sums[f"soft_usage_loss_l{lvl_id}"] += float(lvl_aux.get("soft_usage_loss", 0.0))     
                                 
 
                 _, _, Tp, Hp, Wp = logits_vol.shape
@@ -390,9 +397,16 @@ def fit_vqvae(
                     return ref["logits_vol_raw"] if refinement_use_raw_logits else ref["logits_vol"]
                  
                 num_ref = len(refinements)
-                if len(refinement_loss_weights_eff) != num_ref:
+                
+                if num_ref == 1:
+                    # final-only fast path
+                    refinement_loss_weights_batch = [1.0]
+                else:
+                    refinement_loss_weights_batch = refinement_loss_weights_eff[:num_ref]
+                
+                if len(refinement_loss_weights_batch) != num_ref:
                     raise ValueError(
-                        f"refinement_loss_weights_eff length {len(refinement_loss_weights_eff)} "
+                        f"refinement weights length {len(refinement_loss_weights_batch)} "
                         f"does not match num refinements {num_ref}"
                     )
 
@@ -404,13 +418,14 @@ def fit_vqvae(
                 recon_level_vals = []
                 recon_level_exact_vals = []
                 recon_level_tol_vals = []
+                recon_level_ids = []
                 
                 for ridx, (ref, w_ref) in enumerate(
-                    zip(refinements, refinement_loss_weights_eff),
+                    zip(refinements, refinement_loss_weights_batch),
                     start=1,
                 ):
                     logits_ref = _get_ref_logits(ref)
-                
+                    level_id = int(ref.get("level", ridx))
                     is_final_refinement = ridx == num_ref
                 
                     if not is_final_refinement:
@@ -453,7 +468,7 @@ def fit_vqvae(
 
                     recon_level_exact_vals.append(ref_parts["weighted_exact"].detach())
                     recon_level_tol_vals.append(ref_parts["weighted_tol"].detach())
-
+                    recon_level_ids.append(level_id)
 
                 isi_source = "none"
                 adj_memory_used = 0.0
@@ -743,22 +758,22 @@ def fit_vqvae(
                     )
             
             # --- per-refinement reconstruction diagnostics
-            for ridx, val in enumerate(recon_level_vals, start=1):
-                sums[f"loss_recon_l{ridx}"] += float(val.detach().cpu())
+            for level_id, val in zip(recon_level_ids, recon_level_vals):
+                sums[f"loss_recon_l{level_id}"] += float(val.detach().cpu())
             
-            for ridx, val in enumerate(recon_level_exact_vals, start=1):
-                sums[f"loss_recon_l{ridx}_exact"] += float(val.detach().cpu())
+            for level_id, val in zip(recon_level_ids, recon_level_exact_vals):
+                sums[f"loss_recon_l{level_id}_exact"] += float(val.detach().cpu())
                 
             # --- weighted totals (match recon_total weighting)
             for ridx, (exact_val, tol_val, w_ref) in enumerate(
-                zip(recon_level_exact_vals, recon_level_tol_vals, refinement_loss_weights_eff),
+                zip(recon_level_exact_vals, recon_level_tol_vals, refinement_loss_weights_batch),
                 start=1,
             ):
                 sums["loss_recon_exact_total"] += float(w_ref * exact_val.detach().cpu())
                 sums["loss_recon_tol_total"] += float(w_ref * tol_val.detach().cpu())
             
-            for ridx, val in enumerate(recon_level_tol_vals, start=1):
-                sums[f"loss_recon_l{ridx}_tol"] += float(val.detach().cpu())
+            for level_id, val in zip(recon_level_ids, recon_level_tol_vals):
+                sums[f"loss_recon_l{level_id}_tol"] += float(val.detach().cpu())
                         
             pred_mean_p_epoch = sum_pred_mean_p / max(1, num_batches)
             tgt_mean_epoch    = sum_tgt_mean    / max(1, num_batches)
@@ -821,8 +836,6 @@ def fit_vqvae(
             "avg_vq_residual_norm": vq_metric_sums["residual_norm"] / max(1, num_batches),
             "avg_vq_commit": vq_metric_sums["commit_loss"] / max(1, num_batches),
             "avg_vq_usage": vq_metric_sums["usage_loss"] / max(1, num_batches),
-            "avg_vq_cb_norm": vq_metric_sums["loss_cb_norm"] / max(1, num_batches),
-            "avg_vq_sep": vq_metric_sums["loss_sep"] / max(1, num_batches),
 
             # schedules
             "pos_weight_eff": float(pos_weight_eff),
@@ -853,7 +866,15 @@ def fit_vqvae(
             train_log[f"child_per_active_parent_l{lvl}"] = (
                 vq_metric_sums.get(f"child_per_active_parent_l{lvl}", 0.0) / max(1, num_batches)
             )
-            
+            train_log[f"vq_commit_l{lvl}"] = (
+                vq_metric_sums.get(f"commit_loss_l{lvl}", 0.0) / max(1, num_batches)
+            )
+            train_log[f"vq_usage_l{lvl}"] = (
+                vq_metric_sums.get(f"usage_loss_l{lvl}", 0.0) / max(1, num_batches)
+            )
+            train_log[f"vq_soft_usage_raw_l{lvl}"] = (
+                vq_metric_sums.get(f"soft_usage_loss_l{lvl}", 0.0) / max(1, num_batches)
+            )
         cb_stats = get_vq_codebook_stats(model)
         train_log.update(cb_stats)
     
@@ -926,9 +947,7 @@ def fit_vqvae(
             f"avg_vq_blank_frac={train_log.get('avg_vq_blank_frac', 0):.3f} "
             f"avg_vq_resid={train_log.get('avg_vq_residual_norm', 0):.5f} "
             f"vq_commit={train_log.get('avg_vq_commit', 0):.5f} "
-            f"vq_usage={train_log.get('avg_vq_usage', 0):.5f} "
-            f"vq_cb_norm={train_log.get('avg_vq_cb_norm', 0):.5f} "
-            f"vq_sep={train_log.get('avg_vq_sep', 0):.5f}\n"
+            f"vq_usage={train_log.get('avg_vq_usage', 0):.5f}\n"
             f"\n"
             
             f"vq_l1_ppl={train_log.get('perplexity_nonblank_l1', 0):.2f} "
@@ -936,6 +955,14 @@ def fit_vqvae(
             f"vq_l1_act={train_log.get('active_codes_nonblank_l1', 0):.1f} "
             f"vq_l2_flat_act={train_log.get('active_codes_nonblank_l2', 0):.1f} "
             f"child/parent={train_log.get('child_per_active_parent_l2', 0):.2f}\n"
+            f"\n"
+            
+            f"vq_commit_l1={train_log.get('vq_commit_l1', 0):.5f} "
+            f"vq_commit_l2={train_log.get('vq_commit_l2', 0):.5f} "
+            f"vq_usage_l1={train_log.get('vq_usage_l1', 0):.5f} "
+            f"vq_usage_l2={train_log.get('vq_usage_l2', 0):.5f} "
+            f"vq_usage_raw_l1={train_log.get('vq_soft_usage_raw_l1', 0):.5f} "
+            f"vq_usage_raw_l2={train_log.get('vq_soft_usage_raw_l2', 0):.5f}\n"
             f"\n"
 
             f"cb_total_alive={train_log.get('vq_total_alive', 0)}/{train_log.get('vq_total_codes', 0)} "

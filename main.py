@@ -16,7 +16,7 @@ os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 os.environ["BLIS_NUM_THREADS"] = "1"
-os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+# os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 from glob import glob
 import copy
@@ -47,7 +47,10 @@ from .visualization import (
     save_assaywise_spatial_maps,
     save_assaywise_adjacency_diagnostics,
 )
-from .visualization.codebook_diag import plot_blank_active_tsne_l1
+from .visualization.codebook_diag import (
+    plot_blank_active_tsne_l1,
+    plot_blank_active_pca_l1,
+)
 from .visualization.reports_data import export_base_finetune_flat_xlsx
 
 # =============================================================================
@@ -60,10 +63,11 @@ from .visualization.reports_data import export_base_finetune_flat_xlsx
 #   (1, 2, 3)  -> run the whole pipeline sequentially
 #   (0,)     -> run spatial-map pretraining only
 TRAIN_STAGES = (1,2)        # 0,1,2,3
-EVAL_STAGES  = (0,1,2)   # 0 = pre-stage-1 spatial maps
+EVAL_STAGES  = (1,2)   # 0,1,2,3
 
-RUN_EVAL = True
+RUN_EVAL = False
 RUN_VIZ  = True
+RUN_VIDEO_GEN = False
 RUN_PLOTTER = True
 RUN_CODEBOOK_DEBUG = True
 RUN_SKIP_MISSING_EVAL = True
@@ -109,7 +113,7 @@ cache_max_gb = 80
 cache_write_prob = 1.0
 
 # Model
-num_codes = [64, 16]
+num_codes = (32, 8)
 num_assays_for_emb = 1000
 dim_assay_for_emb = 64
 max_viz_samples = 1000
@@ -328,6 +332,12 @@ def freeze_for_stage(model: nn.Module, stage: float):
         set_requires_grad(getattr(model, "spatial_map_prior", None), False)
         
         model.vq.freeze_codebook_updates = False
+        
+        # EMA codebook entries are updated manually, not by AdamW.
+        # Keep blank_token trainable; freeze only hierarchical codebook tensors.
+        if hasattr(model, "vq") and hasattr(model.vq, "tree_embeds"):
+            for p in model.vq.tree_embeds:
+                p.requires_grad = False
 
     elif stage == 2:
         set_decoder_cross_attention(model, enabled=True, layers=(0,))
@@ -342,6 +352,10 @@ def freeze_for_stage(model: nn.Module, stage: float):
         set_requires_grad(getattr(model, "spatial_map_prior", None), False)
         
         model.vq.freeze_codebook_updates = True
+        
+        if hasattr(model, "vq") and hasattr(model.vq, "tree_embeds"):
+            for p in model.vq.tree_embeds:
+                p.requires_grad = False
 
 
     elif stage == 3:
@@ -731,51 +745,54 @@ def evaluate_and_visualize(model, test_loader, stage: int, assay_indices, assay_
         out_root = VIZ_ROOTS[stage]
         out_root.mkdir(parents=True, exist_ok=True)
         viz_loader = make_viz_loader(test_loader)
-
-        if model.spatial_map_prior is not None:
-            save_assaywise_spatial_maps(
+        
+        if RUN_VIDEO_GEN:
+            make_model_videos_vqvae(
                 model,
-                assay_indices=assay_indices,
-                n_assays=num_assays_for_emb,
-                out_dir=str(out_root / "viz_spatial_bias"),
-                assay_codebook=assay_codebook,
+                viz_loader,
+                out_root=str(out_root),
+                max_samples=max_viz_samples,
+                fps=30,
+                pool_t=1,
+                thr=None,
+                cmap_name="viridis",
             )
-            save_assaywise_adjacency_diagnostics(
-                model,
-                assay_indices=assay_indices,
-                n_assays=num_assays_for_emb,
-                out_dir=str(out_root / "viz_spatial_bias"),
-                assay_codebook=assay_codebook,
-            )
+            
+        if RUN_PLOTTER:
+            report_path = REPORTS["stage1"] if stage == 1 else REPORTS["stage2"]
+            if report_path.exists():
+                run_plotter(
+                    train_report=str(report_path),
+                    eval_roots=[str(VIZ_ROOTS[stage])],
+                    out_dir=str(VIZ_ROOTS[stage] / "figs"),
+                    do_threshold_sweep=True,
+                )
 
-        make_model_videos_vqvae(
-            model,
-            viz_loader,
-            out_root=str(out_root),
-            max_samples=max_viz_samples,
-            fps=30,
-            pool_t=1,
-            thr=None,
-            cmap_name="viridis",
-        )
-                
-        plot_blank_active_tsne_l1(
-            viz_root=str(out_root),
-            out_png=str(out_root / "blank_active_tsne_l1.png"),
-            num_l1=32,
-        )
+            if model.spatial_map_prior is not None:
+                save_assaywise_spatial_maps(
+                    model,
+                    assay_indices=assay_indices,
+                    n_assays=num_assays_for_emb,
+                    out_dir=str(out_root / "viz_spatial_bias"),
+                    assay_codebook=assay_codebook,
+                )
+                save_assaywise_adjacency_diagnostics(
+                    model,
+                    assay_indices=assay_indices,
+                    n_assays=num_assays_for_emb,
+                    out_dir=str(out_root / "viz_spatial_bias"),
+                    assay_codebook=assay_codebook,
+                )
 
-    if RUN_PLOTTER:
-        report_path = REPORTS["stage1"] if stage == 1 else REPORTS["stage2"]
-        if report_path.exists():
-            run_plotter(
-                train_report=str(report_path),
-                eval_roots=[str(VIZ_ROOTS[stage])],
-                out_dir=str(VIZ_ROOTS[stage] / "figs"),
-                do_threshold_sweep=True,
-            )
-
-
+            if RUN_CODEBOOK_DEBUG:
+                plot_blank_active_tsne_l1(
+                    viz_root=str(out_root),
+                    out_png=str(out_root / "blank_active_tsne_l1.png"),
+                )
+                plot_blank_active_pca_l1(
+                    viz_root=str(out_root),
+                    out_png=str(out_root / "blank_active_pca_l1.png"),
+                )
 
 
 @torch.no_grad()
@@ -825,7 +842,6 @@ def debug_vq_codebooks(
 
         norms = cb.norm(dim=1)
         alive = norms >= near_zero_thresh
-
         alive_count = int(alive.sum())
 
         log(f"\n[Level {lvl}] shape=({K},{D}) alive={alive_count}/{K}")
@@ -853,10 +869,8 @@ def debug_vq_codebooks(
         cb_alive = cb[alive]
         alive_idx = torch.nonzero(alive, as_tuple=False).squeeze(1)
 
-        sim = (
-            torch.nn.functional.normalize(cb_alive, dim=1)
-            @ torch.nn.functional.normalize(cb_alive, dim=1).T
-        )
+        cb_alive_n = torch.nn.functional.normalize(cb_alive, dim=1)
+        sim = cb_alive_n @ cb_alive_n.T
 
         eye = torch.eye(sim.size(0), dtype=torch.bool)
         off = sim[~eye]
@@ -897,6 +911,97 @@ def debug_vq_codebooks(
                 "cosine": float(s),
                 "duplicate_like": bool(abs(s) >= duplicate_cos_thresh),
             })
+
+        # ------------------------------------------------------------
+        # Parent-wise child separation for hierarchical levels
+        # ------------------------------------------------------------
+        if lvl > 0:
+            parent_child_json = []
+
+            num_parent = int(model.vq.num_codes_per_level[0])
+            num_child = int(model.vq.num_codes_per_level[lvl])
+
+            if K == num_parent * num_child:
+                cb_tree = cb.reshape(num_parent, num_child, D)
+                norms_tree = norms.reshape(num_parent, num_child)
+                alive_tree = alive.reshape(num_parent, num_child)
+
+                log("\n[parent-wise child separation]")
+                log(
+                    "parent  alive_child  child_norm_mean  "
+                    "cos_min  cos_max  cos_mean"
+                )
+
+                for p in range(num_parent):
+                    child_alive = alive_tree[p]
+                    n_alive_child = int(child_alive.sum())
+
+                    if n_alive_child == 0:
+                        parent_child_json.append({
+                            "parent": int(p),
+                            "alive_children": 0,
+                            "child_norm_mean": 0.0,
+                            "cos_min": None,
+                            "cos_max": None,
+                            "cos_mean": None,
+                        })
+                        continue
+
+                    child_norm_mean = float(norms_tree[p, child_alive].mean().item())
+
+                    if n_alive_child < 2:
+                        log(
+                            f"{p:6d}  {n_alive_child:11d}  "
+                            f"{child_norm_mean:15.6g}  "
+                            f"{'NA':>7}  {'NA':>7}  {'NA':>8}"
+                        )
+
+                        parent_child_json.append({
+                            "parent": int(p),
+                            "alive_children": int(n_alive_child),
+                            "child_norm_mean": child_norm_mean,
+                            "cos_min": None,
+                            "cos_max": None,
+                            "cos_mean": None,
+                        })
+                        continue
+
+                    child = cb_tree[p, child_alive]
+                    child_n = torch.nn.functional.normalize(child, dim=1)
+                    child_sim = child_n @ child_n.T
+
+                    child_eye = torch.eye(
+                        child_sim.size(0),
+                        dtype=torch.bool,
+                    )
+                    child_off = child_sim[~child_eye]
+
+                    cmin = float(child_off.min().item())
+                    cmax = float(child_off.max().item())
+                    cmean = float(child_off.mean().item())
+
+                    log(
+                        f"{p:6d}  {n_alive_child:11d}  "
+                        f"{child_norm_mean:15.6g}  "
+                        f"{cmin:+7.3f}  {cmax:+7.3f}  {cmean:+8.3f}"
+                    )
+
+                    parent_child_json.append({
+                        "parent": int(p),
+                        "alive_children": int(n_alive_child),
+                        "child_norm_mean": child_norm_mean,
+                        "cos_min": cmin,
+                        "cos_max": cmax,
+                        "cos_mean": cmean,
+                    })
+
+                level_json["parent_child_separation"] = parent_child_json
+            else:
+                log(
+                    "\n[parent-wise child separation skipped] "
+                    f"K={K} does not match num_parent*num_child="
+                    f"{num_parent * num_child}"
+                )
 
         out_json["levels"].append(level_json)
 

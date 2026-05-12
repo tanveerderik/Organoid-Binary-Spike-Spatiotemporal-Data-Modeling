@@ -65,13 +65,14 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
 
         active_quantizers: Optional[int] = None,
 
-        sep_cos_thresh: float = 0.8,
-        sep_margin_weight_l0: float = 5e-2,
-        sep_margin_weight_later: float = 5e-3,
-
         dead_code_restart_every: int = 200,
-        dead_code_usage_thresh: float = 1.0,
-        restart_noise_std: float = 0.01,
+        dead_code_usage_thresh: float = 0.05,
+        dead_restart_noise_std: float = 0.01,
+        
+        ema_norm_cap: float = 15.0,
+        duplicate_restart_every: int = 200,
+        duplicate_rel_dist_thresh: float = 0.05,
+        duplicate_restart_noise_std: float = 0.01,
     ):
         super().__init__()
 
@@ -96,9 +97,6 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
         self.num_codes_per_level = num_codes_per_level
         self.max_num_codes = int(max(num_codes_per_level))
 
-        # backward-compat: some old code still reads self.num_codes
-        self.num_codes = self.max_num_codes
-
         self.code_dim = int(code_dim)
         self.decay = float(decay)
         self.eps = float(eps)
@@ -110,14 +108,15 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
 
         self.active_quantizers = int(active_quantizers) if active_quantizers is not None else int(num_quantizers)
 
-        self.sep_cos_thresh = float(sep_cos_thresh)
-        self.sep_margin_weight_l0 = float(sep_margin_weight_l0)
-        self.sep_margin_weight_later = float(sep_margin_weight_later)
-
         self.freeze_codebook_updates = False
         self.dead_code_restart_every = int(dead_code_restart_every)
         self.dead_code_usage_thresh = float(dead_code_usage_thresh)
-        self.restart_noise_std = float(restart_noise_std)
+        self.dead_restart_noise_std = float(dead_restart_noise_std)
+        
+        self.ema_norm_cap = float(ema_norm_cap)
+        self.duplicate_restart_every = int(duplicate_restart_every)
+        self.duplicate_rel_dist_thresh = float(duplicate_rel_dist_thresh)
+        self.duplicate_restart_noise_std = float(duplicate_restart_noise_std)
 
         self.register_buffer("step_counter", torch.zeros((), dtype=torch.long))
 
@@ -136,7 +135,10 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
             for k in self.num_codes_per_level[:lvl + 1]:
                 n_entries_l *= int(k)
             self.level_num_entries.append(int(n_entries_l))
-        
+            
+        for p in self.tree_embeds:
+            p.requires_grad = False
+            
         self.blank_token = nn.Parameter(torch.zeros(self.code_dim))
         nn.init.normal_(self.blank_token, mean=0.0, std=float(blank_token_std))
         
@@ -212,8 +214,6 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
         usage_aux_levels: list[dict],
         residual_norm: torch.Tensor,
         level_norms: list[torch.Tensor],
-        loss_cb_norm: torch.Tensor,
-        loss_sep: torch.Tensor,
     ):
         """
         active_codes_levels: (M, L) long.
@@ -240,15 +240,11 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
             "usage_loss": 0.0,
             "residual_norm": float(residual_norm.detach().item()),
             "level_norms": [float(n.detach().item()) for n in level_norms],
-            "loss_cb_norm": float(loss_cb_norm.detach().item()),
-            "loss_sep": float(loss_sep.detach().item()),
             "levels": [],
         }
     
         if active_codes_levels.numel() == 0:
             aux["level_norms"] = [0.0 for _ in range(L_total)]
-            aux["loss_cb_norm"] = 0.0
-            aux["loss_sep"] = 0.0
             for lvl in range(L_total):
                 aux["levels"].append({
                     "perplexity_nonblank": 1.0,
@@ -372,6 +368,14 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
             "soft_usage_loss": float(loss_usage.detach().item()),
         }
 
+    def _cap_vectors(self, x: torch.Tensor) -> torch.Tensor:
+        norm_cap = float(self.ema_norm_cap)
+        if norm_cap <= 0:
+            return x
+        n = x.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+        return x * (norm_cap / n).clamp_max(1.0)
+    
+
     def _compute_d2(self, x: torch.Tensor, codebook_weight: torch.Tensor):
         """
         x: (M, D)
@@ -394,80 +398,22 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
         n = max(1, min(self.num_quantizers, n))
         self.active_quantizers = n
     
-    def _used_code_duplicate_loss(
-        self,
-        codebook_weight: torch.Tensor,   # (K,D)
-        used_counts: torch.Tensor,       # (K,)
-        cos_thresh: float,
-        eps: float = 1e-8,
-    ) -> torch.Tensor:
-        """
-        Penalize both positive and negative near-duplicate cosine among USED codes.
-        This is much more aligned with your actual pathology than global sim^2.
-        """
-        used_mask = used_counts > 0
-        if int(used_mask.sum().item()) <= 1:
-            return codebook_weight.new_zeros(())
-    
-        w = F.normalize(codebook_weight[used_mask], dim=1, eps=eps)
-        sim = w @ w.t()
-    
-        K_used = sim.size(0)
-        eye = torch.eye(K_used, device=sim.device, dtype=torch.bool)
-        offdiag = sim[~eye]
-    
-        # punish both positive and negative near-duplicates
-        return F.relu(offdiag.abs() - cos_thresh).pow(2).mean()
-    
-    def _per_parent_child_duplicate_loss(
-        self,
-        codebook_weight: torch.Tensor,   # flattened: (parent_count * K_child, D)
-        used_counts: torch.Tensor,       # flattened: (parent_count * K_child,)
-        parent_count: int,
-        K_child: int,
-        cos_thresh: float,
-        eps: float = 1e-8,
-    ) -> torch.Tensor:
-        """
-        Penalize positive and negative near-duplicate child codes only within the same parent branch.
-        Does not compare children across different parents.
-        """
-        D = codebook_weight.shape[-1]
-    
-        w = codebook_weight.reshape(parent_count, K_child, D)
-        counts = used_counts.reshape(parent_count, K_child)
-    
-        losses = []
-    
-        for p in range(parent_count):
-            used_mask = counts[p] > 0
-            if int(used_mask.sum().item()) <= 1:
-                continue
-    
-            wp = F.normalize(w[p, used_mask], dim=1, eps=eps)
-            sim = wp @ wp.t()
-    
-            n = sim.size(0)
-            eye = torch.eye(n, device=sim.device, dtype=torch.bool)
-            offdiag = sim[~eye]
-    
-            # punish both positive and negative angle alignment
-            losses.append(F.relu(offdiag.abs() - cos_thresh).pow(2).mean())
-    
-        if len(losses) == 0:
-            return codebook_weight.new_zeros(())
-    
-        return torch.stack(losses).mean()
 
     @torch.no_grad()
     def _maybe_restart_dead_codes(
         self,
         lvl: int,
         residual: torch.Tensor,
+        parent_flat_idx: Optional[torch.Tensor] = None,
     ):
         """
         Reinitialize dead flattened tree entries from residual samples.
-        For level l, this checks all prod(K0...Kl) entries.
+    
+        lvl 0:
+          sample globally.
+    
+        lvl > 0:
+          sample only from residuals whose selected parent matches the dead child parent.
         """
         if residual.numel() == 0:
             return
@@ -488,22 +434,189 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
         if dead_idx.numel() == 0:
             return
     
-        M = residual.size(0)
-        take = min(int(dead_idx.numel()), int(M))
-        if take <= 0:
+        samples = []
+        selected_idx = []
+    
+        if lvl == 0:
+            M = residual.size(0)
+            take = min(int(dead_idx.numel()), int(M))
+            if take <= 0:
+                return
+    
+            perm = torch.randperm(M, device=residual.device)[:take]
+            samples = residual[perm].detach()
+            dead_perm = dead_idx[torch.randperm(dead_idx.numel(), device=dead_idx.device)]
+            selected_idx = dead_perm[:take]
+    
+        else:
+            if parent_flat_idx is None:
+                raise ValueError("parent_flat_idx is required for lvl > 0 restarts")
+    
+            K_child = int(self.num_codes_per_level[lvl])
+            dead_parent = torch.div(dead_idx, K_child, rounding_mode="floor")
+    
+            for idx_i, p_i in zip(dead_idx, dead_parent):
+                cand = torch.nonzero(parent_flat_idx == p_i, as_tuple=False).squeeze(1)
+                if cand.numel() == 0:
+                    continue
+    
+                j = cand[torch.randint(cand.numel(), (1,), device=residual.device)]
+                samples.append(residual[j].squeeze(0).detach())
+                selected_idx.append(idx_i)
+    
+            if len(samples) == 0:
+                return
+    
+            samples = torch.stack(samples, dim=0)
+            selected_idx = torch.stack(selected_idx, dim=0)
+    
+        if self.dead_restart_noise_std > 0.0:
+            samples = samples + self.dead_restart_noise_std * torch.randn_like(samples)
+    
+        samples = self._cap_vectors(samples)
+        
+        cb[selected_idx] = samples.to(cb.dtype)
+        ema_weight[selected_idx] = samples.to(ema_weight.dtype)
+        ema_count[selected_idx] = torch.ones_like(ema_count[selected_idx])
+        
+    @torch.no_grad()
+    def _maybe_restart_duplicate_codes(
+        self,
+        lvl: int,
+        residual: torch.Tensor,
+        parent_flat_idx: Optional[torch.Tensor] = None,
+        rel_dist_thresh: Optional[float] = None,
+    ):
+        """
+        Restart near-duplicate EMA codebook entries directly.
+    
+        lvl 0:
+          duplicate detection and restart sampling are global.
+    
+        lvl > 0:
+          duplicate detection is within each parent, and replacement samples are
+          drawn only from residuals assigned to that same parent.
+        """
+        if residual.numel() == 0:
             return
     
-        perm = torch.randperm(M, device=residual.device)[:take]
-        samples = residual[perm].detach()
+        if self.duplicate_restart_every <= 0:
+            return
     
-        if self.restart_noise_std > 0.0:
-            samples = samples + self.restart_noise_std * torch.randn_like(samples)
+        if int(self.step_counter.item()) % self.duplicate_restart_every != 0:
+            return
     
-        dead_sel = dead_idx[:take]
+        rel_dist_thresh = (
+            self.duplicate_rel_dist_thresh
+            if rel_dist_thresh is None
+            else float(rel_dist_thresh)
+        )
     
-        cb[dead_sel] = samples.to(cb.dtype)
-        ema_weight[dead_sel] = samples.to(ema_weight.dtype)
-        ema_count[dead_sel] = torch.ones_like(ema_count[dead_sel])
+        cb = self.tree_embeds[lvl].data.reshape(-1, self.code_dim)
+        ema_weight = self._ema_weight(lvl).reshape(-1, self.code_dim)
+        ema_count = self._ema_count(lvl).reshape(-1)
+    
+        used = ema_count >= self.dead_code_usage_thresh
+        if int(used.sum().item()) <= 1:
+            return
+    
+        restart_idx = []
+    
+        if lvl == 0:
+            idx = torch.nonzero(used, as_tuple=False).squeeze(1)
+            x = cb[idx].float()
+    
+            x_norm = x.norm(dim=1).clamp_min(1e-8)
+            dist = torch.cdist(x, x, p=2)
+            rel_dist = dist / (0.5 * (x_norm[:, None] + x_norm[None, :]).clamp_min(1e-8))
+    
+            K = x.size(0)
+            eye = torch.eye(K, device=x.device, dtype=torch.bool)
+            dup = (rel_dist < rel_dist_thresh) & (~eye)
+    
+            pairs = torch.nonzero(torch.triu(dup, diagonal=1), as_tuple=False)
+            if pairs.numel() > 0:
+                restart_idx.append(idx[pairs[:, 1]])
+    
+        else:
+            if parent_flat_idx is None:
+                raise ValueError("parent_flat_idx is required for lvl > 0 restarts")
+    
+            K_child = int(self.num_codes_per_level[lvl])
+            parent_count = int(self.level_num_entries[lvl - 1])
+    
+            x = cb.reshape(parent_count, K_child, self.code_dim).float()
+            used_p = used.reshape(parent_count, K_child)
+    
+            x_norm = x.norm(dim=-1).clamp_min(1e-8)
+            diff = x[:, :, None, :] - x[:, None, :, :]
+            dist = diff.pow(2).sum(dim=-1).sqrt()
+    
+            rel_den = 0.5 * (x_norm[:, :, None] + x_norm[:, None, :]).clamp_min(1e-8)
+            rel_dist = dist / rel_den
+    
+            eye = torch.eye(K_child, device=x.device, dtype=torch.bool)
+    
+            dup = (rel_dist < rel_dist_thresh)
+            dup = dup & (~eye[None, :, :])
+            dup = dup & used_p[:, :, None] & used_p[:, None, :]
+    
+            pairs = torch.nonzero(torch.triu(dup, diagonal=1), as_tuple=False)
+            if pairs.numel() > 0:
+                p = pairs[:, 0]
+                child_j = pairs[:, 2]
+                flat = p * K_child + child_j
+                restart_idx.append(flat)
+    
+        if not restart_idx:
+            return
+    
+        restart_idx = torch.unique(torch.cat(restart_idx, dim=0))
+        if restart_idx.numel() == 0:
+            return
+    
+        samples = []
+        selected_idx = []
+    
+        if lvl == 0:
+            M = residual.size(0)
+            take = min(int(restart_idx.numel()), int(M))
+            if take <= 0:
+                return
+    
+            perm = torch.randperm(M, device=residual.device)[:take]
+            samples = residual[perm].detach()
+            
+            restart_perm = restart_idx[torch.randperm(restart_idx.numel(), device=restart_idx.device)]
+            selected_idx = restart_perm[:take]
+    
+        else:
+            K_child = int(self.num_codes_per_level[lvl])
+            restart_parent = torch.div(restart_idx, K_child, rounding_mode="floor")
+    
+            for idx_i, p_i in zip(restart_idx, restart_parent):
+                cand = torch.nonzero(parent_flat_idx == p_i, as_tuple=False).squeeze(1)
+                if cand.numel() == 0:
+                    continue
+    
+                j = cand[torch.randint(cand.numel(), (1,), device=residual.device)]
+                samples.append(residual[j].squeeze(0).detach())
+                selected_idx.append(idx_i)
+    
+            if len(samples) == 0:
+                return
+    
+            samples = torch.stack(samples, dim=0)
+            selected_idx = torch.stack(selected_idx, dim=0)
+    
+        if self.duplicate_restart_noise_std > 0.0:
+            samples = samples + self.duplicate_restart_noise_std * torch.randn_like(samples)
+    
+        samples = self._cap_vectors(samples)
+        
+        cb[selected_idx] = samples.to(cb.dtype)
+        ema_weight[selected_idx] = samples.to(ema_weight.dtype)
+        ema_count[selected_idx] = torch.ones_like(ema_count[selected_idx])
 
     def quantize_active_only(
         self,
@@ -560,12 +673,15 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
         )
 
         neg_large = torch.finfo(dtype).min
-        code_logits_full = torch.full(
-            (num_total_tokens, L_total, Kmax),
-            neg_large,
-            dtype=dtype,
-            device=device,
-        )
+        if return_logits:
+            code_logits_full = torch.full(
+                (num_total_tokens, L_total, Kmax),
+                neg_large,
+                dtype=dtype,
+                device=device,
+            )
+        else:
+            code_logits_full = None
 
         # No active tokens
         if z_e_active.numel() == 0:
@@ -583,8 +699,6 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
                     "commit_loss": 0.0,
                     "usage_loss": 0.0,
                     "residual_norm": 0.0,
-                    "loss_cb_norm": 0.0,
-                    "loss_sep": 0.0,
                     "levels": [
                         {
                             "perplexity_nonblank": 1.0,
@@ -596,6 +710,8 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
                             "soft_usage_entropy": 0.0,
                             "soft_usage_perplexity": 1.0,
                             "soft_usage_loss": 0.0,
+                            "active_parents_nonblank": 0,
+                            "child_per_active_parent": 0.0,
                         }
                         for _ in range(L)
                     ],
@@ -665,19 +781,34 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
                 dtype=dtype,
                 device=d2.device,
             )
-            level_logit_l[:, :K_l] = (-d2).to(dtype)
+            level_logit_l[:, :K_l] = (-d2.detach()).to(dtype)
             level_logits.append(level_logit_l)
         
             commit_loss_l = self.beta * F.mse_loss(z_q_level.detach(), residual)
-            loss_usage_l, usage_aux_l = self._soft_usage_loss_from_d2(d2, num_codes_this_level=K_l)
-        
-            if self.training and not self.freeze_codebook_updates:
-                self._maybe_restart_dead_codes(lvl=lvl, residual=residual.detach())
+
+            # Usage loss should reshape encoder/residual outputs, not directly train EMA codebook vectors.
+            if lvl == 0:
+                d2_usage = self._compute_d2(residual, e.detach())
+            else:
+                r_f = residual.float()
+                e_usage = e_parent.detach().float()
+                d2_usage = (
+                    r_f.pow(2).sum(dim=1, keepdim=True).unsqueeze(-1)
+                    - 2.0 * torch.bmm(e_usage, r_f.unsqueeze(-1))
+                    + e_usage.pow(2).sum(dim=2, keepdim=True)
+                ).squeeze(-1)
+
+            loss_usage_l, usage_aux_l = self._soft_usage_loss_from_d2(
+                d2_usage,
+                num_codes_this_level=K_l,
+            )
         
             commit_losses.append(commit_loss_l)
             usage_losses.append(loss_usage_l)
             usage_aux_levels.append(usage_aux_l)
         
+            level_input = residual.detach()
+            
             scale = self.level_scales[lvl]
             level_norms.append((scale * z_q_level).pow(2).mean(dim=1).sqrt().mean())
             z_q_active_sum = z_q_active_sum + scale * z_q_level
@@ -709,60 +840,36 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
         
                     smoothed = ema_count_flat.clamp_min(1e-5)
                     new_embed_flat = ema_weight_flat / smoothed.unsqueeze(1)
-        
+
+                    new_embed_flat = self._cap_vectors(new_embed_flat)
+   
                     self.tree_embeds[lvl].data.reshape(-1, self.code_dim).copy_(
                         new_embed_flat.to(self.tree_embeds[lvl].dtype)
                     )
         
             residual = residual - scale * z_q_level.detach()
 
-        loss_cb_norm = z_q_active_sum.new_zeros(())
-        norm_cap = 5.0
-        lambda_cb_norm = 1e-3
-        
-        for lvl in range(L):
-            cb_norms = self.get_effective_codebook_weight(lvl).norm(dim=1)
-            loss_cb_norm = loss_cb_norm + F.relu(cb_norms - norm_cap).pow(2).mean()
-    
-        loss_sep = z_q_active_sum.new_zeros(())
-        
-        for lvl in range(L):
-            K_l = self.num_codes_per_level[lvl]
-        
-            used_counts_l = torch.bincount(
-                level_path_flat_indices[lvl],
-                minlength=self.level_num_entries[lvl],
-            )
-        
-            cb_l = self.get_effective_codebook_weight(lvl)
-        
-            if lvl == 0:
-                # Global duplicate prevention among coarse L1 codes.
-                dup_loss = self._used_code_duplicate_loss(
-                    codebook_weight=cb_l,
-                    used_counts=used_counts_l,
-                    cos_thresh=self.sep_cos_thresh,
+            if self.training and not self.freeze_codebook_updates:
+                r_det = level_input
+            
+                parent_for_restart = None
+                if lvl > 0:
+                    parent_for_restart = parent_flat_idx.detach()
+            
+                self._maybe_restart_dead_codes(
+                    lvl=lvl,
+                    residual=r_det,
+                    parent_flat_idx=parent_for_restart,
                 )
-                loss_sep = loss_sep + self.sep_margin_weight_l0 * dup_loss
-        
-            else:
-                # Per-parent duplicate prevention among child codes only.
-                parent_count = self.level_num_entries[lvl - 1]
-        
-                dup_loss = self._per_parent_child_duplicate_loss(
-                    codebook_weight=cb_l,
-                    used_counts=used_counts_l,
-                    parent_count=parent_count,
-                    K_child=K_l,
-                    cos_thresh=self.sep_cos_thresh,
+                self._maybe_restart_duplicate_codes(
+                    lvl=lvl,
+                    residual=r_det,
+                    parent_flat_idx=parent_for_restart,
                 )
-                loss_sep = loss_sep + self.sep_margin_weight_later * dup_loss
-        
+
         vq_loss = (
             torch.stack(commit_losses).mean()
             + self.usage_loss_weight * torch.stack(usage_losses).mean()
-            +  lambda_cb_norm * loss_cb_norm
-            + loss_sep
         )
 
         # Scatter active results back into full grid
@@ -793,8 +900,6 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
                 usage_aux_levels=usage_aux_levels,
                 residual_norm=residual_norm,
                 level_norms=level_norms,
-                loss_cb_norm=loss_cb_norm,
-                loss_sep=loss_sep,
             )
 
         if return_logits:
