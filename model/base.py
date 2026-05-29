@@ -1356,7 +1356,6 @@ class SparseTokenTransformerEncoder(nn.Module):
             )
             for _ in range(depth)
         ])
-        self.norm = nn.LayerNorm(dim)
 
     @staticmethod
     def _normalize_active_mask(active_mask: torch.Tensor, B: int, N: int, device: torch.device) -> torch.Tensor:
@@ -1452,7 +1451,6 @@ class SparseTokenTransformerEncoder(nn.Module):
         x = padded
         for blk in self.blocks:
             x = blk(x, key_padding_mask=key_pad_mask)
-        x = self.norm(x)
 
         encoded = x.to(device=full_out.device, dtype=full_out.dtype)
 

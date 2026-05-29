@@ -37,7 +37,7 @@ except RuntimeError:
     pass
 
 from .dataset import make_loaders_for_assays, burst_collate
-from .model import TransformerVQVAE, TokenMGITTransformer
+from .model import TransformerVQVAE, HierarchicalTokenMGITTransformer
 from .model.spatial_map import GlobalContextSpatialBank, GlobalContextAdjacencyBank
 from .training import fit_vqvae, train_prior_mgit, evaluate_vqvae, fit_spatial_prior_pretrain
 from .visualization import (
@@ -51,7 +51,10 @@ from .visualization.codebook_diag import (
     plot_blank_active_tsne_l1,
     plot_blank_active_pca_l1,
 )
-from .visualization.reports_data import export_base_finetune_flat_xlsx
+from .visualization.reports_data import (
+    export_base_finetune_flat_xlsx,
+    export_viz_quant_tables,
+)
 
 # =============================================================================
 # User configuration
@@ -62,18 +65,18 @@ from .visualization.reports_data import export_base_finetune_flat_xlsx
 #   (2,)       -> load stage-1 ckpt, train context-conditioned decoder only
 #   (1, 2, 3)  -> run the whole pipeline sequentially
 #   (0,)     -> run spatial-map pretraining only
-TRAIN_STAGES = (1,2)        # 0,1,2,3
-EVAL_STAGES  = (1,2)   # 0,1,2,3
+TRAIN_STAGES = (3,)        # 0,1,2,3
+EVAL_STAGES  = (3,)   # 0,1,2,3
 
-RUN_EVAL = False
+RUN_EVAL = True
 RUN_VIZ  = True
-RUN_VIDEO_GEN = False
+RUN_VIDEO_GEN = True
 RUN_PLOTTER = True
 RUN_CODEBOOK_DEBUG = True
 RUN_SKIP_MISSING_EVAL = True
 
 # Stage-0 spatial map checkpoint. If this file exists, it will be loaded before
-# stages 1/2/3. If RUN_STAGES contains 0.5, it will be overwritten/trained first.
+# stages 1/2/3. If TRAIN_STAGES contains 0.5, it will be overwritten/trained first.
 SPATIAL_CKPT = Path("../ckpts/spatial_bias_pretrain.pt")
 
 CKPT_DIR = Path("../ckpts")
@@ -321,8 +324,11 @@ def freeze_for_stage(model: nn.Module, stage: float):
     if stage == 1:
         set_decoder_cross_attention(model, enabled=False, layers=())
         for name in ["stem", "patch_embed", "sparse_encoder", "to_code", "vq", "code_to_dec",
-                     "token_type_embed", "dec_blocks", "dec_norm", "patch_renderer"]:
+                     "dec_blocks", "dec_norm", "patch_renderer"]:
             set_requires_grad(getattr(model, name, None), True)
+
+        if hasattr(model, "activity_type_offset"):
+            model.activity_type_offset.requires_grad = True
 
         # Context paths stay frozen in stage 1.
         set_requires_grad(getattr(model, "local_embedder", None), False)
@@ -341,9 +347,12 @@ def freeze_for_stage(model: nn.Module, stage: float):
 
     elif stage == 2:
         set_decoder_cross_attention(model, enabled=True, layers=(0,))
-        for name in ["code_to_dec", "token_type_embed", "dec_blocks", "dec_norm", "patch_renderer",
+        for name in ["code_to_dec", "dec_blocks", "dec_norm", "patch_renderer", 
                      "local_embedder", "local_to_dec_ctx", "global_to_dec_ctx"]:
             set_requires_grad(getattr(model, name, None), True)
+            
+        if hasattr(model, "activity_type_offset"):
+            model.activity_type_offset.requires_grad = False
 
         # Keep global embedder frozen if it came from spatial-map pretraining. This avoids moving
         # the representation that spatial_map_prior expects. If you later want to adapt it, unfreeze
@@ -638,33 +647,28 @@ def run_stage2(model, train_loader, val_loader):
 
 
 def build_prior_from_model(model, device):
-    """
-    Current placeholder compatible with your existing TokenMGITTransformer call.
-    NOTE: this is not yet the final hierarchical prior. For hierarchy, you probably need
-    either one prior head per VQ level or a flattened level-aware vocabulary.
-    """
     gct_mapper = copy.deepcopy(model.global_embedder).eval()
     lct_mapper = copy.deepcopy(model.local_embedder).eval()
 
-    # Existing code used vocab_size=num_codes + 1, which breaks if num_codes is a list.
-    # This fallback uses max(K_l)+1 so the current prior can at least run for one-level style code prediction.
-    # Replace train_prior_mgit before using true hierarchical tokens.
-    vocab_size = int(max(num_codes)) + 1
-    mask_id = vocab_size - 1
+    K1 = int(model.vq.num_codes_per_level[0])
+    K2 = int(model.vq.num_codes_per_level[1])
 
-    prior = TokenMGITTransformer(
-        vocab_size=vocab_size,
-        mask_id=mask_id,
+    prior = HierarchicalTokenMGITTransformer(
+        K1=K1,
+        K2=K2,
         num_tasks=4,
         gct_mapper=gct_mapper,
-        gct_dim=model.global_ctx_in_dim,
-        gct_latent_dim=model.global_emb_dim,
         lct_mapper=lct_mapper,
-        lct_dim=model.local_ctx_in_dim,
+        gct_latent_dim=model.global_emb_dim,
         lct_latent_dim=model.local_emb_dim,
+        d_model=512,
+        n_layer=8,
+        n_head=8,
+        max_len=4096*2,
+        dropout=0.1,
     ).to(device)
-    return prior
 
+    return prior
 
 def run_stage3_prior(model, train_loader, val_loader, device):
     print("\n" + "=" * 80)
@@ -682,7 +686,11 @@ def run_stage3_prior(model, train_loader, val_loader, device):
     freeze_for_stage(model, 3)
 
     prior = build_prior_from_model(model, device)
-    opt_prior = torch.optim.AdamW(prior.parameters(), lr=3e-4, weight_decay=0.01)
+    opt_prior = torch.optim.AdamW(
+        [p for p in prior.parameters() if p.requires_grad],
+        lr=3e-4,
+        weight_decay=0.01,
+    )
 
     history_prior = train_prior_mgit(
         prior=prior,
@@ -695,7 +703,6 @@ def run_stage3_prior(model, train_loader, val_loader, device):
         ckpt_out=str(CKPTS["prior_best"]),
         early_stop_patience=10,
         recon_task_id=0,
-        recon_mask_ratio=0.60,
     )
 
     with open(REPORTS["prior"], "w") as f:
@@ -1188,6 +1195,12 @@ def main():
             report_ft_path=str(REPORTS["stage2"]),
             out_xlsx="../training_report_stage1_stage2_flat.xlsx",
             shift_finetune_by="best",
+        )
+        
+        export_viz_quant_tables(
+            eval_roots=[str(VIZ_ROOTS[1]), str(VIZ_ROOTS[2])],
+            stage_names=["stage1", "stage2"],
+            out_dir="../viz_out_vqvae/quant_tables_ctx_adj",
         )
 
 if __name__ == "__main__":

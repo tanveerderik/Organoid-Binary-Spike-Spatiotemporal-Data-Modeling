@@ -141,7 +141,10 @@ class TransformerVQVAE(nn.Module):
         )
 
         # --- code space & VQ ---
-        self.to_code = nn.Linear(encoder_embed_dim, code_dim, bias=True)
+        self.to_code = nn.Sequential(
+            nn.Linear(encoder_embed_dim, code_dim, bias=True),
+            nn.LayerNorm(code_dim),
+        )
         
         self.num_quantizers = int(num_quantizers)
         
@@ -167,20 +170,16 @@ class TransformerVQVAE(nn.Module):
             duplicate_restart_noise_std = 0.01,
         
             # dead-code restart
-            dead_code_restart_every=200,
-            dead_code_usage_thresh=1.0,
+            dead_code_restart_every=100,
+            dead_code_usage_thresh=0.05,
             dead_restart_noise_std=0.01,
         )
 
         # --- decoder ---
-        self.code_to_dec = nn.Linear(code_dim, decoder_embed_dim, bias=True)
-        
-        self.token_type_embed = nn.Embedding(2, decoder_embed_dim)  # 0=blank, 1=active
-        nn.init.normal_(self.token_type_embed.weight, mean=0.0, std=0.02)
-        
-        # optional small scale so type cue helps but does not dominate
-        self.token_type_scale = 1.0
-        
+        self.code_to_dec = nn.Linear(code_dim, decoder_embed_dim, bias=False)
+        self.activity_type_offset = nn.Parameter(torch.zeros(decoder_embed_dim))
+        self.offset_scale = 0.5
+        nn.init.normal_(self.activity_type_offset, mean=0.0, std=0.02)
         
         self.dec_blocks = nn.ModuleList([
             DecoderCrossAttnBlock(
@@ -354,20 +353,6 @@ class TransformerVQVAE(nn.Module):
 
         return ctx_tokens, ctx_key_padding_mask
     
-    
-    def _add_decoder_token_type(
-        self,
-        z_d: torch.Tensor,          # (B, N, D_dec)
-        active_mask: torch.Tensor,  # (B, N) bool
-    ) -> torch.Tensor:
-        """
-        Add decoder token-type embedding:
-          0 = blank-routed token
-          1 = active/VQ token
-        """
-        type_ids = active_mask.long()  # blank=0, active=1
-        type_emb = self.token_type_embed(type_ids).to(device=z_d.device, dtype=z_d.dtype)
-        return z_d + self.token_type_scale * type_emb
 
     def _apply_output_biases(
         self,
@@ -480,19 +465,36 @@ class TransformerVQVAE(nn.Module):
     ):
         _, pos_dec = self._get_pos_embed(grid, z_q.device, z_q.dtype)
     
-        # Position-free typed latent:
-        # blank  = code_to_dec(blank_token) + blank_type_embed
-        # active = code_to_dec(sum_active_codebook_entries) + active_type_embed
-        z_typed_no_pos = self.code_to_dec(z_q)
-        z_typed_no_pos = self._add_decoder_token_type(
-            z_typed_no_pos,
-            active_mask=active_mask,
+        # ---------------------------------------------------------
+        # Decoder-space latent states
+        # ---------------------------------------------------------
+        # 1) Base decoder latent, no type offset, no positional encoding.
+        z_dec_base_no_pos = self.code_to_dec(z_q)
+    
+        # 2) Signed decoder-side activity axis.
+        #    blank  = base - offset_scale * offset
+        #    active = base + offset_scale * offset
+        type_offset = self.activity_type_offset.to(
+            device=z_dec_base_no_pos.device,
+            dtype=z_dec_base_no_pos.dtype,
         )
-        
-        # Actual pre-transformer decoder input still receives positional embedding
-        z_decoder_input = z_typed_no_pos + pos_dec
+    
+        signed_type_offset = torch.where(
+            active_mask.unsqueeze(-1),
+            type_offset.view(1, 1, -1),
+            -type_offset.view(1, 1, -1),
+        )
+    
+        # 3) Type-offset decoder latent, still no positional encoding.
+        z_dec_no_pos = z_dec_base_no_pos + self.offset_scale*signed_type_offset
+    
+        # 4) Full decoder input: type-offset latent + positional encoding.
+        z_decoder_input = z_dec_no_pos + pos_dec
         z_d = z_decoder_input
-        
+    
+        # ---------------------------------------------------------
+        # Optional decoder context cross-attention
+        # ---------------------------------------------------------
         ctx_tokens, ctx_key_padding_mask = self._prepare_ctx_tokens(
             local_ctx=local_ctx,
             global_ctx=global_ctx,
@@ -512,7 +514,11 @@ class TransformerVQVAE(nn.Module):
             )
     
         z_d = self.dec_norm(z_d)
-        logits_vol_raw, pred_patches_raw = self.patch_renderer(z_d, grid, return_patches=True)
+        logits_vol_raw, pred_patches_raw = self.patch_renderer(
+            z_d,
+            grid,
+            return_patches=True,
+        )
     
         pred_patches, spatial_diag = self._apply_output_biases(
             pred_patches_raw,
@@ -527,15 +533,27 @@ class TransformerVQVAE(nn.Module):
         return {
             "z_q": z_q,
             "active_mask": active_mask,
-            "z_typed_no_pos": z_typed_no_pos,
+    
+            # no offset, no position
+            "z_dec_base_no_pos": z_dec_base_no_pos,
+    
+            # signed offset tensors
+            "activity_type_offset": type_offset,
+            "signed_type_offset": signed_type_offset,
+    
+            # offset applied, no position
+            "z_dec_no_pos": z_dec_no_pos,
+    
+            # offset + position, actual decoder input
             "z_decoder_input": z_decoder_input,
+    
             "logits_vol": logits_vol,
             "logits_vol_raw": logits_vol_raw,
             "pred_patches": pred_patches,
             "pred_patches_raw": pred_patches_raw,
             "spatial_diag": spatial_diag,
         }
-            
+                
     
     def decode_from_codes(
         self,
@@ -977,6 +995,7 @@ class TransformerVQVAE(nn.Module):
         
         
         z_e_full = self.to_code(x_enc_full)                             # (B, N, D_code)
+        # z_e_full = self.code_norm(z_e_full)
 
         
         B, N, D_code = z_e_full.shape
@@ -1056,8 +1075,12 @@ class TransformerVQVAE(nn.Module):
         logits_vol = final_dec["logits_vol"]
         spatial_diag = final_dec["spatial_diag"]
         
-        z_typed_no_pos = final_dec["z_typed_no_pos"]
+        z_dec_no_pos = final_dec["z_dec_no_pos"]
         z_decoder_input = final_dec["z_decoder_input"]
+        
+        z_dec_base_no_pos = final_dec["z_dec_base_no_pos"]
+        signed_type_offset = final_dec["signed_type_offset"]
+        activity_type_offset = final_dec["activity_type_offset"]
         
         # ----- Token-level supervision mask -----
         N = t_tok * h_tok * w_tok
@@ -1099,8 +1122,12 @@ class TransformerVQVAE(nn.Module):
             "x_enc_full": x_enc_full,
             "active_mask": active_mask,
             
-            "z_typed_no_pos": z_typed_no_pos,
+            "z_dec_no_pos": z_dec_no_pos,
             "z_decoder_input": z_decoder_input,
+            
+            "z_dec_base_no_pos": z_dec_base_no_pos,
+            "signed_type_offset": signed_type_offset,
+            "activity_type_offset": activity_type_offset,
         
             "refinements": refinements,
         }

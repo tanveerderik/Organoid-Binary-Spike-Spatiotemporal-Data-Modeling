@@ -23,7 +23,10 @@ from .reports_data import (
     find_results,
     save_samples_csv,
     per_assay_stats,
-    save_per_assay_csv
+    save_per_assay_csv,
+    summarize_ctx_agreement,
+    summarize_adjacency_agreement,
+    save_agreement_csv,
 )
 
 
@@ -353,13 +356,14 @@ def plot_adjacency_scatter(
     samples,
     out_dir,
     gap_idx=0,
+    adj_margin=0.25,
     title_prefix="Adjacency / short-gap agreement",
     filename_prefix="adj_scatter",
 ):
     out_dir = _ensure_dir(out_dir)
     gap = gap_idx + 1
 
-    xs, ys, allowed = [], [], []
+    xs, ys = [], []
 
     for s in samples:
         if s.adj_target is None or s.adj_pred is None:
@@ -370,34 +374,28 @@ def plot_adjacency_scatter(
         xs.append(float(s.adj_target[gap_idx]))
         ys.append(float(s.adj_pred[gap_idx]))
 
-        if s.adj_allowed is not None and len(s.adj_allowed) > gap_idx:
-            allowed.append(float(s.adj_allowed[gap_idx]))
-
     if len(xs) == 0:
         return
 
     x = np.asarray(xs, dtype=float)
     y = np.asarray(ys, dtype=float)
 
-    vmax = float(max(x.max(), y.max()))
-    if allowed:
-        vmax = max(vmax, float(np.max(allowed)))
-    vmax = max(vmax, 1e-8)
+    vmax = float(max(x.max(), y.max(), 1e-8))
+    vmax = max(vmax, float(vmax * (1.0 + adj_margin)))
     lim = (0.0, vmax * 1.08)
 
     plt.figure(figsize=(4.6, 4.6))
     plt.scatter(x, y, s=14, alpha=0.65, label="samples")
+
     plt.plot(lim, lim, linestyle="--", linewidth=1.0, label="target")
 
-    if allowed:
-        margin_eff = np.mean(np.asarray(allowed) / np.maximum(x, 1e-12) - 1.0)
-        plt.plot(
-            lim,
-            [v * (1.0 + margin_eff) for v in lim],
-            linestyle=":",
-            linewidth=1.0,
-            label="allowed",
-        )
+    plt.plot(
+        lim,
+        [v * (1.0 + adj_margin) for v in lim],
+        linestyle=":",
+        linewidth=1.0,
+        label=f"allowed (+{adj_margin:.0%})",
+    )
 
     plt.xlim(lim)
     plt.ylim(lim)
@@ -418,6 +416,7 @@ def plot_adjacency_scatter_stage_overlay(
     samples_stage2,
     out_dir,
     gap_idx=0,
+    adj_margin=0.25,
     stage1_label="Stage 1",
     stage2_label="Stage 2",
 ):
@@ -431,8 +430,10 @@ def plot_adjacency_scatter_stage_overlay(
                 continue
             if len(s.adj_target) <= gap_idx or len(s.adj_pred) <= gap_idx:
                 continue
+
             xs.append(float(s.adj_target[gap_idx]))
             ys.append(float(s.adj_pred[gap_idx]))
+
         return np.asarray(xs, dtype=float), np.asarray(ys, dtype=float)
 
     x1, y1 = collect(samples_stage1)
@@ -445,6 +446,7 @@ def plot_adjacency_scatter_stage_overlay(
     all_y = np.concatenate([a for a in [y1, y2] if len(a)])
 
     vmax = float(max(all_x.max(), all_y.max(), 1e-8))
+    vmax = max(vmax, float(vmax * (1.0 + adj_margin)))
     lim = (0.0, vmax * 1.08)
 
     plt.figure(figsize=(4.6, 4.6))
@@ -456,6 +458,14 @@ def plot_adjacency_scatter_stage_overlay(
         plt.scatter(x2, y2, s=14, alpha=0.45, label=stage2_label)
 
     plt.plot(lim, lim, linestyle="--", linewidth=1.0, label="target")
+
+    plt.plot(
+        lim,
+        [v * (1.0 + adj_margin) for v in lim],
+        linestyle=":",
+        linewidth=1.0,
+        label=f"allowed (+{adj_margin:.0%})",
+    )
 
     plt.xlim(lim)
     plt.ylim(lim)
@@ -469,6 +479,7 @@ def plot_adjacency_scatter_stage_overlay(
         dpi=180,
     )
     plt.close()
+    
     
     
 def sweep_all(npzs: List[str], out_dir: str, max_items: int = 200):
@@ -557,6 +568,12 @@ def run_plotter(train_report: Optional[str],
     # 2) eval samples
     samples = find_results(eval_roots)
     save_samples_csv(samples, out_dir, "samples.csv")
+    
+    ctx_rows = summarize_ctx_agreement(samples, ctx_names=LOCAL_CTX_NAMES)
+    save_agreement_csv(ctx_rows, out_dir, "local_context_feature_consistency.csv")
+    
+    adj_rows = summarize_adjacency_agreement(samples, max_gaps=3)
+    save_agreement_csv(adj_rows, out_dir, "short_gap_adjacency_consistency.csv")
 
     # 3) per-assay stats + plots
     stats = per_assay_stats(samples)
@@ -709,6 +726,34 @@ def plot_base_then_finetune(
     if base_eval_roots is not None and ft_eval_roots is not None:
         samples_base = find_results(base_eval_roots)
         samples_ft = find_results(ft_eval_roots)
+        
+        base_ctx_rows = summarize_ctx_agreement(samples_base, ctx_names=LOCAL_CTX_NAMES)
+        ft_ctx_rows = summarize_ctx_agreement(samples_ft, ctx_names=LOCAL_CTX_NAMES)
+        
+        for r in base_ctx_rows:
+            r["stage"] = "Stage 1"
+        for r in ft_ctx_rows:
+            r["stage"] = "Stage 2"
+        
+        save_agreement_csv(
+            base_ctx_rows + ft_ctx_rows,
+            out_dir,
+            "local_context_feature_consistency_stage1_stage2.csv",
+        )
+        
+        base_adj_rows = summarize_adjacency_agreement(samples_base, max_gaps=3)
+        ft_adj_rows = summarize_adjacency_agreement(samples_ft, max_gaps=3)
+        
+        for r in base_adj_rows:
+            r["stage"] = "Stage 1"
+        for r in ft_adj_rows:
+            r["stage"] = "Stage 2"
+        
+        save_agreement_csv(
+            base_adj_rows + ft_adj_rows,
+            out_dir,
+            "short_gap_adjacency_consistency_stage1_stage2.csv",
+        )
 
         ctx_dir = _ensure_dir(os.path.join(out_dir, "ctx_stage_overlay"))
 
@@ -745,3 +790,5 @@ def plot_base_then_finetune(
     print(f"  base best_epoch={base_best}, ft best_epoch={ft_best} (global={ft_best_global})")
     print(f"  val keys:   {len(val_keys)}  (only_base={len(only_base_val)}, only_ft={len(only_ft_val)})")
     print(f"  train keys: {len(train_keys)} (only_base={len(only_base_tr)}, only_ft={len(only_ft_tr)})")
+    
+    

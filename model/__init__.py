@@ -7,9 +7,9 @@ Created on Fri Mar 13 11:23:51 2026
 """
 
 from .vqvae import TransformerVQVAE
-from .prior import TokenMGITTransformer
+from .prior import HierarchicalTokenMGITTransformer
 
 __all__ = [
     "TransformerVQVAE",
-    "TokenMGITTransformer",
+    "HierarchicalTokenMGITTransformer",
 ]

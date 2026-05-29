@@ -23,7 +23,7 @@ from ..utils.losses import (
     tolerant_spike_loss,
     short_gap_excess_loss_from_logits_batch_targets,
     ctx_loss_soft,
-    variance_floor_loss,
+    variance_floor_loss, encoder_isotropy_loss,
     spatial_support_violation_loss,
     blank_patch_logit_hinge_loss,
     blank_active_decoder_separation_loss,
@@ -92,7 +92,7 @@ def fit_vqvae(
     blank_start_epoch: int = 1,
     blank_warmup_epochs: int = 20,
     lambda_blank_sep: float = 0.01,
-    blank_sep_margin: float = 0.0,
+    blank_sep_margin: float = 1.0,
     blank_sep_start_epoch: int = 1,
     blank_sep_warmup_epochs: int = 20,
     
@@ -528,11 +528,15 @@ def fit_vqvae(
                         )
                 
                     adj_memory_used = 1.0
-                    isi_source = "memory_adj"
-
                 
                 target_std_eff = target_std_end + 0.5 * (target_std_start - target_std_end) * (1 + math.cos(math.pi * t_pos))
                 loss_enc_var = variance_floor_loss(z_e_active, target_std=target_std_eff)
+                # loss_enc_var, enc_iso_parts = encoder_isotropy_loss(
+                #     z_e_active,
+                #     target_std=target_std_eff,
+                #     max_tokens=512,
+                #     return_parts=True,
+                # )
                 
                 # --- ctx schedule (0 until ctx_start_epoch, then cosine up to 1) ---
                 t_ctx = (epoch - ctx_start_epoch) / max(1, ctx_warmup_epochs)
@@ -581,34 +585,27 @@ def fit_vqvae(
                 t_blank_sep = min(1.0, max(0.0, t_blank_sep))
                 blank_sep_ramp = 0.5 * (1 - math.cos(math.pi * t_blank_sep))
                 lambda_blank_sep_eff = lambda_blank_sep * blank_sep_ramp
-                
+                              
+                lambda_offset_reg = 1e-4
                 active_mask_sep = out["active_mask"].detach()
+
+                if active_mask_sep.any() and (~active_mask_sep).any():
+                    z_active_base = out["z_dec_base_no_pos"][active_mask_sep]
+                    z_blank_base = out["z_dec_base_no_pos"][~active_mask_sep].mean(dim=0, keepdim=True)
                 
-                if active_mask_sep.any():
-                    z_active_dec = out["z_typed_no_pos"][active_mask_sep].detach()
-                
-                    blank_type = model.token_type_embed.weight[0:1].to(
-                        device=out["z_typed_no_pos"].device,
-                        dtype=out["z_typed_no_pos"].dtype,
-                    )
-                
-                    z_blank_core = model.code_to_dec(
-                        model.vq.blank_token.to(
-                            device=out["z_typed_no_pos"].device,
-                            dtype=out["z_typed_no_pos"].dtype,
-                        ).view(1, -1)
-                    )
-                
-                    z_blank_dec = z_blank_core + model.token_type_scale * blank_type
-                
-                    loss_blank_sep = blank_active_decoder_separation_loss(
-                        z_blank_dec=z_blank_dec,
-                        z_active_dec=z_active_dec,
+                    sep_parts = blank_active_decoder_separation_loss(
+                        z_blank_base=z_blank_base,
+                        z_active_base=z_active_base,
+                        offset=out["activity_type_offset"],
                         margin=blank_sep_margin,
+                        offset_scale=model.offset_scale,
+                        norm_reg_weight=lambda_offset_reg,
+                        detach_base=True,
                     )
+                
+                    loss_blank_sep = sep_parts["total"]
                 else:
                     loss_blank_sep = torch.tensor(0.0, device=device)
-                                
 
                 # ---- bias-aware regularizer schedule ----
                 sp_memory_used = 0.0
@@ -796,6 +793,18 @@ def fit_vqvae(
 
         lb = float(model.global_logit_bias.item())
         
+        with torch.no_grad():
+            blank_token_norm = (
+                float(model.vq.blank_token.detach().norm().item())
+                if hasattr(model, "vq") and hasattr(model.vq, "blank_token")
+                else 0.0
+            )
+        
+            activity_offset_norm = (
+                float(model.activity_type_offset.detach().norm().item())
+                if hasattr(model, "activity_type_offset")
+                else 0.0
+            )
                 
         
         train_log = {
@@ -836,6 +845,9 @@ def fit_vqvae(
             "avg_vq_residual_norm": vq_metric_sums["residual_norm"] / max(1, num_batches),
             "avg_vq_commit": vq_metric_sums["commit_loss"] / max(1, num_batches),
             "avg_vq_usage": vq_metric_sums["usage_loss"] / max(1, num_batches),
+            
+            "blank_token_norm": blank_token_norm,
+            "activity_offset_norm": activity_offset_norm,
 
             # schedules
             "pos_weight_eff": float(pos_weight_eff),
@@ -931,8 +943,7 @@ def fit_vqvae(
             f"adj_allowed={train_log.get('adj_allowed_mean', 0):.5e} "
             f"adj_conf={train_log.get('adj_conf_mean', 0):.3f}\n"
             f"blank={train_log.get('blank', 0):.5f} "
-            f"blank_sep={train_log.get('blank_sep', 0):.5f}\n"
-            
+            f"blank_sep={train_log.get('blank_sep', 0):.5f}\n"            
             f"\n"
             
             f"logit_bias={train_log.get('logit_bias', 0):.5f} "
@@ -989,6 +1000,9 @@ def fit_vqvae(
             f"{train_log.get('vq_l2_cos_mean', 0):.4f}±{train_log.get('vq_l2_cos_std', 0):.4f},"
             f"{train_log.get('vq_l2_cos_max', 0):.4f})\n"
             f"\n"
+            
+            f"blank_norm={train_log.get('blank_token_norm', 0):.5f} "
+            f"offset_norm={train_log.get('activity_offset_norm', 0):.5f}\n"
             f"---"
             f"\n\n"
 

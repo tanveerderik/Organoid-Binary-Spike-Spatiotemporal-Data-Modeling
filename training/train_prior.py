@@ -11,8 +11,95 @@ import torch
 
 
 
+@torch.no_grad()
+def iterative_unmask_hierarchical(
+    prior,
+    global_ctx,
+    local_ctx,
+    task_id,
+    N,
+    steps=12,
+    temperature=1.0,
+):
+    B = global_ctx.shape[0]
+
+    a = torch.full((B, N), prior.a_mask_id, device=global_ctx.device, dtype=torch.long)
+    z1 = torch.full((B, N), prior.z1_mask_id, device=global_ctx.device, dtype=torch.long)
+    z2 = torch.full((B, N), prior.z2_mask_id, device=global_ctx.device, dtype=torch.long)
+
+    still_masked = torch.ones((B, N), device=global_ctx.device, dtype=torch.bool)
+
+    for s in range(steps):
+        logits, _, _ = prior(
+            a, z1, z2,
+            global_ctx=global_ctx,
+            local_ctx=local_ctx,
+            task_id=task_id,
+            targets=None,
+        )
+
+        pa = torch.softmax(logits["a"] / temperature, dim=-1)
+        pz1 = torch.softmax(logits["z1"] / temperature, dim=-1)
+        pz2 = torch.softmax(logits["z2"] / temperature, dim=-1)
+
+        a_samp = torch.multinomial(pa.reshape(-1, 2), 1).view(B, N)
+        z1_samp = torch.multinomial(pz1.reshape(-1, prior.K1), 1).view(B, N)
+        z2_samp = torch.multinomial(pz2.reshape(-1, prior.K2), 1).view(B, N)
+
+        conf_a = pa.gather(-1, a_samp.unsqueeze(-1)).squeeze(-1)
+        conf_z1 = pz1.gather(-1, z1_samp.unsqueeze(-1)).squeeze(-1)
+        conf_z2 = pz2.gather(-1, z2_samp.unsqueeze(-1)).squeeze(-1)
+
+        active = a_samp.eq(prior.a_active_id)
+
+        # blank confidence only uses activity confidence
+        # active confidence uses joint confidence
+        conf = torch.where(
+            active,
+            conf_a * conf_z1 * conf_z2,
+            conf_a,
+        )
+
+        conf = conf.masked_fill(~still_masked, -1.0)
+
+        num_left = still_masked.sum(dim=1)
+        num_keep_masked = torch.ceil(
+            num_left.float() * (1.0 - (s + 1) / steps)
+        ).long()
+
+        for b in range(B):
+            n_unmask = int(num_left[b] - num_keep_masked[b])
+            if n_unmask <= 0:
+                continue
+
+            idx = torch.topk(conf[b], k=n_unmask).indices
+
+            a[b, idx] = a_samp[b, idx]
+
+            active_idx = a_samp[b, idx].eq(prior.a_active_id)
+
+            z1[b, idx] = prior.z1_null_id
+            z2[b, idx] = prior.z2_null_id
+
+            if active_idx.any():
+                active_pos = idx[active_idx]
+                z1[b, active_pos] = z1_samp[b, active_pos]
+                z2[b, active_pos] = z2_samp[b, active_pos]
+
+            still_masked[b, idx] = False
+
+    # Convert final token triplet back to VQVAE code format.
+    codes = torch.full((B, N, 2), -1, device=global_ctx.device, dtype=torch.long)
+    active = a.eq(prior.a_active_id)
+    codes[..., 0][active] = z1[active]
+    codes[..., 1][active] = z2[active]
+
+    return codes
+
+
+
 def train_prior_mgit(
-    prior,                 # TokenMGITTransformer (bidirectional MaskGIT prior)
+    prior,                 # HierarchicalTokenMGITTransformer (bidirectional MaskGIT prior)
     vqvae,                 # your VQVAE tokenizer (frozen inside)
     opt,
     train_loader,
@@ -25,10 +112,10 @@ def train_prior_mgit(
     use_amp: bool = True,
     # --- MaskGIT knobs ---
     recon_task_id: int = 0,           # your mapping: recon=0
-    recon_mask_ratio: float = 0.60,   # for recon batches: random masking ratio (MaskGIT needs some visible tokens)
     ensure_at_least_one_mask: bool = True,
     # --- logging ---
     log_every: int = 50,
+    activity_pos_weight: float = 20.0,
 ):
     """
     MaskGIT-style (masked token modeling) prior training.
@@ -65,15 +152,20 @@ def train_prior_mgit(
     for p in vqvae.parameters():
         p.requires_grad_(False)
 
-    if not hasattr(prior, "mask_id"):
-        raise ValueError("prior must have attribute mask_id (MASK token id).")
-    mask_id = int(prior.mask_id)
-
     os.makedirs(os.path.dirname(ckpt_out) or ".", exist_ok=True)
 
     best_val = float("inf")
     patience = 0
-    history = {"train_ppl": [], "val_ppl": []}
+    history = {
+        "train_loss": [],
+        "val_loss": [],
+        "train_loss_a": [],
+        "train_loss_z1": [],
+        "train_loss_z2": [],
+        "val_loss_a": [],
+        "val_loss_z1": [],
+        "val_loss_z2": [],
+    }
 
 
     def _get_batch(batch):
@@ -103,13 +195,17 @@ def train_prior_mgit(
         except TypeError:
             out = vqvae(x, global_ctx=gct, local_ctx=lct)
 
-        codes = out["codes"].long()  # (B,N)
+        codes = out["codes"].long()  # expected (B,N,2): z1,z2; blank usually -1
         pmask = out.get("predict_mask", None)  # (B,N,1) float
 
         if pmask is None:
-            # If vqvae didn't return it, default to random masking for everyone (valid for MGIT)
-            B, N = codes.shape
-            pmask = (torch.rand((B, N), device=device) < recon_mask_ratio).float().unsqueeze(-1)
+            B, N = codes.shape[:2]
+        
+            mask_ratio = torch.empty((B, 1), device=device).uniform_(0.3, 0.95)
+        
+            pmask = (
+                torch.rand((B, N), device=device) < mask_ratio
+            ).float().unsqueeze(-1)
 
         if pmask.dim() == 2:
             pmask = pmask.unsqueeze(-1)
@@ -126,7 +222,17 @@ def train_prior_mgit(
         # Override recon rows
         is_recon = (task_id == recon_task_id)
         if is_recon.any():
-            rnd = (torch.rand((int(is_recon.sum().item()), N), device=device) < float(recon_mask_ratio)).float()
+            
+            mask_ratio = torch.empty(
+                (int(is_recon.sum().item()), 1),
+                device=device,
+            ).uniform_(0.3, 0.95)
+            
+            rnd = (
+                torch.rand((int(is_recon.sum().item()), N), device=device)
+                < mask_ratio
+            ).float()
+            
             if ensure_at_least_one_mask:
                 rnd[:, 0] = 1.0
             pmask[is_recon] = rnd
@@ -138,33 +244,52 @@ def train_prior_mgit(
 
         return pmask
 
-    def _make_mgit_io(codes, pmask):
-        """
-        pmask: (B,N) float/bool, 1 = mask/predict
-        """
-        inp = codes.clone()
-        inp[pmask > 0.5] = mask_id
-
-        tgt = codes.clone()
-        tgt[pmask <= 0.5] = -100  # ignore unmasked positions in CE
-        return inp, tgt
+    def _make_hierarchical_mgit_io(prior, codes, pmask):
+        targets = prior.make_targets_from_codes(
+            codes=codes,
+            predict_mask=pmask,
+            blank_code=getattr(vqvae.vq, "blank_code", -1),
+        )
+        a_in, z1_in, z2_in, targets = prior.corrupt_inputs_from_targets(
+            targets,
+            mode_probs=(0.50, 0.25, 0.25),
+        )
+        return a_in, z1_in, z2_in, targets
 
     def _run_epoch(loader, train: bool):
         prior.train(train)
-        total_nll = 0.0
+        total_loss = 0.0
         total_cnt = 0.0
+
+        total_a = 0.0
+        total_a_cnt = 0.0
+
+        total_z1 = 0.0
+        total_z2 = 0.0
+        total_z1_cnt = 0.0
+        total_z2_cnt = 0.0
 
         for it, batch in enumerate(loader, start=1):
             x, gct, lct, task_id, mask_spec = _get_batch(batch)
             with torch.no_grad():
                 codes, pmask = _vq_codes_and_pmask(x, gct, lct, mask_spec)
                 pmask = _override_recon_mask(pmask, task_id)
-                inp, tgt = _make_mgit_io(codes, pmask)
+                a_in, z1_in, z2_in, targets = _make_hierarchical_mgit_io(prior, codes, pmask)
 
             if train:
                 opt.zero_grad(set_to_none=True)
                 with torch.cuda.amp.autocast(enabled=amp_enabled):
-                    _, loss = prior(inp, targets=tgt, global_ctx=gct, local_ctx=lct, task_id=task_id)
+                    _, loss, aux = prior(
+                        a_in,
+                        z1_in,
+                        z2_in,
+                        global_ctx=gct,
+                        local_ctx=lct,
+                        task_id=task_id,
+                        targets=targets,
+                        loss_weights=(1.0, 1.0, 1.0),
+                        activity_pos_weight=activity_pos_weight,
+                    )
                 scaler.scale(loss).backward()
 
                 if grad_clip is not None and grad_clip > 0:
@@ -175,52 +300,90 @@ def train_prior_mgit(
                 scaler.update()
             else:
                 with torch.no_grad():
-                    _, loss = prior(inp, targets=tgt, global_ctx=gct, local_ctx=lct, task_id=task_id)
+                    _, loss, aux = prior(
+                        a_in,
+                        z1_in,
+                        z2_in,
+                        global_ctx=gct,
+                        local_ctx=lct,
+                        task_id=task_id,
+                        targets=targets,
+                        loss_weights=(1.0, 1.0, 1.0),
+                        activity_pos_weight=activity_pos_weight,
+                    )
             # accumulate NLL weighted by how many masked tokens contributed
-            n_mask = float((tgt != -100).sum().item())
-            if n_mask < 1.0:
-                # should not happen if ensure_at_least_one_mask True, but guard anyway
+            n_a = float(targets["a_loss_mask"].sum().item())
+            n_z1 = float(targets.get("z1_loss_mask", targets["z_loss_mask"]).sum().item())
+            n_z2 = float(targets.get("z2_loss_mask", targets["z_loss_mask"]).sum().item())
+
+            if n_a < 1.0:
                 continue
 
-            total_nll += float(loss.item()) * n_mask
-            total_cnt += n_mask
+            total_loss += float(loss.item()) * n_a
+            total_cnt += n_a
+
+            total_a += float(aux["loss_a"].item()) * n_a
+            total_a_cnt += n_a
+
+            if n_z1 > 0:
+                total_z1 += float(aux["loss_z1"].item()) * n_z1
+                total_z1_cnt += n_z1
+            
+            if n_z2 > 0:
+                total_z2 += float(aux["loss_z2"].item()) * n_z2
+                total_z2_cnt += n_z2
+            
+
 
             if train and log_every and (it % log_every == 0):
-                avg_nll = total_nll / max(total_cnt, 1.0)
-                ppl = math.exp(avg_nll)
-                print(f"  it {it:05d}: ppl={ppl:.2f}")
+                avg = total_loss / max(total_cnt, 1.0)
+                print(f"  it {it:05d}: loss={avg:.4f}")
 
-        avg_nll = total_nll / max(total_cnt, 1.0)
-        ppl = math.exp(avg_nll)
-        return ppl
+        den = max(total_cnt, 1.0)
+        den_a = max(total_a_cnt, 1.0)
+        den_z1 = max(total_z1_cnt, 1.0)
+        den_z2 = max(total_z2_cnt, 1.0)
+
+
+
+        return {
+            "loss": total_loss / den,
+            "loss_a": total_a / den_a,
+            "loss_z1": total_z1 / den_z1,
+            "loss_z2": total_z2 / den_z2,
+        }
 
     for ep in range(1, epochs + 1):
-        train_ppl = _run_epoch(train_loader, train=True)
-        val_ppl = _run_epoch(val_loader, train=False) if val_loader is not None else train_ppl
+        train_m = _run_epoch(train_loader, train=True)
+        val_m = _run_epoch(val_loader, train=False) if val_loader is not None else train_m
 
-        history["train_ppl"].append(train_ppl)
-        history["val_ppl"].append(val_ppl)
+        for k in ("loss", "loss_a", "loss_z1", "loss_z2"):
+            history[f"train_{k}"].append(train_m[k])
+            history[f"val_{k}"].append(val_m[k])
 
-        print(f"[epoch {ep:03d}] train ppl={train_ppl:.2f}  val ppl={val_ppl:.2f}")
+        print(
+            f"[epoch {ep:03d}] "
+            f"train loss={train_m['loss']:.4f} "
+            f"val loss={val_m['loss']:.4f} "
+            f"val a={val_m['loss_a']:.4f} "
+            f"z1={val_m['loss_z1']:.4f} "
+            f"z2={val_m['loss_z2']:.4f}"
+        )
 
-        # checkpoint on best val ppl (lower is better)
-        if val_ppl < best_val - float(min_delta):
-            best_val = val_ppl
+        # checkpoint on best val loss (lower is better)
+        if val_m["loss"] < best_val - float(min_delta):
+            best_val = val_m["loss"]
             patience = 0
             torch.save(
-                {"model": prior.state_dict(), "epoch": ep, "best_val_ppl": best_val},
+                {"model": prior.state_dict(), "epoch": ep, "best_val_loss": best_val},
                 ckpt_out,
             )
-            print(f"  saved {ckpt_out}  (best val ppl {best_val:.2f})")
+            print(f"  saved {ckpt_out}  (best val loss {best_val:.2f})")
         else:
             patience += 1
             if patience >= int(early_stop_patience):
-                print(f"Early stopping at epoch {ep} (best val ppl {best_val:.2f})")
+                print(f"Early stopping at epoch {ep} (best val loss {best_val:.2f})")
                 break
-
-    # unfreeze vqvae for later stages if you want
-    for p in vqvae.parameters():
-        p.requires_grad_(True)
 
     return history
 

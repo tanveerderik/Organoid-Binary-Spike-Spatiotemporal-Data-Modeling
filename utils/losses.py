@@ -287,6 +287,59 @@ def variance_floor_loss(x, target_std=0.25, eps=1e-4):
     std = torch.sqrt(x.var(dim=0, unbiased=False) + eps)
     return torch.relu(target_std - std).mean()
 
+def encoder_isotropy_loss(
+    x,
+    target_std=0.10,
+    mean_weight=1e-4,
+    cov_weight=1e-4,
+    cov_margin=0.50,
+    eps=1e-4,
+    max_tokens=512,
+    return_parts=False,
+):
+    if x.numel() == 0 or x.shape[0] < 2:
+        zero = x.new_zeros(())
+        if return_parts:
+            return zero, {"mean": zero, "var": zero, "cov": zero}
+        return zero
+
+    # Subsample active tokens for speed
+    if x.shape[0] > max_tokens:
+        idx = torch.randperm(x.shape[0], device=x.device)[:max_tokens]
+        x = x[idx]
+
+    x = x.float()
+
+    mean = x.mean(dim=0, keepdim=True)
+    loss_mean = mean.pow(2).mean()
+
+    xc = x - mean
+
+    std = torch.sqrt(xc.var(dim=0, unbiased=False) + eps)
+    loss_var = torch.relu(target_std - std).mean()
+
+    x_norm = xc / (std.unsqueeze(0) + eps)
+
+    corr = (x_norm.T @ x_norm) / max(1, x_norm.shape[0])
+
+    # Only off-diagonal correlation.
+    # Do not force correlations to zero; only penalize excessive correlation.
+    d = corr.shape[0]
+    eye = torch.eye(d, device=corr.device, dtype=torch.bool)
+    offdiag = corr.masked_select(~eye)
+
+    loss_cov = torch.relu(offdiag.abs() - cov_margin).pow(2).mean()
+
+    loss = loss_var + mean_weight * loss_mean + cov_weight * loss_cov
+
+    if return_parts:
+        return loss, {
+            "mean": loss_mean.detach(),
+            "var": loss_var.detach(),
+            "cov": loss_cov.detach(),
+        }
+
+    return loss
 
 def soft_code_usage_loss(
     code_logits: torch.Tensor,   # (B, N, K)
@@ -373,31 +426,57 @@ def blank_patch_logit_hinge_loss(
 # -------- blank-active decoder latent separation ----------
 
 def blank_active_decoder_separation_loss(
-    z_blank_dec,
-    z_active_dec,
-    margin: float = 0.0,
+    z_blank_base: torch.Tensor,        # (1,D) or (Nb,D), detached outside or inside
+    z_active_base: torch.Tensor,       # (Na,D), detached outside or inside
+    offset: torch.Tensor,              # (D,)
+    margin: float = 1.0,
+    offset_scale: float = 0.5,
+    norm_reg_weight: float = 1e-5,
+    detach_base: bool = True,
 ):
     """
-    Encourage decoder-side blank representation to be separated from
-    active VQ representations.
+    Separation loss where only the signed decoder-side offset is intended to
+    carry the separation pressure.
 
-    z_blank_dec:  (1, D) or (B, 1, D)
-    z_active_dec: (M, D) active decoder-side latents
-    margin: cosine upper bound. margin=0 means orthogonal-or-less.
+    blank  = base_blank  - offset_scale * offset
+    active = base_active + offset_scale * offset
     """
 
-    if z_active_dec is None or z_active_dec.numel() == 0:
-        return z_blank_dec.new_tensor(0.0)
+    if detach_base:
+        z_blank_base = z_blank_base.detach()
+        z_active_base = z_active_base.detach()
 
-    z_blank = z_blank_dec.reshape(1, -1)
-    z_active = z_active_dec.reshape(-1, z_blank.shape[-1])
+    if z_blank_base.dim() == 1:
+        z_blank_base = z_blank_base.view(1, -1)
+    if z_active_base.dim() == 1:
+        z_active_base = z_active_base.view(1, -1)
 
-    z_blank = F.normalize(z_blank, dim=-1)
-    z_active = F.normalize(z_active, dim=-1)
+    offset = offset.view(1, -1).to(
+        device=z_blank_base.device,
+        dtype=z_blank_base.dtype,
+    )
 
-    cos = (z_active * z_blank).sum(dim=-1)
+    z_blank = z_blank_base - offset_scale * offset
+    z_active = z_active_base + offset_scale * offset
 
-    return F.relu(cos - margin).mean()
+    # Pairwise blank-active distance.
+    dist = torch.cdist(z_blank.float(), z_active.float(), p=2)
+
+    sep_loss = torch.relu(float(margin) - dist).mean()
+
+    # Weak norm regularization so the offset does not solve everything by exploding.
+    offset_norm_reg = offset.float().pow(2).mean()
+
+    total = sep_loss + float(norm_reg_weight) * offset_norm_reg
+
+    return {
+        "total": total,
+        "sep": sep_loss,
+        "offset_norm_reg": offset_norm_reg,
+        "mean_dist": dist.detach().mean(),
+        "min_dist": dist.detach().min(),
+        "offset_norm": offset.detach().float().norm(),
+    }
 
 # ---------- ISI / refractory constraint helpers ----------
 def short_gap_excess_loss_from_logits_batch_targets(

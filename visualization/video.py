@@ -632,14 +632,14 @@ def make_model_videos_vqvae(
         # -----------------------------
         # Save arrays + minimal VQ latents
         # -----------------------------
-        z_typed = out.get("z_typed_no_pos", None)
+        z_dec = out.get("z_dec_no_pos", None)
         active_mask_tok = out.get("active_mask", None)
         codes = out.get("codes", None)
         
         latent_npz = {}
         
-        if z_typed is not None and active_mask_tok is not None:
-            z0 = z_typed[0].detach().float().cpu().numpy()  # (N, D)
+        if z_dec is not None and active_mask_tok is not None:
+            z0 = z_dec[0].detach().float().cpu().numpy()  # (N, D)
             mask = active_mask_tok[0].detach().bool().cpu().numpy()
         
             latent_npz["z_active"] = z0[mask]
