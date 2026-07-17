@@ -10,7 +10,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
+from ..utils.constants import (
+    DEFAULT_GAP_BINS,
+    normalize_gap_bins,
+    max_gap_from_bins,
+)
 
 class GlobalContextSpatialBank:
     """
@@ -88,11 +92,35 @@ class GlobalContextSpatialBank:
         
 
 class GlobalContextAdjacencyBank:
-    def __init__(self, max_gap=3, gap_bins=None, alpha=1.0, beta=20.0, round_decimals=6):
+    def __init__(
+        self,
+        max_gap=None,
+        gap_bins=None,
+        alpha=1.0,
+        beta=20.0,
+        round_decimals=6,
+    ):
         if gap_bins is None:
-            gap_bins = [(g, g) for g in range(1, int(max_gap) + 1)]
-        self.gap_bins = [(int(a), int(b)) for a, b in gap_bins]
-        self.max_gap = max(b for _, b in self.gap_bins)
+            if max_gap is None:
+                gap_bins = DEFAULT_GAP_BINS
+            else:
+                # Backward compatibility for callers that explicitly
+                # provide a legacy integer maximum gap.
+                gap_bins = tuple(
+                    (gap, gap)
+                    for gap in range(
+                        1,
+                        int(max_gap) + 1,
+                    )
+                )
+        
+        self.gap_bins = normalize_gap_bins(
+            gap_bins
+        )
+        
+        self.max_gap = max_gap_from_bins(
+            self.gap_bins
+        )
         self.num_bins = len(self.gap_bins)
         self.alpha = float(alpha)
         self.beta = float(beta)
@@ -182,9 +210,31 @@ class GlobalContextAdjacencyBank:
         }
 
     def load_state_dict(self, state):
-        self.gap_bins = state.get("gap_bins", [(g, g) for g in range(1, int(state["max_gap"]) + 1)])
-        self.gap_bins = [(int(a), int(b)) for a, b in self.gap_bins]
-        self.max_gap = max(b for _, b in self.gap_bins)
+        saved_gap_bins = state.get(
+            "gap_bins",
+            None,
+        )
+        
+        if saved_gap_bins is None:
+            saved_max_gap = int(
+                state["max_gap"]
+            )
+        
+            saved_gap_bins = tuple(
+                (gap, gap)
+                for gap in range(
+                    1,
+                    saved_max_gap + 1,
+                )
+            )
+        
+        self.gap_bins = normalize_gap_bins(
+            saved_gap_bins
+        )
+        
+        self.max_gap = max_gap_from_bins(
+            self.gap_bins
+        )
         self.num_bins = len(self.gap_bins)
         self.alpha = float(state["alpha"])
         self.beta = float(state["beta"])

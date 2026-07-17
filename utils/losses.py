@@ -5,7 +5,10 @@ import math
 import torch
 import torch.nn.functional as F
 
-
+from .constants import (
+    normalize_gap_bins,
+    max_gap_from_bins,
+)
 
 # ---------- Main reconstruction loss (weighted logit based BCE, can also take in mask) ----------
 
@@ -513,8 +516,26 @@ def short_gap_excess_loss_from_logits_batch_targets(
     rates = []
     
     if gap_bins is None:
-        gap_bins = [(g, g) for g in range(1, int(max_gap) + 1)]
-    gap_bins = [(int(a), int(b)) for a, b in gap_bins]
+        if max_gap is None:
+            raise ValueError(
+                "Either gap_bins or max_gap must be provided."
+            )
+    
+        gap_bins = tuple(
+            (gap, gap)
+            for gap in range(
+                1,
+                int(max_gap) + 1,
+            )
+        )
+    
+    gap_bins = normalize_gap_bins(
+        gap_bins
+    )
+    
+    max_gap = max_gap_from_bins(
+        gap_bins
+    )
     
     if target_gap_rates_bg.size(1) < len(gap_bins):
         raise ValueError(

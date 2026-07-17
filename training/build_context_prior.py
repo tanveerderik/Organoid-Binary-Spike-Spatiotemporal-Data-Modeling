@@ -38,17 +38,10 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
-LOCAL_CTX_NAMES = [
-    "log_mean_firing_density",
-    "var_x",
-    "var_y",
-    "var_t",
-    "cov_xy",
-    "cov_xt",
-    "cov_yt",
-    "active_site_ratio",
-    "temporal_trend",
-]
+from ..utils.constants import (
+    ACTIVITY_CTX_NAMES,
+    ACTIVITY_CTX_DIM,
+)
 
 def _to_numpy(x):
     if isinstance(x, torch.Tensor):
@@ -211,7 +204,7 @@ def build_context_prior(
     )
     
     if feature_names is None:
-        feature_names = LOCAL_CTX_NAMES
+        feature_names = ACTIVITY_CTX_NAMES
     
     feature_names = list(feature_names)
     

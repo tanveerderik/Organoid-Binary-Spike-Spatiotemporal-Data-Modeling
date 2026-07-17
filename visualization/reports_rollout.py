@@ -18,21 +18,14 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from ..utils.recon import compute_activity_ctx
+from ..utils.constants import (
+    ACTIVITY_CTX_NAMES,
+)
+
 from ..utils.metrics import f1_from_bool
 
 
-
-_CTX_NAMES = (
-    "log_mean_firing_density",
-    "var_x",
-    "var_y",
-    "var_t",
-    "cov_xy",
-    "cov_xt",
-    "cov_yt",
-    "active_site_ratio",
-    "temporal_trend",
-)
+_CTX_NAMES = ACTIVITY_CTX_NAMES
 
 def ctx_from_hw_t_binary(hw_t: np.ndarray) -> np.ndarray:
     return compute_activity_ctx((hw_t > 0).astype(np.uint8).transpose(2, 0, 1))

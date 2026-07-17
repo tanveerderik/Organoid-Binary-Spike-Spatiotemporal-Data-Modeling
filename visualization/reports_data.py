@@ -13,6 +13,11 @@ import json
 import glob
 from typing import Any, Dict, List, Optional
 
+from ..utils.constants import (
+    ACTIVITY_CTX_NAMES,
+)
+CTX_NAMES = list(ACTIVITY_CTX_NAMES)
+
 import numpy as np
 
 
@@ -312,13 +317,6 @@ def export_base_finetune_flat_xlsx(
 
 # --- Quantitative tables for samplewise visualization results ---
 
-CTX_NAMES = [
-    "log_mean_firing_density",
-    "temporal_activity_std",
-    "spatial_activity_std",
-    "active_site_ratio",
-    "temporal_trend",
-]
 
 
 def _safe_float(x):

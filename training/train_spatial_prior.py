@@ -25,6 +25,11 @@ from ..utils.losses import (
 
 from ..model.spatial_map import GlobalContextSpatialBank, GlobalContextAdjacencyBank
 
+from ..utils.constants import (
+    normalize_gap_bins,
+    max_gap_from_bins,
+)
+
 
 def support_map_loss(pred, tgt, outside_w=3.0, mass_w=2.0, eps=1e-6):
     pred = pred.clamp(eps, 1.0 - eps)
@@ -77,11 +82,29 @@ def fit_spatial_prior_pretrain(
         round_decimals=6,
     )
     
+    
     if adj_gap_bins is None:
-        adj_gap_bins = [(g, g) for g in range(1, int(adj_max_gap) + 1)]
-        
-    adj_gap_bins = [(int(a), int(b)) for a, b in adj_gap_bins]
-    adj_max_gap = max(b for _, b in adj_gap_bins)
+        if adj_max_gap is None:
+            raise ValueError(
+                "Either adj_gap_bins or adj_max_gap "
+                "must be provided."
+            )
+    
+        adj_gap_bins = tuple(
+            (gap, gap)
+            for gap in range(
+                1,
+                int(adj_max_gap) + 1,
+            )
+        )
+    
+    adj_gap_bins = normalize_gap_bins(
+        adj_gap_bins
+    )
+    
+    adj_max_gap = max_gap_from_bins(
+        adj_gap_bins
+    )
 
     memory_adj = GlobalContextAdjacencyBank(
         gap_bins=adj_gap_bins,

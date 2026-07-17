@@ -13,13 +13,34 @@ import matplotlib.pyplot as plt
 
 from scipy.ndimage import maximum_filter
 
+from ..utils.constants import (
+    DEFAULT_GAP_BINS,
+    normalize_gap_bins,
+    gap_bin_label,
+)
+ADJ_GAP_BINS = DEFAULT_GAP_BINS
 
-ADJ_GAP_BINS = [(1, 1), (2, 2), (3, 3), (4, 6), (7, 12), (13, 24), (25, 48)]
+def _gap_bin_label(
+    gap_idx,
+    gap_bins=None,
+):
+    bins = normalize_gap_bins(
+        gap_bins
+        if gap_bins is not None
+        else ADJ_GAP_BINS
+    )
 
-def _gap_bin_label(gap_idx, gap_bins=None):
-    gap_bins = gap_bins or ADJ_GAP_BINS
-    lo, hi = gap_bins[gap_idx]
-    return f"{lo}" if lo == hi else f"{lo}-{hi}"
+    gap_idx = int(gap_idx)
+
+    if gap_idx < 0 or gap_idx >= len(bins):
+        raise IndexError(
+            f"gap_idx={gap_idx} is outside "
+            f"[0, {len(bins) - 1}]"
+        )
+
+    return gap_bin_label(
+        bins[gap_idx]
+    )
 
 def detect_spatial_peaks(img, min_rel_height=0.3, footprint=5):
     """

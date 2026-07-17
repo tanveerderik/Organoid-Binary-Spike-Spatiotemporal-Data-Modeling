@@ -68,6 +68,13 @@ from .visualization.reports_data import (
     export_viz_quant_tables,
 )
 
+from .utils.constants import (
+    ACTIVITY_CTX_NAMES,
+    DEFAULT_GAP_BINS,
+    normalize_gap_bins,
+    max_gap_from_bins,
+)
+
 # =============================================================================
 # User configuration
 # =============================================================================
@@ -77,8 +84,8 @@ from .visualization.reports_data import (
 #   (2,)       -> load stage-1 ckpt, train context-conditioned decoder only
 #   (1, 2, 3)  -> run the whole pipeline sequentially
 #   (0,)     -> run spatial-map pretraining only
-TRAIN_STAGES = ()        # 0,1,2,3
-EVAL_STAGES  = (3,)   # 0,1,2,3
+TRAIN_STAGES = (0,)        # 0,1,2,3
+EVAL_STAGES  = (0,3)   # 0,1,2,3
 
 RUN_EVAL = True
 RUN_VIZ  = True
@@ -140,7 +147,11 @@ dim_assay_for_emb = 64
 max_viz_samples = 1000
 
 # ISI adjacency firing constraint
-gap_bins = [(1, 1), (2, 2), (3, 3), (4, 6), (7, 12), (13, 24), (25, 48)]
+gap_bins = list(
+    normalize_gap_bins(
+        DEFAULT_GAP_BINS
+    )
+)
 
 # Tolerance for spike location in a voxel (for training loss and val metrics)
 recon_tolerance = (2, 2, 2)
@@ -926,7 +937,9 @@ def run_stage3_prior(model, train_loader, val_loader, device):
             memory_tok=getattr(model, "memory_tok", None),
             memory_adj=getattr(model, "memory_adj", None),
             isi_gap_bins=gap_bins,
-            isi_max_gap=max(b for _, b in gap_bins),
+            isi_max_gap=max_gap_from_bins(
+                gap_bins
+            )
         )
 
         save_json_report(hist_motif, REPORTS["prior_motif"])
@@ -1013,7 +1026,9 @@ def run_stage3_prior(model, train_loader, val_loader, device):
             memory_tok=getattr(model, "memory_tok", None),
             memory_adj=getattr(model, "memory_adj", None),
             isi_gap_bins=gap_bins,
-            isi_max_gap=max(b for _, b in gap_bins),
+            isi_max_gap=max_gap_from_bins(
+                gap_bins
+            ),
         )
 
         save_json_report(hist_refine, REPORTS["prior_refine"])
@@ -1665,7 +1680,9 @@ def evaluate_and_visualize(model, test_loader, stage: int, assay_indices, assay_
                 thr=None,
                 cmap_name="viridis",
                 isi_gap_bins=gap_bins,
-                isi_max_gap=max(b for _, b in gap_bins),
+                isi_max_gap=max_gap_from_bins(
+                    gap_bins
+                ),
             )
             
         if RUN_PLOTTER:
@@ -2237,6 +2254,7 @@ def main():
                 save_path="ckpts/context_prior.pkl",
                 model=model,
                 device=device,
+                feature_names=ACTIVITY_CTX_NAMES,
             )
     
         elif stage == 1:

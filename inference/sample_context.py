@@ -14,6 +14,12 @@ import numpy as np
 import torch
 
 
+from ..utils.constants import (
+    ACTIVITY_CTX_NAMES,
+    ACTIVITY_CTX_DIM,
+    ACTIVITY_CTX_INDEX,
+)
+
 ArrayLike = Union[np.ndarray, torch.Tensor, Sequence[float]]
 
 
@@ -95,7 +101,33 @@ class ContextBankSampler:
         self.local_std = artifact.get("local_feature_std", self.raw_l.std(axis=0)).astype(np.float32)
         self.local_std = np.where(self.local_std < 1e-8, 1.0, self.local_std).astype(np.float32)
 
-        self.feature_names = artifact.get("feature_names", None)
+        saved_feature_names = artifact.get(
+            "feature_names",
+            None,
+        )
+
+        if saved_feature_names is None:
+            self.feature_names = None
+        else:
+            self.feature_names = tuple(
+                str(name)
+                for name in saved_feature_names
+            )
+
+            if len(self.feature_names) != ACTIVITY_CTX_DIM:
+                raise ValueError(
+                    f"Context bank contains "
+                    f"{len(self.feature_names)} feature names; "
+                    f"expected {ACTIVITY_CTX_DIM}."
+                )
+
+            if self.feature_names != ACTIVITY_CTX_NAMES:
+                raise ValueError(
+                    "Context-bank feature ordering does not match "
+                    "the canonical activity-context ordering.\n"
+                    f"Saved:     {self.feature_names}\n"
+                    f"Canonical: {ACTIVITY_CTX_NAMES}"
+                )
 
         self.N = len(self.assay_ids)
         if len(self.raw_g) != self.N or len(self.raw_l) != self.N:
@@ -170,9 +202,9 @@ class ContextBankSampler:
 
         n_features = int(self.raw_l.shape[1])
 
-        if n_features != 9:
+        if n_features != ACTIVITY_CTX_DIM:
             raise ValueError(
-                f"Context bank local dimension must be 9, "
+                f"Context bank local dimension must be {ACTIVITY_CTX_DIM}, "
                 f"got {n_features}"
             )
 
@@ -190,14 +222,21 @@ class ContextBankSampler:
                             "Named partial-local fields require a "
                             "context bank rebuilt with feature_names."
                         )
-
-                    if key not in self.feature_names:
+                        
+                    if key not in ACTIVITY_CTX_INDEX:
                         raise KeyError(
                             f"Unknown local feature name {key!r}. "
-                            f"Valid names: {self.feature_names}"
+                            f"Valid names: {ACTIVITY_CTX_NAMES}"
                         )
+                    
+                    if self.feature_names is None:
+                        raise ValueError(
+                            "Named partial-local fields require a "
+                            "context bank rebuilt with feature_names."
+                        )
+                    
+                    j = ACTIVITY_CTX_INDEX[key]
 
-                    j = self.feature_names.index(key)
                 else:
                     j = int(key)
 

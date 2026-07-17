@@ -30,18 +30,14 @@ from .reports_data import (
     save_agreement_csv,
 )
 
+from ..utils.constants import (
+    ACTIVITY_CTX_NAMES,
+    DEFAULT_GAP_BINS,
+    normalize_gap_bins,
+    gap_bin_label,
+)
 
-LOCAL_CTX_NAMES = [
-    "log_mean_firing_density",
-    "var_x",
-    "var_y",
-    "var_t",
-    "cov_xy",
-    "cov_xt",
-    "cov_yt",
-    "active_site_ratio",
-    "temporal_trend",
-]
+LOCAL_CTX_NAMES = list(ACTIVITY_CTX_NAMES)
 
 TASK_NAMES = {
     0: "exact reconstruction",
@@ -57,12 +53,29 @@ TASK_MODE_TO_NAME = {
     "spatial": "spatial completion",
 }
 
-ADJ_GAP_BINS = [(1, 1), (2, 2), (3, 3), (4, 6), (7, 12), (13, 24), (25, 48)]
+ADJ_GAP_BINS = DEFAULT_GAP_BINS
 
-def _gap_bin_label(gap_idx, gap_bins=None):
-    gap_bins = gap_bins or ADJ_GAP_BINS
-    lo, hi = gap_bins[gap_idx]
-    return f"{lo}" if lo == hi else f"{lo}-{hi}"
+def _gap_bin_label(
+    gap_idx,
+    gap_bins=None,
+):
+    bins = normalize_gap_bins(
+        gap_bins
+        if gap_bins is not None
+        else ADJ_GAP_BINS
+    )
+
+    gap_idx = int(gap_idx)
+
+    if gap_idx < 0 or gap_idx >= len(bins):
+        raise IndexError(
+            f"gap_idx={gap_idx} is outside "
+            f"[0, {len(bins) - 1}]"
+        )
+
+    return gap_bin_label(
+        bins[gap_idx]
+    )
 
 def _plot_series(x, y, out_path, title, ylabel):
     if y is None or len(y) == 0:

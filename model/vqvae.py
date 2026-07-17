@@ -16,7 +16,10 @@ from .base import SparseTokenTransformerEncoder, DecoderCrossAttnBlock, Hierarch
 from .spatial_map import SpatialMapPrior
 from ..utils.embed import get_3d_sincos_pos_embed
 
-
+from ..utils.constants import (
+    DEFAULT_GAP_BINS,
+    normalize_gap_bins,
+)
     
 class TransformerVQVAE(nn.Module):
     def __init__(
@@ -236,10 +239,12 @@ class TransformerVQVAE(nn.Module):
         self.use_spatial_map_prior = bool(use_spatial_map_prior)
         self.use_learned_spatial_prior_diagnostics = False
         
-        if gap_bins is None:
-            gap_bins = [(1, 1), (2, 2), (3, 3)]
-        gap_bins = [(int(a), int(b)) for a, b in gap_bins]
-        self.gap_bins = gap_bins
+        self.gap_bins = normalize_gap_bins(
+            gap_bins
+            if gap_bins is not None
+            else DEFAULT_GAP_BINS
+        )
+
         
         if self.use_spatial_map_prior:
             self.spatial_map_prior = SpatialMapPrior(

@@ -18,6 +18,10 @@ from .utils.transforms import temporal_pool_max, random_spatial_crop, pick_tempo
 from .utils.padding import crop_time_to_multiple, pad_hw_symmetric_to_multiple
 from .utils.recon import compute_activity_ctx
 from .utils.embed import fourier_embed_2d
+
+from .utils.constants import (
+    ACTIVITY_CTX_DIM,
+)
 # =========================
 # Helpers (standalone)
 # =========================
@@ -681,7 +685,10 @@ class NpzBurstDataset(Dataset):
         if self.use_activity_ctx:
             local_ctx_np = compute_activity_ctx(thw_span).astype(np.float32, copy=False)
         else:
-            local_ctx_np = np.zeros(9, dtype=np.float32)
+            local_ctx_np = np.zeros(
+                ACTIVITY_CTX_DIM,
+                dtype=np.float32,
+            )
         local_ctx = torch.from_numpy(local_ctx_np)
     
         # ---------------- global contexts ----------------

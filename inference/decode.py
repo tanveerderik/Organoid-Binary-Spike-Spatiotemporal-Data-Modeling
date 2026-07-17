@@ -18,20 +18,14 @@ import torch
 import torch.nn.functional as F
 
 from ..utils.recon import compute_activity_ctx
+from ..utils.constants import (
+    ACTIVITY_CTX_NAMES,
+    ACTIVITY_CTX_DIM,
+)
 from ..visualization.video import save_volume_as_mp4_imageio
 
 
-LOCAL_CTX_NAMES = [
-    "log_mean_firing_density",
-    "var_x",
-    "var_y",
-    "var_t",
-    "cov_xy",
-    "cov_xt",
-    "cov_yt",
-    "active_site_ratio",
-    "temporal_trend",
-]
+LOCAL_CTX_NAMES = list(ACTIVITY_CTX_NAMES)
 
 
 def xgen_to_thw_np(x_b1thw_i):

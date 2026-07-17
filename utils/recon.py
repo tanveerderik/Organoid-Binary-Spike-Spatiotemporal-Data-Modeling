@@ -12,7 +12,10 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 
-
+from .constants import (
+    ACTIVITY_CTX_NAMES,
+    ACTIVITY_CTX_DIM,
+)
 
 def tokens_to_voxel_masks(model, pred_patches: torch.Tensor, grid: Tuple[int,int,int], predict_mask: Optional[torch.Tensor]):
     """
