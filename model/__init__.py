@@ -7,9 +7,11 @@ Created on Fri Mar 13 11:23:51 2026
 """
 
 from .vqvae import TransformerVQVAE
-from .prior import HierarchicalTokenMGITTransformer
+from .prior import DETRActivityPrior, MaskGITMotifPrior, HierarchicalCodebookPrior
 
 __all__ = [
     "TransformerVQVAE",
-    "HierarchicalTokenMGITTransformer",
+    "DETRActivityPrior",
+    "MaskGITMotifPrior",
+    "HierarchicalCodebookPrior",
 ]

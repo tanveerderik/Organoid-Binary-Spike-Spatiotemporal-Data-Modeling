@@ -41,7 +41,7 @@ class SampleResult:
         "assay_name", "assay_id", "mode", "task_id",
         "f1", "thr",
         "ctx_ref", "ctx_pred",
-        "adj_target", "adj_pred", "adj_allowed", "adj_confidence",
+        "adj_target", "adj_pred", "adj_allowed", "adj_confidence", "adj_gap_bins",
         "json_path", "npz_path",
     )
     def __init__(self, **kw): 
@@ -74,6 +74,7 @@ def find_results(eval_roots: List[str]) -> List[SampleResult]:
                 adj_pred=adj.get("pred_gap_rates"),
                 adj_allowed=adj.get("allowed_gap_rates"),
                 adj_confidence=adj.get("confidence"),
+                adj_gap_bins=adj.get("gap_bins"),
                 json_path=jpath,
                 npz_path=npz_path
             ))
@@ -490,8 +491,19 @@ def build_viz_quant_raw_tables(eval_roots, stage_names=None, ctx_names=None):
                         violation = max(0.0, pred - allowed) if np.isfinite(pred) and np.isfinite(allowed) else np.nan
 
                         row = dict(base)
+                        
+                        gap_bins = adj.get("gap_bins", None)
+                        if gap_bins is not None and g < len(gap_bins):
+                            lo, hi = gap_bins[g]
+                            gap_label = str(lo) if int(lo) == int(hi) else f"{int(lo)}-{int(hi)}"
+                        else:
+                            gap_label = str(g + 1)
+                        
+                        
+                        
                         row.update({
-                            "gap": g + 1,
+                            "gap_idx": g,
+                            "gap": gap_label,
                             "adj_target": target,
                             "adj_pred": pred,
                             "adj_allowed": allowed,
@@ -591,7 +603,7 @@ def make_viz_quant_manuscript_tables(ctx_summary, adj_summary):
     if not adj_summary.empty:
         adj_ms = adj_summary.copy()
         adj_ms.insert(0, "feature_type", "short_gap_adjacency")
-        adj_ms["feature"] = adj_ms["gap"].map(lambda g: f"gap_{int(g)}")
+        adj_ms["feature"] = adj_ms["gap"].map(lambda g: f"gap_{str(g).replace('-', '_to_')}")
 
         adj_ms["target_mean_std"] = [
             _mean_std_str(m, s) for m, s in zip(adj_ms["ref_mean"], adj_ms["ref_std"])
@@ -628,13 +640,43 @@ def make_viz_quant_manuscript_tables(ctx_summary, adj_summary):
 
 
 
-def summarize_ctx_agreement(records):
-    """
-    Backward-compatible wrapper used by reports_plot.py.
-    """
-    df = pd.DataFrame(records)
+def summarize_ctx_agreement(records, ctx_names=None):
+    ctx_names = list(ctx_names or CTX_NAMES)
+
+    rows = []
+    for s in records:
+        if isinstance(s, dict):
+            rows.append(s)
+            continue
+
+        ctx_ref = getattr(s, "ctx_ref", None)
+        ctx_pred = getattr(s, "ctx_pred", None)
+        if ctx_ref is None or ctx_pred is None:
+            continue
+
+        n = min(len(ctx_ref), len(ctx_pred), len(ctx_names))
+        for d in range(n):
+            rows.append({
+                "stage": "eval",
+                "ctx_dim": d,
+                "ctx_name": ctx_names[d],
+                "ctx_ref": ctx_ref[d],
+                "ctx_pred": ctx_pred[d],
+            })
+
+    df = pd.DataFrame(rows)
     if df.empty:
         return pd.DataFrame()
+
+    if "stage" not in df.columns:
+        df["stage"] = "eval"
+
+    if "ctx_name" not in df.columns and "ctx_dim" in df.columns:
+        df["ctx_name"] = df["ctx_dim"].map(
+            lambda d: ctx_names[int(d)]
+            if pd.notna(d) and int(d) < len(ctx_names)
+            else f"ctx_{d}"
+        )
 
     return _summarize_pairwise(
         df,
@@ -643,38 +685,81 @@ def summarize_ctx_agreement(records):
         pred_col="ctx_pred",
     )
 
+def summarize_adjacency_agreement(records, max_gaps=None):
+    rows = []
+    for s in records:
+        if isinstance(s, dict):
+            rows.append(s)
+            continue
 
-def summarize_adjacency_agreement(records):
-    """
-    Backward-compatible wrapper used by reports_plot.py.
-    """
-    df = pd.DataFrame(records)
+        tgt = getattr(s, "adj_target", None)
+        pred = getattr(s, "adj_pred", None)
+        allowed = getattr(s, "adj_allowed", None)
+        conf = getattr(s, "adj_confidence", None)
+
+        if tgt is None or pred is None:
+            continue
+
+        n = min(len(tgt), len(pred))
+        
+        gap_bins = getattr(s, "adj_gap_bins", None)
+
+        for g in range(n):
+            if gap_bins is not None and g < len(gap_bins):
+                lo, hi = gap_bins[g]
+                gap_label = str(lo) if int(lo) == int(hi) else f"{int(lo)}-{int(hi)}"
+            else:
+                gap_label = str(g + 1)
+            
+            rows.append({
+                "stage": "eval",
+                "gap_idx": g,
+                "gap": gap_label,
+                "adj_target": tgt[g],
+                "adj_pred": pred[g],
+                "adj_allowed": allowed[g] if allowed is not None and g < len(allowed) else np.nan,
+                "adj_confidence": conf[g] if conf is not None and g < len(conf) else np.nan,
+                "adj_error": pred[g] - tgt[g],
+                "adj_violation": max(0.0, pred[g] - allowed[g]) if allowed is not None and g < len(allowed) else np.nan,
+            })
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return pd.DataFrame()
+
+    if "stage" not in df.columns:
+        df["stage"] = "eval"
+        
+    if max_gaps is not None and "gap_idx" in df.columns:
+        df = df[pd.to_numeric(df["gap_idx"], errors="coerce") < int(max_gaps)]
+
+
     if df.empty:
         return pd.DataFrame()
 
     return _summarize_pairwise(
         df,
-        group_cols=["stage", "gap"],
+        group_cols=["stage", "gap_idx", "gap"],
         ref_col="adj_target",
         pred_col="adj_pred",
         allowed_col="adj_allowed",
         violation_col="adj_violation",
     )
 
-
-
 def save_agreement_csv(rows, out_dir, name):
     out_dir = _ensure_dir(out_dir)
     path = os.path.join(out_dir, name)
 
-    cols = ["stage", "feature", "n", "pearson_r", "mae", "rmse", "bias"]
+    if isinstance(rows, pd.DataFrame):
+        rows.to_csv(path, index=False)
+        return path
 
-    with open(path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=cols)
-        w.writeheader()
-        for r in rows:
-            w.writerow({c: r.get(c, "") for c in cols})
+    rows = list(rows)
+    if not rows:
+        pd.DataFrame().to_csv(path, index=False)
+        return path
 
+    pd.DataFrame(rows).to_csv(path, index=False)
     return path
 
 
@@ -720,7 +805,7 @@ def export_viz_quant_tables(eval_roots, out_dir, stage_names=None, ctx_names=Non
     else:
         adj_summary = _summarize_pairwise(
             adj_df,
-            group_cols=["stage", "gap"],
+            group_cols=["stage", "gap_idx", "gap"],
             ref_col="adj_target",
             pred_col="adj_pred",
             allowed_col="adj_allowed",

@@ -23,11 +23,15 @@ from ..utils.metrics import f1_from_bool
 
 
 _CTX_NAMES = (
-    "mean_firing_density",
-    "frame_mean_std",
-    "pixel_mean_std",
+    "log_mean_firing_density",
+    "var_x",
+    "var_y",
+    "var_t",
+    "cov_xy",
+    "cov_xt",
+    "cov_yt",
     "active_site_ratio",
-    "temporal_slope",
+    "temporal_trend",
 )
 
 def ctx_from_hw_t_binary(hw_t: np.ndarray) -> np.ndarray:

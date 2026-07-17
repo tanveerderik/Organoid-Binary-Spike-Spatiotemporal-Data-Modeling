@@ -681,7 +681,7 @@ class NpzBurstDataset(Dataset):
         if self.use_activity_ctx:
             local_ctx_np = compute_activity_ctx(thw_span).astype(np.float32, copy=False)
         else:
-            local_ctx_np = np.zeros(5, dtype=np.float32)
+            local_ctx_np = np.zeros(9, dtype=np.float32)
         local_ctx = torch.from_numpy(local_ctx_np)
     
         # ---------------- global contexts ----------------

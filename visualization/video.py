@@ -342,6 +342,7 @@ def make_model_videos_vqvae(
     
     save_adj_rates: bool = True,
     isi_max_gap: int = 3,
+    isi_gap_bins=None,
     isi_tau: float = 0.25,
     isi_margin: float = 0.25,
     memory_adj_conf_den_scale: float = 100.0,
@@ -414,39 +415,6 @@ def make_model_videos_vqvae(
         )
         grid = out["grid"]
         
-        # with torch.no_grad():
-        #     blank_mask = out["blank_mask"].detach().bool()
-        #     thr_debug = float(thr)
-        
-        #     raw_blank_logits = out["pred_patches_raw"][blank_mask]
-        #     final_blank_logits = out["pred_patches"][blank_mask]
-        
-        #     raw_blank_prob = torch.sigmoid(raw_blank_logits)
-        #     final_blank_prob = torch.sigmoid(final_blank_logits)
-        
-        #     print("\n[BLANK DEBUG]")
-        #     print("thr =", thr_debug)
-        #     print("blank patch frac =", blank_mask.float().mean().item())
-        
-        #     print("RAW blank max logit =", raw_blank_logits.max().item())
-        #     print("RAW blank max prob  =", raw_blank_prob.max().item())
-        #     print("RAW blank voxels > thr =", (raw_blank_prob > thr_debug).sum().item())
-        #     print("RAW blank patches any > thr =",
-        #           (raw_blank_prob.amax(dim=-1) > thr_debug).sum().item(),
-        #           "/", raw_blank_prob.shape[0])
-        
-        #     print("FINAL blank max logit =", final_blank_logits.max().item())
-        #     print("FINAL blank max prob  =", final_blank_prob.max().item())
-        #     print("FINAL blank voxels > thr =", (final_blank_prob > thr_debug).sum().item())
-        #     print("FINAL blank patches any > thr =",
-        #           (final_blank_prob.amax(dim=-1) > thr_debug).sum().item(),
-        #           "/", final_blank_prob.shape[0])
-        
-        #     patch_score = 0.25 * torch.logsumexp(raw_blank_logits / 0.25, dim=1)
-        #     print("RAW patch_score max =", patch_score.max().item())
-        #     print("RAW patch_score > -6 =", (patch_score > -6.0).sum().item())
-        
-        
         logits = out["logits_vol"]
         logits_raw = out.get("logits_vol_raw", logits)
         prob = torch.sigmoid(logits)
@@ -473,6 +441,7 @@ def make_model_videos_vqvae(
                     logits_b1thw=logits_raw.float(),
                     target_gap_rates_bg=adj_target_bg.float(),
                     max_gap=isi_max_gap,
+                    gap_bins=isi_gap_bins,
                     tau=isi_tau,
                     margin=isi_margin,
                     confidence_bg=adj_conf_bg.float(),
@@ -482,14 +451,17 @@ def make_model_videos_vqvae(
                 pred_gap = adj_parts["pred_gap_rates"][0].detach().cpu().numpy()
                 target_gap = adj_parts["target_gap_rates"][0].detach().cpu().numpy()
                 allowed_gap = adj_parts["allowed_gap_rates"][0].detach().cpu().numpy()
-                conf_gap = adj_parts["confidence"][0, :isi_max_gap].detach().cpu().numpy()
+                conf_gap = adj_parts["confidence"][0].detach().cpu().numpy()
+                gap_bins_used = adj_parts.get("gap_bins", isi_gap_bins)
         
                 adjacency_block = {
                     "pred_gap_rates": [float(x) for x in pred_gap.tolist()],
                     "target_gap_rates": [float(x) for x in target_gap.tolist()],
                     "allowed_gap_rates": [float(x) for x in allowed_gap.tolist()],
                     "confidence": [float(x) for x in conf_gap.tolist()],
-                    "isi_max_gap": int(isi_max_gap),
+                    "isi_max_gap": int(max(int(b) for _, b in gap_bins_used)),
+                    "gap_bins": [[int(a), int(b)] for a, b in gap_bins_used],
+                    "num_gap_bins": int(len(gap_bins_used)),
                     "isi_tau": float(isi_tau),
                     "isi_margin": float(isi_margin),
                 }

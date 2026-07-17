@@ -88,8 +88,12 @@ class GlobalContextSpatialBank:
         
 
 class GlobalContextAdjacencyBank:
-    def __init__(self, max_gap=3, alpha=1.0, beta=20.0, round_decimals=6):
-        self.max_gap = int(max_gap)
+    def __init__(self, max_gap=3, gap_bins=None, alpha=1.0, beta=20.0, round_decimals=6):
+        if gap_bins is None:
+            gap_bins = [(g, g) for g in range(1, int(max_gap) + 1)]
+        self.gap_bins = [(int(a), int(b)) for a, b in gap_bins]
+        self.max_gap = max(b for _, b in self.gap_bins)
+        self.num_bins = len(self.gap_bins)
         self.alpha = float(alpha)
         self.beta = float(beta)
         self.round_decimals = int(round_decimals)
@@ -108,17 +112,21 @@ class GlobalContextAdjacencyBank:
             k = self._key(gct[b])
 
             if k not in self._num:
-                self._num[k] = torch.zeros(self.max_gap)
-                self._den[k] = torch.zeros(self.max_gap)
+                self._num[k] = torch.zeros(self.num_bins)
+                self._den[k] = torch.zeros(self.num_bins)
 
             xb = x_bin[b:b+1]
 
-            for gi, gap in enumerate(range(1, self.max_gap + 1)):
-                joint = (xb[:, :, :-gap] * xb[:, :, gap:]).sum().detach().cpu()
-                base = xb[:, :, :-gap].sum().detach().cpu()
-
-                self._num[k][gi] += joint
-                self._den[k][gi] += base
+            for bi, (lo, hi) in enumerate(self.gap_bins):
+                for gap in range(lo, hi + 1):
+                    if T <= gap:
+                        continue
+            
+                    joint = (xb[:, :, :-gap] * xb[:, :, gap:]).sum().detach().cpu()
+                    base = xb[:, :, :-gap].sum().detach().cpu()
+            
+                    self._num[k][bi] += joint
+                    self._den[k][bi] += base
 
     def get(self, gct, device=None, dtype=None):
         outs = []
@@ -164,6 +172,8 @@ class GlobalContextAdjacencyBank:
     def state_dict(self):
         return {
             "max_gap": self.max_gap,
+            "gap_bins": self.gap_bins,
+            "num_bins": self.num_bins,
             "alpha": self.alpha,
             "beta": self.beta,
             "round_decimals": self.round_decimals,
@@ -172,7 +182,10 @@ class GlobalContextAdjacencyBank:
         }
 
     def load_state_dict(self, state):
-        self.max_gap = int(state["max_gap"])
+        self.gap_bins = state.get("gap_bins", [(g, g) for g in range(1, int(state["max_gap"]) + 1)])
+        self.gap_bins = [(int(a), int(b)) for a, b in self.gap_bins]
+        self.max_gap = max(b for _, b in self.gap_bins)
+        self.num_bins = len(self.gap_bins)
         self.alpha = float(state["alpha"])
         self.beta = float(state["beta"])
         self.round_decimals = int(state["round_decimals"])
@@ -192,11 +205,12 @@ class GlobalContextAdjacencyBank:
             print(f"\nKey {i}: {k}")
             print(f"  den: {float(den.mean()):.2f}")
     
-            for g in range(self.max_gap):
+            for bi, (lo, hi) in enumerate(self.gap_bins):
+                label = f"{lo}" if lo == hi else f"{lo}-{hi}"
                 print(
-                    f"  gap {g+1}: "
-                    f"num={float(num[g]):.2f} "
-                    f"rate={float(rate[g]):.6f}"
+                    f"  gap {label}: "
+                    f"num={float(num[bi]):.2f} "
+                    f"rate={float(rate[bi]):.6f}"
                 )
     
         print("====================================\n")
@@ -225,6 +239,7 @@ class SpatialMapPrior(nn.Module):
         drop: float = 0.1,
         basis_k: int = 32,
         max_gap: int = 3,
+        num_adj_bins: int | None = None,
     ):
         super().__init__()
         self.global_emb_dim = int(global_emb_dim)
@@ -267,7 +282,7 @@ class SpatialMapPrior(nn.Module):
         self.adj_head = nn.Sequential(
             nn.Linear(self.global_emb_dim, self.global_emb_dim),
             nn.ReLU(),
-            nn.Linear(self.global_emb_dim, max_gap)  # max_gap
+            nn.Linear(self.global_emb_dim, int(num_adj_bins or max_gap))
         )
 
         self.reset_parameters()

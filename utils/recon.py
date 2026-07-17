@@ -482,16 +482,20 @@ def temporal_trend_score_np(frame_means: np.ndarray, eps: float = 1e-8) -> float
     return float((fm * t).mean() / (fm_std + eps))
 
 
-def compute_activity_ctx(thw: np.ndarray, max_num_units: float = 1024.0) -> np.ndarray:
+def compute_activity_ctx(thw: np.ndarray, max_num_units: float = 1024.0, eps: float = 1e-8) -> np.ndarray:
     """
-    Compute 5D descriptive context from a (T,H,W) binary spike volume.
+    Compute 9D local context from a (T,H,W) binary spike volume.
 
     Features:
-      0) log_mean_firing_density    - average spike rate over all voxels (log scale)
-      1) frame_mean_std             - temporal variability of frame activity
-      2) pixel_mean_std             - spatial heterogeneity across pixels
-      3) active_site_ratio          - fraction of spatial sites active at least once
-      4) temporal_trend_score       - scale-free temporal trend in roughly [-1, 1]
+      0) log_mean_firing_density
+      1) var_x
+      2) var_y
+      3) var_t
+      4) cov_xy
+      5) cov_xt
+      6) cov_yt
+      7) active_site_ratio
+      8) temporal_trend_score
     """
     x = thw.astype(np.float32)
     T, H, W = x.shape
@@ -499,22 +503,47 @@ def compute_activity_ctx(thw: np.ndarray, max_num_units: float = 1024.0) -> np.n
     mean_firing_density = float(x.mean())
     log_mean_firing_density = float(np.clip(np.log(mean_firing_density + 1e-6), -15.0, 0.0))
 
-    frame_means = x.reshape(T, -1).mean(axis=1)
-    frame_mean_std = float(frame_means.std(ddof=0) * np.sqrt(H * W))
+    mass = float(x.sum())
 
-    pixel_means = x.reshape(T, -1).mean(axis=0)
-    pixel_mean_std = float(pixel_means.std(ddof=0) * np.sqrt(T))
+    if mass <= eps:
+        var_x = var_y = var_t = 0.0
+        cov_xy = cov_xt = cov_yt = 0.0
+    else:
+        tt = np.linspace(-1.0, 1.0, T, dtype=np.float32)[:, None, None]
+        yy = np.linspace(-1.0, 1.0, H, dtype=np.float32)[None, :, None]
+        xx = np.linspace(-1.0, 1.0, W, dtype=np.float32)[None, None, :]
+
+        mx = float((x * xx).sum() / mass)
+        my = float((x * yy).sum() / mass)
+        mt = float((x * tt).sum() / mass)
+
+        dx = xx - mx
+        dy = yy - my
+        dt = tt - mt
+
+        var_x = float((x * dx * dx).sum() / mass)
+        var_y = float((x * dy * dy).sum() / mass)
+        var_t = float((x * dt * dt).sum() / mass)
+
+        cov_xy = float((x * dx * dy).sum() / mass)
+        cov_xt = float((x * dx * dt).sum() / mass)
+        cov_yt = float((x * dy * dt).sum() / mass)
 
     denom = float(min(H * W, max_num_units))
     active_site_count = float((x.max(axis=0) > 0).sum())
     active_site_ratio = float(min(active_site_count / max(denom, 1.0), 1.0))
 
-    temporal_slope = temporal_trend_score_np(frame_means)
+    frame_means = x.reshape(T, -1).mean(axis=1)
+    temporal_trend = temporal_trend_score_np(frame_means)
 
     return np.array([
         log_mean_firing_density,
-        frame_mean_std,
-        pixel_mean_std,
+        var_x,
+        var_y,
+        var_t,
+        cov_xy,
+        cov_xt,
+        cov_yt,
         active_site_ratio,
-        temporal_slope,
+        temporal_trend,
     ], dtype=np.float32)

@@ -9,6 +9,7 @@ import os
 from typing import List, Dict, Any, Optional
 
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 
 from .reports_data import (
@@ -31,11 +32,15 @@ from .reports_data import (
 
 
 LOCAL_CTX_NAMES = [
-    "log mean firing density",
-    "temporal activity std",
-    "spatial activity std",
-    "active site ratio",
-    "temporal trend slope",
+    "log_mean_firing_density",
+    "var_x",
+    "var_y",
+    "var_t",
+    "cov_xy",
+    "cov_xt",
+    "cov_yt",
+    "active_site_ratio",
+    "temporal_trend",
 ]
 
 TASK_NAMES = {
@@ -51,6 +56,13 @@ TASK_MODE_TO_NAME = {
     "noncausal": "noncausal temporal completion",
     "spatial": "spatial completion",
 }
+
+ADJ_GAP_BINS = [(1, 1), (2, 2), (3, 3), (4, 6), (7, 12), (13, 24), (25, 48)]
+
+def _gap_bin_label(gap_idx, gap_bins=None):
+    gap_bins = gap_bins or ADJ_GAP_BINS
+    lo, hi = gap_bins[gap_idx]
+    return f"{lo}" if lo == hi else f"{lo}-{hi}"
 
 def _plot_series(x, y, out_path, title, ylabel):
     if y is None or len(y) == 0:
@@ -361,7 +373,8 @@ def plot_adjacency_scatter(
     filename_prefix="adj_scatter",
 ):
     out_dir = _ensure_dir(out_dir)
-    gap = gap_idx + 1
+    gap_bins = getattr(samples[0], "adj_gap_bins", None) if len(samples) else None
+    gap_label = _gap_bin_label(gap_idx, gap_bins)
 
     xs, ys = [], []
 
@@ -399,13 +412,14 @@ def plot_adjacency_scatter(
 
     plt.xlim(lim)
     plt.ylim(lim)
-    plt.xlabel(f"Reference gap-{gap} rate")
-    plt.ylabel(f"Predicted gap-{gap} rate")
-    plt.title(f"{title_prefix}: gap {gap}")
+    plt.xlabel(f"Reference gap {gap_label} rate")
+    plt.ylabel(f"Predicted gap {gap_label} rate")
+    plt.title(f"{title_prefix}: gap {gap_label}")
+    
     plt.legend(frameon=False, fontsize=8)
     plt.tight_layout()
     plt.savefig(
-        os.path.join(out_dir, f"{filename_prefix}_gap{gap}.png"),
+        os.path.join(out_dir, f"{filename_prefix}_gap{gap_label.replace('-', '_to_')}.png"),
         dpi=180,
     )
     plt.close()
@@ -419,10 +433,18 @@ def plot_adjacency_scatter_stage_overlay(
     adj_margin=0.25,
     stage1_label="Stage 1",
     stage2_label="Stage 2",
+    title_prefix="Adjacency / short-gap agreement",
+    filename_prefix="adj_stage_overlay",
 ):
     out_dir = _ensure_dir(out_dir)
-    gap = gap_idx + 1
-
+    
+    gap_bins = None
+    for _s in list(samples_stage1) + list(samples_stage2):
+        gap_bins = getattr(_s, "adj_gap_bins", None)
+        if gap_bins is not None:
+            break
+    gap_label = _gap_bin_label(gap_idx, gap_bins)
+    
     def collect(samples):
         xs, ys = [], []
         for s in samples:
@@ -469,13 +491,14 @@ def plot_adjacency_scatter_stage_overlay(
 
     plt.xlim(lim)
     plt.ylim(lim)
-    plt.xlabel(f"Reference gap-{gap} rate")
-    plt.ylabel(f"Predicted gap-{gap} rate")
-    plt.title(f"Adjacency / short-gap rate: gap {gap}")
+    plt.xlabel(f"Reference gap {gap_label} rate")
+    plt.ylabel(f"Predicted gap {gap_label} rate")
+    plt.title(f"{title_prefix}: gap {gap_label}")
+    
     plt.legend(frameon=False, fontsize=8)
     plt.tight_layout()
     plt.savefig(
-        os.path.join(out_dir, f"adj_stage_overlay_gap{gap}.png"),
+        os.path.join(out_dir, f"{filename_prefix}_gap{gap_label.replace('-', '_to_')}.png"),
         dpi=180,
     )
     plt.close()
@@ -572,14 +595,14 @@ def run_plotter(train_report: Optional[str],
     ctx_rows = summarize_ctx_agreement(samples, ctx_names=LOCAL_CTX_NAMES)
     save_agreement_csv(ctx_rows, out_dir, "local_context_feature_consistency.csv")
     
-    adj_rows = summarize_adjacency_agreement(samples, max_gaps=3)
+    adj_rows = summarize_adjacency_agreement(samples)
     save_agreement_csv(adj_rows, out_dir, "short_gap_adjacency_consistency.csv")
 
     # 3) per-assay stats + plots
     stats = per_assay_stats(samples)
     save_per_assay_csv(stats, out_dir, "per_assay.csv")
     plot_f1_box_by_assay(samples, os.path.join(out_dir, "eval"))
-    for dim in range(5):  # compute_activity_ctx returns 5 dims in utils/recon.py
+    for dim in range(len(LOCAL_CTX_NAMES)):  # compute_activity_ctx returns 9 dims in utils/recon.py
         plot_ctx_scatter(
             samples,
             out_dir=os.path.join(out_dir, "eval"),
@@ -589,7 +612,9 @@ def run_plotter(train_report: Optional[str],
             color_by_task=False,
         )
     adj_dir = _ensure_dir(os.path.join(out_dir, "eval", "adjacency"))
-    for gap_idx in range(3):
+    
+    n_adj = max((len(s.adj_target) for s in samples if s.adj_target is not None), default=0)
+    for gap_idx in range(n_adj):
         plot_adjacency_scatter(
             samples,
             out_dir=adj_dir,
@@ -730,34 +755,30 @@ def plot_base_then_finetune(
         base_ctx_rows = summarize_ctx_agreement(samples_base, ctx_names=LOCAL_CTX_NAMES)
         ft_ctx_rows = summarize_ctx_agreement(samples_ft, ctx_names=LOCAL_CTX_NAMES)
         
-        for r in base_ctx_rows:
-            r["stage"] = "Stage 1"
-        for r in ft_ctx_rows:
-            r["stage"] = "Stage 2"
+        base_ctx_rows["stage"] = "Stage 1"
+        ft_ctx_rows["stage"] = "Stage 2"
         
         save_agreement_csv(
-            base_ctx_rows + ft_ctx_rows,
+            pd.concat([base_ctx_rows, ft_ctx_rows], ignore_index=True),
             out_dir,
             "local_context_feature_consistency_stage1_stage2.csv",
         )
         
-        base_adj_rows = summarize_adjacency_agreement(samples_base, max_gaps=3)
-        ft_adj_rows = summarize_adjacency_agreement(samples_ft, max_gaps=3)
+        base_adj_rows = summarize_adjacency_agreement(samples_base, max_gaps=len(ADJ_GAP_BINS))
+        ft_adj_rows = summarize_adjacency_agreement(samples_ft, max_gaps=len(ADJ_GAP_BINS))
         
-        for r in base_adj_rows:
-            r["stage"] = "Stage 1"
-        for r in ft_adj_rows:
-            r["stage"] = "Stage 2"
+        base_adj_rows["stage"] = "Stage 1"
+        ft_adj_rows["stage"] = "Stage 2"
         
         save_agreement_csv(
-            base_adj_rows + ft_adj_rows,
+            pd.concat([base_adj_rows, ft_adj_rows], ignore_index=True),
             out_dir,
             "short_gap_adjacency_consistency_stage1_stage2.csv",
         )
 
         ctx_dir = _ensure_dir(os.path.join(out_dir, "ctx_stage_overlay"))
 
-        for dim in range(5):
+        for dim in range(len(LOCAL_CTX_NAMES)):
             plot_ctx_scatter_stage_overlay(
                 samples_base,
                 samples_ft,
@@ -769,8 +790,12 @@ def plot_base_then_finetune(
             )
             
         adj_dir = _ensure_dir(os.path.join(out_dir, "adj_stage_overlay"))
-
-        for gap_idx in range(3):
+        
+        n_adj = max(
+            [len(s.adj_target) for s in list(samples_base) + list(samples_ft) if s.adj_target is not None],
+            default=0,
+        )
+        for gap_idx in range(n_adj):
             plot_adjacency_scatter_stage_overlay(
                 samples_base,
                 samples_ft,

@@ -483,6 +483,7 @@ def short_gap_excess_loss_from_logits_batch_targets(
     logits_b1thw,
     target_gap_rates_bg,
     max_gap=3,
+    gap_bins=None,
     tau=0.25,
     margin=0.25,
     confidence_bg=None,
@@ -510,28 +511,48 @@ def short_gap_excess_loss_from_logits_batch_targets(
 
     B = p.shape[0]
     rates = []
+    
+    if gap_bins is None:
+        gap_bins = [(g, g) for g in range(1, int(max_gap) + 1)]
+    gap_bins = [(int(a), int(b)) for a, b in gap_bins]
+    
+    if target_gap_rates_bg.size(1) < len(gap_bins):
+        raise ValueError(
+            f"target_gap_rates_bg has {target_gap_rates_bg.size(1)} bins, "
+            f"but gap_bins has {len(gap_bins)} bins: {gap_bins}"
+        )
+    
+    if confidence_bg is not None and confidence_bg.size(1) < len(gap_bins):
+        raise ValueError(
+            f"confidence_bg has {confidence_bg.size(1)} bins, "
+            f"but gap_bins has {len(gap_bins)} bins: {gap_bins}"
+        )
 
-    for g in range(1, max_gap + 1):
-        if p.shape[2] <= g:
-            rates.append(p.new_zeros((B,)))
-        else:
+    for lo, hi in gap_bins:
+        num_bin = p.new_zeros((B,))
+        den_bin = p.new_zeros((B,))
+    
+        for g in range(lo, hi + 1):
+            if p.shape[2] <= g:
+                continue
+    
             p0 = p[:, :, :-g]
             pg = p[:, :, g:]
-
-            num = (p0 * pg).sum(dim=(1, 2, 3, 4))
-            den = p0.sum(dim=(1, 2, 3, 4)).clamp_min(eps)
-
-            rates.append(num / den)
+    
+            num_bin = num_bin + (p0 * pg).sum(dim=(1, 2, 3, 4))
+            den_bin = den_bin + p0.sum(dim=(1, 2, 3, 4))
+    
+        rates.append(num_bin / den_bin.clamp_min(eps))
 
     pred_rates = torch.stack(rates, dim=1)  # (B,G)
 
-    tgt_rates = target_gap_rates_bg[:, :max_gap]
+    tgt_rates = target_gap_rates_bg[:, :len(gap_bins)]
     allowed = (1.0 + margin) * tgt_rates
 
     excess = torch.relu(pred_rates - allowed).pow(2)
 
     if confidence_bg is not None:
-        conf = confidence_bg[:, :max_gap].to(device=excess.device, dtype=excess.dtype)
+        conf = confidence_bg[:, :len(gap_bins)].to(device=excess.device, dtype=excess.dtype)
         excess = excess * conf
         denom = conf.sum().clamp_min(1.0)
         loss = excess.sum() / denom
@@ -544,7 +565,8 @@ def short_gap_excess_loss_from_logits_batch_targets(
             "pred_gap_rates": pred_rates.detach(),
             "allowed_gap_rates": allowed.detach(),
             "target_gap_rates": tgt_rates.detach(),
-            "confidence": None if confidence_bg is None else confidence_bg.detach(),
+            "confidence": None if confidence_bg is None else conf.detach(),
+            "gap_bins": gap_bins,
         }
 
     return loss
@@ -558,7 +580,7 @@ def soft_active_site_ratio_from_logits(
     logits_b1thw: torch.Tensor,
     tau_prob: float = 0.25,
     tau_time: float = 0.5,
-    site_threshold: float = 0.0,
+    site_threshold: float = 0.5,
     max_active_site: float = 1024.0,
     clamp_max: bool = True,
 ) -> torch.Tensor:
@@ -637,13 +659,19 @@ def temporal_trend_score_torch(
 
 def ctx_features_soft_from_logits(
     logits_b1thw: torch.Tensor,
-    eps_prob: float = 1e-4,
+    eps_prob: float = 1e-6,
     eps_time: float = 1e-6,
     tau: float = 0.25,
 ) -> torch.Tensor:
     """
-    returns: (B,5) =
-      [mean_firing_density, frame_mean_std, pixel_mean_std, active_site_ratio, temporal_trend_score]
+    FP32 soft local context from logits.
+
+    returns: (B,9) =
+      [log_mean_firing_density,
+       var_x, var_y, var_t,
+       cov_xy, cov_xt, cov_yt,
+       active_site_ratio,
+       temporal_trend_score]
     """
     if logits_b1thw.dim() != 5:
         raise ValueError(f"Expected (B,1,T,H,W), got {tuple(logits_b1thw.shape)}")
@@ -652,63 +680,379 @@ def ctx_features_soft_from_logits(
     if C != 1:
         raise ValueError(f"Expected channel=1, got {C}")
 
-    p = torch.sigmoid(logits_b1thw / max(1e-6, float(tau))).clamp(eps_prob, 1.0 - eps_prob)
+    # Critical: do moment math in FP32, outside AMP.
+    with torch.cuda.amp.autocast(enabled=False):
+        logits_f = logits_b1thw.float()
+        p = torch.sigmoid(logits_f / max(1e-6, float(tau)))
+        p0 = p[:, 0]  # (B,T,H,W)
 
-    # 0) mean firing density (log)
-    mfd = p.mean(dim=(1, 2, 3, 4))
-    d0 = torch.log(mfd + 1e-6).clamp(min=-15.0, max=0.0)
+        # 0) log mean firing density
+        mfd = p.mean(dim=(1, 2, 3, 4))
+        d0 = torch.log(mfd.clamp_min(eps_prob)).clamp(min=-15.0, max=0.0)
 
-    # 1) frame-wise temporal variability
-    frame_mean = p.mean(dim=(1, 3, 4))  # (B,T)
-    d1 = frame_mean.std(dim=1, unbiased=False) * math.sqrt(float(H * W))
+        # fixed normalized coordinate fields in FP32
+        tt = torch.linspace(-1.0, 1.0, T, device=p.device, dtype=torch.float32).view(1, T, 1, 1)
+        yy = torch.linspace(-1.0, 1.0, H, device=p.device, dtype=torch.float32).view(1, 1, H, 1)
+        xx = torch.linspace(-1.0, 1.0, W, device=p.device, dtype=torch.float32).view(1, 1, 1, W)
 
-    # 2) pixel-wise spatial variability
-    pixel_mean = p.mean(dim=2).squeeze(1)  # (B,H,W)
-    d2 = pixel_mean.std(dim=(1, 2), unbiased=False) * math.sqrt(float(T))
+        # Clamp only total mass. Do NOT clamp every voxel probability.
+        mass_raw = p0.sum(dim=(1, 2, 3))
+        mass = mass_raw.clamp_min(eps_prob)
 
-    # 3) active site ratio
-    d3 = soft_active_site_ratio_from_logits(
-        logits_b1thw,
-        tau_prob=tau,
-        tau_time=0.5,
-        site_threshold=0.05,
+        mx = (p0 * xx).sum(dim=(1, 2, 3)) / mass
+        my = (p0 * yy).sum(dim=(1, 2, 3)) / mass
+        mt = (p0 * tt).sum(dim=(1, 2, 3)) / mass
+
+        dx = xx - mx.view(B, 1, 1, 1)
+        dy = yy - my.view(B, 1, 1, 1)
+        dt = tt - mt.view(B, 1, 1, 1)
+
+        d1 = (p0 * dx * dx).sum(dim=(1, 2, 3)) / mass
+        d2 = (p0 * dy * dy).sum(dim=(1, 2, 3)) / mass
+        d3 = (p0 * dt * dt).sum(dim=(1, 2, 3)) / mass
+
+        d4 = (p0 * dx * dy).sum(dim=(1, 2, 3)) / mass
+        d5 = (p0 * dx * dt).sum(dim=(1, 2, 3)) / mass
+        d6 = (p0 * dy * dt).sum(dim=(1, 2, 3)) / mass
+
+        d7 = soft_active_site_ratio_from_logits(
+            logits_f,
+            tau_prob=tau,
+            tau_time=0.5,
+            site_threshold=0.5,
+        ).float()
+
+        frame_mean = p.mean(dim=(1, 3, 4))  # (B,T)
+        d8 = temporal_trend_score_torch(frame_mean, eps_time=eps_time).float()
+
+        out = torch.stack([d0, d1, d2, d3, d4, d5, d6, d7, d8], dim=1)
+
+        # Fully blank pathological case: keep moments finite.
+        blank = mass_raw <= eps_prob
+        if blank.any():
+            out[blank, 1:9] = 0.0
+
+        return out
+
+
+def _patchify_b1thw(
+    x_b1thw: torch.Tensor,
+    patch_size: tuple[int, int, int],
+) -> torch.Tensor:
+    """
+    Convert (B,1,T,H,W) into non-overlapping patches (B,N,P).
+
+    N = number of tokens
+    P = pT * pH * pW
+    """
+    if x_b1thw.dim() != 5 or x_b1thw.size(1) != 1:
+        raise ValueError(
+            f"Expected (B,1,T,H,W), got {tuple(x_b1thw.shape)}"
+        )
+
+    B, _, T, H, W = x_b1thw.shape
+    pT, pH, pW = map(int, patch_size)
+
+    if T % pT != 0 or H % pH != 0 or W % pW != 0:
+        raise ValueError(
+            f"Volume shape {(T, H, W)} must be divisible by "
+            f"patch_size {patch_size}"
+        )
+
+    nT = T // pT
+    nH = H // pH
+    nW = W // pW
+
+    return (
+        x_b1thw
+        .reshape(
+            B,
+            1,
+            nT,
+            pT,
+            nH,
+            pH,
+            nW,
+            pW,
+        )
+        .permute(
+            0,
+            2,
+            4,
+            6,
+            3,
+            5,
+            7,
+            1,
+        )
+        .reshape(
+            B,
+            nT * nH * nW,
+            pT * pH * pW,
+        )
     )
 
-    # 4) scale-free temporal trend score
-    d4 = temporal_trend_score_torch(frame_mean, eps_time=eps_time)
 
-    return torch.stack([d0, d1, d2, d3, d4], dim=1)
+def _patch_moments(
+    patch_prob_mp: torch.Tensor,
+    patch_size: tuple[int, int, int],
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """
+    Calculate one statistics vector for each selected patch.
+
+    Input:
+        patch_prob_mp: (M,P)
+
+    Output Features:
+        0: log density
+        1: variance x
+        2: variance y
+        3: variance t
+        4: covariance xy
+        5: covariance xt
+        6: covariance yt
+
+    Coordinates are normalized independently inside each patch
+    to [-1,1].
+    """
+    if patch_prob_mp.dim() != 2:
+        raise ValueError(
+            "Expected selected patches with shape (M,P), "
+            f"got {tuple(patch_prob_mp.shape)}"
+        )
+
+    pT, pH, pW = map(int, patch_size)
+    patch_volume = pT * pH * pW
+
+    if patch_prob_mp.size(1) != patch_volume:
+        raise ValueError(
+            f"Expected patch volume {patch_volume}, "
+            f"got {patch_prob_mp.size(1)}"
+        )
+
+    p = patch_prob_mp.float().clamp_min(0.0)
+    device = p.device
+
+    tt = torch.linspace(
+        -1.0,
+        1.0,
+        pT,
+        device=device,
+        dtype=torch.float32,
+    )
+    yy = torch.linspace(
+        -1.0,
+        1.0,
+        pH,
+        device=device,
+        dtype=torch.float32,
+    )
+    xx = torch.linspace(
+        -1.0,
+        1.0,
+        pW,
+        device=device,
+        dtype=torch.float32,
+    )
+
+    t3, y3, x3 = torch.meshgrid(
+        tt,
+        yy,
+        xx,
+        indexing="ij",
+    )
+
+    tf = t3.reshape(1, patch_volume)
+    yf = y3.reshape(1, patch_volume)
+    xf = x3.reshape(1, patch_volume)
+
+    mass = p.sum(dim=1).clamp_min(eps)
+    density = p.mean(dim=1).clamp_min(eps)
+
+    mean_x = (p * xf).sum(dim=1) / mass
+    mean_y = (p * yf).sum(dim=1) / mass
+    mean_t = (p * tf).sum(dim=1) / mass
+
+    ex2 = (p * xf.square()).sum(dim=1) / mass
+    ey2 = (p * yf.square()).sum(dim=1) / mass
+    et2 = (p * tf.square()).sum(dim=1) / mass
+
+    exy = (p * xf * yf).sum(dim=1) / mass
+    ext = (p * xf * tf).sum(dim=1) / mass
+    eyt = (p * yf * tf).sum(dim=1) / mass
+
+    var_x = (
+        ex2 - mean_x.square()
+    ).clamp_min(0.0)
+
+    var_y = (
+        ey2 - mean_y.square()
+    ).clamp_min(0.0)
+
+    var_t = (
+        et2 - mean_t.square()
+    ).clamp_min(0.0)
+
+    cov_xy = exy - mean_x * mean_y
+    cov_xt = ext - mean_x * mean_t
+    cov_yt = eyt - mean_y * mean_t
+
+    log_density = torch.log(
+        density
+    ).clamp(
+        min=-15.0,
+        max=0.0,
+    )
 
 
+    features = (
+        log_density,
+        var_x,
+        var_y,
+        var_t,
+        cov_xy,
+        cov_xt,
+        cov_yt,
+    )
+
+    return torch.stack(
+        features,
+        dim=1,
+    )
+
+
+def local_moment_field_loss(
+    logits_b1thw: torch.Tensor,
+    target_b1thw: torch.Tensor,
+    patch_size: tuple[int, int, int],
+    tau: float = 0.25,
+    min_active_spikes: int = 1,
+    min_shape_spikes: int = 3,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """
+    Match statistics independently inside non-overlapping patches.
+
+    Density is supervised for every target patch containing at least
+    min_active_spikes.
+
+    Variances and covariances are supervised only when a target patch
+    contains at least min_shape_spikes. Shape statistics calculated
+    from one or two spikes are not sufficiently informative.
+
+    Blank patches are not included. Existing reconstruction, outside,
+    blank-token, and blank-patch losses already constrain false-positive
+    activity in blank regions.
+    """
+    logit_patches = _patchify_b1thw(
+        logits_b1thw,
+        patch_size,
+    )
+
+    with torch.no_grad():
+        target_patches = _patchify_b1thw(
+            target_b1thw.float(),
+            patch_size,
+        )
+
+        target_counts = target_patches.sum(
+            dim=-1
+        )
+
+        active_mask = (
+            target_counts >= int(min_active_spikes)
+        )
+
+    # Differentiable zero for an entirely blank batch.
+    if not bool(active_mask.any()):
+        return logits_b1thw.sum() * 0.0
+
+    # Only calculate predicted moments for target-active patches.
+    pred_prob = torch.sigmoid(
+        logit_patches[active_mask].float()
+        / max(float(tau), eps)
+    )
+
+    target_prob = target_patches[
+        active_mask
+    ]
+
+    pred_features = _patch_moments(
+        pred_prob,
+        patch_size=patch_size,
+        eps=eps,
+    )
+
+    with torch.no_grad():
+        target_features = _patch_moments(
+            target_prob,
+            patch_size=patch_size,
+            eps=eps,
+        )
+
+        active_counts = target_counts[
+            active_mask
+        ]
+
+    per_feature = F.smooth_l1_loss(
+        pred_features,
+        target_features,
+        reduction="none",
+    )
+
+    feature_mask = torch.ones_like(
+        per_feature
+    )
+
+    # Feature layout:
+    #   density | variance/covariance
+
+    shape_valid = (
+        active_counts >= int(min_shape_spikes)
+    ).to(
+        per_feature.dtype
+    )
+
+    feature_mask[
+        :,
+        1:,
+    ] = shape_valid.unsqueeze(1)
+
+    return (
+        (per_feature * feature_mask).sum()
+        / feature_mask.sum().clamp_min(1.0)
+    )
 
 def ctx_loss_soft(
     logits_b1thw: torch.Tensor,
-    ctx_tgt_b5: torch.Tensor,
-    dims: Sequence[int] = (0, 1, 2, 3, 4),
-    weights: Optional[Sequence[float]] = (1.0, 1.0, 1.0, 1.0, 1.0),
+    ctx_tgt_b9: torch.Tensor,
+    dims: Sequence[int] = tuple(range(9)),
+    weights: Optional[Sequence[float]] = None,
     tau: float = 0.25,
 ) -> torch.Tensor:
 
-    if ctx_tgt_b5.dim() != 2 or ctx_tgt_b5.size(1) < 5:
-        raise ValueError(f"ctx_tgt_b5 must be (B,>=5), got {tuple(ctx_tgt_b5.shape)}")
+    if ctx_tgt_b9.dim() != 2 or ctx_tgt_b9.size(1) < 9:
+        raise ValueError(f"ctx_tgt_b9 must be (B,>=9), got {tuple(ctx_tgt_b9.shape)}")
+    
+    pred9 = ctx_features_soft_from_logits(logits_b1thw.float(), tau=tau)
 
-    pred5 = ctx_features_soft_from_logits(logits_b1thw.float(), tau=tau)
 
     if weights is None:
-        weight_map = {d: 1.0 for d in range(5)}
+        weight_map = {d: 1.0 for d in range(9)}
     else:
-        if len(weights) != 5:
-            raise ValueError("weights must have length 5")
-        weight_map = {d: float(weights[d]) for d in range(5)}
+        if len(weights) != 9:
+            raise ValueError("weights must have length 9")
+        weight_map = {d: float(weights[d]) for d in range(9)}
 
-    loss = pred5.new_tensor(0.0)
+    loss = pred9.new_tensor(0.0)
 
     for d in dims:
-        if d < 0 or d > 4:
+        if d < 0 or d > 8:
             raise ValueError(f"Invalid dim {d}")
 
-        pred = pred5[:, d]
-        tgt = ctx_tgt_b5[:, d].to(pred5.dtype)
+        pred = pred9[:, d]
+        tgt = ctx_tgt_b9[:, d].to(pred9.dtype)
 
         # L2 loss for all dims
         diff = pred - tgt

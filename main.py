@@ -37,9 +37,21 @@ except RuntimeError:
     pass
 
 from .dataset import make_loaders_for_assays, burst_collate
-from .model import TransformerVQVAE, HierarchicalTokenMGITTransformer
+from .model import TransformerVQVAE, DETRActivityPrior, MaskGITMotifPrior, HierarchicalCodebookPrior
 from .model.spatial_map import GlobalContextSpatialBank, GlobalContextAdjacencyBank
-from .training import fit_vqvae, train_prior_mgit, evaluate_vqvae, fit_spatial_prior_pretrain
+from .training import (
+    fit_vqvae, evaluate_vqvae, fit_spatial_prior_pretrain, build_context_prior,
+    train_motif_prior_mgit,
+    train_activity_prior_detr,
+    train_activity_prior_with_frozen_motif,
+)
+from .inference import (
+    ContextBankSampler,
+    decode_codes_to_xgen,
+    save_generated_batch_outputs,
+    save_generation_metrics_json,
+    sample_hierarchical_roi
+)
 from .visualization import (
     make_model_videos_vqvae,
     run_plotter,
@@ -65,7 +77,7 @@ from .visualization.reports_data import (
 #   (2,)       -> load stage-1 ckpt, train context-conditioned decoder only
 #   (1, 2, 3)  -> run the whole pipeline sequentially
 #   (0,)     -> run spatial-map pretraining only
-TRAIN_STAGES = (3,)        # 0,1,2,3
+TRAIN_STAGES = ()        # 0,1,2,3
 EVAL_STAGES  = (3,)   # 0,1,2,3
 
 RUN_EVAL = True
@@ -87,13 +99,19 @@ CKPTS = {
     "stage1_last": CKPT_DIR / "vqvae_stage1_last.pt",
     "stage2_best": CKPT_DIR / "vqvae_stage2_best.pt",
     "stage2_last": CKPT_DIR / "vqvae_stage2_last.pt",
-    "prior_best": CKPT_DIR / "mgit_prior_best.pt",
+    
+    "motif_prior_best": CKPT_DIR / "motif_prior_best.pt",
+    "activity_prior_best": CKPT_DIR / "activity_prior_best.pt",
+    "activity_prior_refined_best": CKPT_DIR / "activity_prior_refined_best.pt",
 }
 
 REPORTS = {
     "stage1": Path("../training_report_vqvae_stage1.json"),
     "stage2": Path("../training_report_vqvae_stage2.json"),
-    "prior": Path("../training_report_mgit_prior.json"),
+
+    "prior_motif": Path("../training_report_prior_3A_motif.json"),
+    "prior_activity": Path("../training_report_prior_3B_activity.json"),
+    "prior_refine": Path("../training_report_prior_3C_refine.json"),
 }
 
 VIZ_ROOTS = {
@@ -102,7 +120,7 @@ VIZ_ROOTS = {
 }
 
 # Data
-patch_size = (4, 8, 8)
+patch_size = (6, 15, 14)
 temporal_crop = 6000
 temporal_pool = 120
 batch_size = 1
@@ -122,7 +140,7 @@ dim_assay_for_emb = 64
 max_viz_samples = 1000
 
 # ISI adjacency firing constraint
-max_gap = 3
+gap_bins = [(1, 1), (2, 2), (3, 3), (4, 6), (7, 12), (13, 24), (25, 48)]
 
 # Tolerance for spike location in a voxel (for training loss and val metrics)
 recon_tolerance = (2, 2, 2)
@@ -195,7 +213,7 @@ def compute_p0_from_loader(loader, max_batches: Optional[int] = 100) -> float:
 @torch.no_grad()
 def compute_short_gap_target_rates_from_loader(
     loader,
-    max_gap: int = 3,
+    gap_bins = None,
     max_batches: Optional[int] = None,
     threshold: float = 0.5,
     eps: float = 1e-8,
@@ -208,8 +226,12 @@ def compute_short_gap_target_rates_from_loader(
 
     This is much better scaled than voxel-pair probability.
     """
-    nums = torch.zeros(max_gap, dtype=torch.float64)
-    dens = torch.zeros(max_gap, dtype=torch.float64)
+    if gap_bins is None:
+        gap_bins = [(1, 1), (2, 2), (3, 3)]
+    gap_bins = [(int(a), int(b)) for a, b in gap_bins]
+    
+    nums = torch.zeros(len(gap_bins), dtype=torch.float64)
+    dens = torch.zeros(len(gap_bins), dtype=torch.float64)
 
     for i, batch in enumerate(loader):
         x = batch["x"].float()
@@ -223,15 +245,16 @@ def compute_short_gap_target_rates_from_loader(
 
         x = (x > threshold).float()  # (B,T,H,W)
 
-        for g in range(1, max_gap + 1):
-            if x.shape[1] <= g:
-                continue
-
-            x0 = x[:, :-g]   # activity at t
-            xg = x[:, g:]    # activity at t+g
-
-            nums[g - 1] += (x0 * xg).sum().double().cpu()
-            dens[g - 1] += x0.sum().double().cpu()
+        for bi, (lo, hi) in enumerate(gap_bins):
+            for g in range(lo, hi + 1):
+                if x.shape[1] <= g:
+                    continue
+        
+                x0 = x[:, :-g]
+                xg = x[:, g:]
+        
+                nums[bi] += (x0 * xg).sum().double().cpu()
+                dens[bi] += x0.sum().double().cpu()
 
         if max_batches is not None and (i + 1) >= max_batches:
             break
@@ -259,12 +282,13 @@ def make_vqvae(img_size, device: str, *, full_spatial_size=None, use_decoder_cro
         out_chans=1,
 
         # Context args
-        local_ctx_in_dim=5,
+        local_ctx_in_dim=9,
         local_emb_dim=32,
         global_ctx_in_dim=dim_assay_for_emb,
         global_emb_dim=32,
 
         use_spatial_map_prior=USE_GCT_PRETRAIN_MODULE,
+        gap_bins=gap_bins,
 
         enc_attn_mask_kind="none",
         dec_attn_mask_kind="temporal_causal",
@@ -347,21 +371,24 @@ def freeze_for_stage(model: nn.Module, stage: float):
 
     elif stage == 2:
         set_decoder_cross_attention(model, enabled=True, layers=(0,))
-        for name in ["code_to_dec", "dec_blocks", "dec_norm", "patch_renderer", 
-                     "local_embedder", "local_to_dec_ctx", "global_to_dec_ctx"]:
+    
+        for name in [
+            "dec_blocks", "dec_norm", "patch_renderer",
+            "local_embedder", "local_to_dec_ctx", "global_to_dec_ctx"
+        ]:
             set_requires_grad(getattr(model, name, None), True)
-            
-        if hasattr(model, "activity_type_offset"):
-            model.activity_type_offset.requires_grad = False
-
-        # Keep global embedder frozen if it came from spatial-map pretraining. This avoids moving
-        # the representation that spatial_map_prior expects. If you later want to adapt it, unfreeze
-        # it together with spatial_map_prior or add a copied decoder-only global embedder.
+    
+        # freeze latent-code interface
+        set_requires_grad(getattr(model, "code_to_dec", None), False)
+    
         set_requires_grad(getattr(model, "global_embedder", None), False)
         set_requires_grad(getattr(model, "spatial_map_prior", None), False)
-        
+    
+        if hasattr(model, "activity_type_offset"):
+            model.activity_type_offset.requires_grad = False
+    
         model.vq.freeze_codebook_updates = True
-        
+    
         if hasattr(model, "vq") and hasattr(model.vq, "tree_embeds"):
             for p in model.vq.tree_embeds:
                 p.requires_grad = False
@@ -402,8 +429,18 @@ def load_spatial_pretrain_if_available(model: nn.Module):
 
     spatial_ckpt = torch.load(SPATIAL_CKPT, map_location="cpu")
     model.global_embedder.load_state_dict(spatial_ckpt["global_embedder"], strict=True)
-    model.spatial_map_prior.load_state_dict(spatial_ckpt["spatial_map_prior"], strict=True)
     
+    try:
+        model.spatial_map_prior.load_state_dict(spatial_ckpt["spatial_map_prior"], strict=True)
+    except RuntimeError as e:
+        print("[warn] strict spatial_map_prior load failed, likely adj_head bin-count mismatch.")
+        print(e)
+        sd = spatial_ckpt["spatial_map_prior"]
+        cur = model.spatial_map_prior.state_dict()
+        sd = {k: v for k, v in sd.items() if k in cur and tuple(v.shape) == tuple(cur[k].shape)}
+        missing, unexpected = model.spatial_map_prior.load_state_dict(sd, strict=False)
+        print("[warn] partial spatial_map_prior load:", "missing=", missing, "unexpected=", unexpected)
+        
     if "memory_tok" in spatial_ckpt:
         model.memory_tok = GlobalContextSpatialBank()
         model.memory_tok.load_state_dict(spatial_ckpt["memory_tok"])
@@ -461,7 +498,7 @@ def run_stage0_spatial_pretrain(model, train_loader, device):
         memory_mode="max",
         lambda_sep=1e-4,
         early_stop_patience=20,
-        adj_max_gap=max_gap,
+        adj_gap_bins=gap_bins,
     )
 
     set_all_trainable(model, True)
@@ -475,7 +512,7 @@ def common_fit_kwargs(model):
         recon_tolerance=recon_tolerance,
         metric_tolerance=metric_tolerance,
 
-        isi_max_gap=max_gap,
+        isi_gap_bins=gap_bins,
         isi_tau=0.25,
         isi_margin=0.25,
         lambda_isi=1e-4,
@@ -512,6 +549,14 @@ def select_ckpt(stage: int, prefer_best: bool = True) -> Path:
 
     raise FileNotFoundError(f"No checkpoint found for stage {stage}: {best} or {last}")
     
+   
+def save_json_report(obj, path: Path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(obj, f, indent=4)
+    print(f"Saved report: {path}")
+   
     
 def run_stage1(model, train_loader, val_loader, baseline_prob, logit_baseline):
     print("\n" + "=" * 80)
@@ -542,14 +587,19 @@ def run_stage1(model, train_loader, val_loader, baseline_prob, logit_baseline):
         # This lets ctx losses shape encoder/codebook/decoder motifs,
         # without allowing cross-attention shortcuts.
         lambda_ctx=1e-1,
+        lambda_ctx_field=5e-2,
         ctx_start_epoch=10,
         ctx_warmup_epochs=10,
         ctx_epoch_schedule={
-            0: 10,
-            1: 30,
-            2: 30,
-            3: 20,
-            4: 50,
+            0: 20,   # log_mean_firing_density
+            7: 30,   # active_site_ratio
+            1: 60,   # var_x
+            2: 60,   # var_y
+            3: 60,   # var_t
+            8: 80,   # temporal_trend
+            4: 100,  # cov_xy
+            5: 120,  # cov_xt
+            6: 120,  # cov_yt
         },
         
         # CFG context dropout is irrelevant in Stage 1 because cross-attn is OFF.
@@ -565,7 +615,7 @@ def run_stage1(model, train_loader, val_loader, baseline_prob, logit_baseline):
 
         use_logit_bias_schedule=False,
         logit_bias_start=logit_baseline,
-        logit_bias_end=-0.01,
+        logit_bias_end=0.0,
         logit_bias_decay_epochs=5,
         save_start_epoch = 125,
         **common_fit_kwargs(model),
@@ -589,7 +639,27 @@ def run_stage2(model, train_loader, val_loader):
     freeze_for_stage(model, 2)
 
     n_epoch = 150
-    optimizer = make_optimizer(model, lr=1e-3, weight_decay=1e-4)
+    
+    
+    optimizer = torch.optim.AdamW(
+        [
+            {
+                "params": list(model.local_embedder.parameters())
+                        + list(model.local_to_dec_ctx.parameters())
+                        + list(model.global_to_dec_ctx.parameters()),
+                "lr": 1e-4,
+                "weight_decay": 1e-4,
+            },
+            {
+                "params": list(model.dec_blocks.parameters())
+                        + list(model.dec_norm.parameters())
+                        + list(model.patch_renderer.parameters()),
+                "lr": 1e-5,
+                "weight_decay": 1e-4,
+            },
+        ]
+    )        
+    
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epoch, eta_min=1e-5)
 
     report = fit_vqvae(
@@ -608,14 +678,19 @@ def run_stage2(model, train_loader, val_loader):
 
         # Stage 2: all context losses active quickly; cross-attn on layer 0 only.
         lambda_ctx=1e-1,
+        lambda_ctx_field=1e-2,
         ctx_start_epoch=0,
         ctx_warmup_epochs=20,
         ctx_epoch_schedule={
-            0: 1,    # mean rate
-            3: 1,    # active site ratio
-            1: 1,   # temporal std
-            2: 1,   # spatial std
-            4: 1,   # temporal slope
+            0: 1,   # log_mean_firing_density
+            7: 1,   # active_site_ratio
+            1: 5,   # var_x
+            2: 5,   # var_y
+            3: 5,   # var_t
+            8: 10,  # temporal_trend
+            4: 5,  # cov_xy
+            5: 5,  # cov_xt
+            6: 5,  # cov_yt
         },
         
         cfg_ctx_drop_start=0.6,
@@ -646,14 +721,118 @@ def run_stage2(model, train_loader, val_loader):
     return report
 
 
-def build_prior_from_model(model, device):
+@torch.no_grad()
+def measure_stage3_active_token_counts(
+    model,
+    loader,
+    device,
+):
+    model.eval()
+
+    all_counts = []
+
+    for batch in loader:
+        x = batch["x"].to(
+            device,
+            non_blocking=True,
+        ).float()
+
+        gct = batch["global_ctx"].to(
+            device,
+            non_blocking=True,
+        ).float()
+
+        lct = batch["local_ctx"].to(
+            device,
+            non_blocking=True,
+        ).float()
+
+        out = model(
+            x,
+            global_ctx=gct,
+            local_ctx=lct,
+            predict_mask_spec=None,
+        )
+
+        codes = out["codes"].long()
+
+        counts = (
+            codes[..., 0]
+            .ne(-1)
+            .sum(dim=1)
+        )
+
+        all_counts.append(
+            counts.detach().cpu()
+        )
+
+    if not all_counts:
+        raise RuntimeError(
+            "Cannot determine Stage 3 Kmax: "
+            "the training loader produced no samples."
+        )
+
+    counts = torch.cat(
+        all_counts,
+        dim=0,
+    ).numpy()
+
+    stats = {
+        "num_samples": int(counts.size),
+        "minimum": int(counts.min()),
+        "maximum": int(counts.max()),
+        "mean": float(counts.mean()),
+        "median": float(np.median(counts)),
+        "p95": float(np.percentile(counts, 95)),
+        "p99": float(np.percentile(counts, 99)),
+        "p99_5": float(np.percentile(counts, 99.5)),
+        "zero_fraction": float(
+            np.mean(counts == 0)
+        ),
+    }
+
+    print(
+        "Stage 3 active-token count statistics:"
+    )
+    print(
+        json.dumps(
+            stats,
+            indent=2,
+        )
+    )
+
+    return stats
+
+
+def build_prior_from_model(
+    model,
+    device,
+    *,
+    Kmax,
+):
     gct_mapper = copy.deepcopy(model.global_embedder).eval()
     lct_mapper = copy.deepcopy(model.local_embedder).eval()
 
     K1 = int(model.vq.num_codes_per_level[0])
     K2 = int(model.vq.num_codes_per_level[1])
 
-    prior = HierarchicalTokenMGITTransformer(
+    T, H, W = model.img_size
+    pT, pH, pW = model.patch_size
+    token_grid = (T // pT, H // pH, W // pW)
+
+    activity_prior = DETRActivityPrior(
+        global_dim=dim_assay_for_emb,
+        local_dim=9,
+        num_tasks=4,
+        token_grid=token_grid,
+        Kmax=int(Kmax),
+        d_model=128,
+        n_layer=4,
+        n_head=4,
+        dropout=0.1,
+    ).to(device)
+
+    motif_prior = MaskGITMotifPrior(
         K1=K1,
         K2=K2,
         num_tasks=4,
@@ -661,54 +840,776 @@ def build_prior_from_model(model, device):
         lct_mapper=lct_mapper,
         gct_latent_dim=model.global_emb_dim,
         lct_latent_dim=model.local_emb_dim,
-        d_model=512,
-        n_layer=8,
-        n_head=8,
-        max_len=4096*2,
+        d_model=128,
+        n_layer=4,
+        n_head=4,
+        max_len=token_grid[0] * token_grid[1] * token_grid[2],
         dropout=0.1,
     ).to(device)
 
-    return prior
+    return HierarchicalCodebookPrior(
+        activity_prior=activity_prior,
+        motif_prior=motif_prior,
+    ).to(device)
 
 def run_stage3_prior(model, train_loader, val_loader, device):
     print("\n" + "=" * 80)
-    print("STAGE 3: MAGVIT/MaskGIT prior learning")
+    print("STAGE 3: staged prior learning")
     print("=" * 80)
 
-    try:
-        ckpt = select_ckpt(2, prefer_best=True)
-    except FileNotFoundError:
-        ckpt = select_ckpt(1, prefer_best=True)
-    
+    ckpt = select_ckpt(
+        2,
+        prefer_best=True,
+    )
+
     model.load_checkpoint(str(ckpt), map_location=device)
     print(f"Loaded VQVAE checkpoint for Stage 3 prior: {ckpt}")
-    
+
     freeze_for_stage(model, 3)
 
-    prior = build_prior_from_model(model, device)
-    opt_prior = torch.optim.AdamW(
-        [p for p in prior.parameters() if p.requires_grad],
-        lr=3e-4,
-        weight_decay=0.01,
+    count_stats = measure_stage3_active_token_counts(
+        model=model,
+        loader=train_loader,
+        device=device,
     )
 
-    history_prior = train_prior_mgit(
-        prior=prior,
-        vqvae=model,
-        opt=opt_prior,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        epochs=100,
-        grad_clip=1.0,
-        ckpt_out=str(CKPTS["prior_best"]),
-        early_stop_patience=10,
-        recon_task_id=0,
+    # Use the observed training maximum so no target is dropped.
+    stage3_kmax = max(
+        1,
+        int(count_stats["maximum"]),
     )
 
-    with open(REPORTS["prior"], "w") as f:
-        json.dump(history_prior, f, indent=4)
-    print(f"Saved report: {REPORTS['prior']}")
-    return history_prior
+    prior = build_prior_from_model(
+        model,
+        device,
+        Kmax=stage3_kmax,
+    )
+
+    # ============================================================
+    # 3A: motif prior
+    # ============================================================
+    if CKPTS["motif_prior_best"].exists():
+        print(f"[3A] Found motif prior checkpoint. Skipping training: {CKPTS['motif_prior_best']}")
+        motif_ckpt = torch.load(CKPTS["motif_prior_best"], map_location=device)
+        prior.motif_prior.load_state_dict(motif_ckpt["model"], strict=True)
+        hist_motif = None
+    else:
+        print("[3A] Training motif prior.")
+
+        opt_motif = torch.optim.AdamW(
+            [p for p in prior.motif_prior.parameters() if p.requires_grad],
+            lr=3e-4,
+            weight_decay=0.01,
+        )
+
+        hist_motif = train_motif_prior_mgit(
+            motif_prior=prior.motif_prior,
+            vqvae=model,
+            opt=opt_motif,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            epochs=200,
+            grad_clip=1.0,
+            ckpt_out=str(CKPTS["motif_prior_best"]),
+            early_stop_patience=30,
+            grad_accum_steps=grad_accum_steps,
+            full_mask_prob=0.15,
+
+            lambda_ctx=1.0,
+            lambda_ctx_field=0.05,
+            lambda_adj=1.0,
+            lambda_spatial=1.0,
+
+            ctx_tau=0.25,
+            ctx_field_tau=0.25,
+
+            memory_tok=getattr(model, "memory_tok", None),
+            memory_adj=getattr(model, "memory_adj", None),
+            isi_gap_bins=gap_bins,
+            isi_max_gap=max(b for _, b in gap_bins),
+        )
+
+        save_json_report(hist_motif, REPORTS["prior_motif"])
+
+        motif_ckpt = torch.load(CKPTS["motif_prior_best"], map_location=device)
+        prior.motif_prior.load_state_dict(motif_ckpt["model"], strict=True)
+
+    # ============================================================
+    # 3B: activity prior
+    # ============================================================
+    if CKPTS["activity_prior_best"].exists():
+        print(f"[3B] Found activity prior checkpoint. Skipping training: {CKPTS['activity_prior_best']}")
+        activity_ckpt = torch.load(CKPTS["activity_prior_best"], map_location=device)
+        prior.activity_prior.load_state_dict(activity_ckpt["model"], strict=True)
+        hist_activity = None
+    else:
+        print("[3B] Training activity prior.")
+
+        opt_activity = torch.optim.AdamW(
+            [p for p in prior.activity_prior.parameters() if p.requires_grad],
+            lr=3e-4,
+            weight_decay=0.01,
+        )
+
+        hist_activity = train_activity_prior_detr(
+            activity_prior=prior.activity_prior,
+            vqvae=model,
+            opt=opt_activity,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            epochs=200,
+            grad_clip=1.0,
+            lambda_soft_grid=1.0,
+            ckpt_out=str(CKPTS["activity_prior_best"]),
+            early_stop_patience=30,
+            grad_accum_steps=grad_accum_steps,
+        )
+
+        save_json_report(hist_activity, REPORTS["prior_activity"])
+
+        activity_ckpt = torch.load(CKPTS["activity_prior_best"], map_location=device)
+        prior.activity_prior.load_state_dict(activity_ckpt["model"], strict=True)
+
+    # ============================================================
+    # 3C: activity refinement through frozen motif + frozen VQVAE
+    # ============================================================
+    if CKPTS["activity_prior_refined_best"].exists():
+        print(f"[3C] Found refined activity prior checkpoint. Skipping training: {CKPTS['activity_prior_refined_best']}")
+        refine_ckpt = torch.load(CKPTS["activity_prior_refined_best"], map_location=device)
+        prior.activity_prior.load_state_dict(refine_ckpt["activity_prior"], strict=True)
+        hist_refine = None
+    else:
+        print("[3C] Training activity refinement.")
+
+        opt_refine = torch.optim.AdamW(
+            [p for p in prior.activity_prior.parameters() if p.requires_grad],
+            lr=1e-4,
+            weight_decay=0.01,
+        )
+
+        hist_refine = train_activity_prior_with_frozen_motif(
+            activity_prior=prior.activity_prior,
+            motif_prior=prior.motif_prior,
+            vqvae=model,
+            opt=opt_refine,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            epochs=100,
+            grad_clip=1.0,
+            ckpt_out=str(CKPTS["activity_prior_refined_best"]),
+            early_stop_patience=20,
+            grad_accum_steps=grad_accum_steps,
+            freeze_motif=True,
+            lambda_detr=1.0,
+              
+            lambda_ctx=1.0,
+            lambda_adj=1.0,
+            lambda_spatial=1.0,
+            lambda_soft_grid=1.0,
+            
+            lambda_ctx_field=0.05,
+            ctx_field_tau=0.25,
+            
+            memory_tok=getattr(model, "memory_tok", None),
+            memory_adj=getattr(model, "memory_adj", None),
+            isi_gap_bins=gap_bins,
+            isi_max_gap=max(b for _, b in gap_bins),
+        )
+
+        save_json_report(hist_refine, REPORTS["prior_refine"])
+
+    return {
+        "motif": hist_motif,
+        "activity": hist_activity,
+        "refine": hist_refine,
+    }
+
+@torch.no_grad()
+def load_stage3_prior(model, device):
+    vq_ckpt = select_ckpt(
+        2,
+        prefer_best=True,
+    )
+
+    model.load_checkpoint(str(vq_ckpt), map_location=device)
+    freeze_for_stage(model, 3)
+
+
+    if CKPTS["activity_prior_refined_best"].exists():
+        activity_ckpt_path = CKPTS[
+            "activity_prior_refined_best"
+        ]
+    else:
+        activity_ckpt_path = CKPTS[
+            "activity_prior_best"
+        ]
+
+    activity_meta = torch.load(
+        activity_ckpt_path,
+        map_location="cpu",
+    )
+
+    if "Kmax" not in activity_meta:
+        raise RuntimeError(
+            f"Activity checkpoint {activity_ckpt_path} "
+            "does not contain Kmax metadata."
+        )
+
+    if "token_grid" not in activity_meta:
+        raise RuntimeError(
+            f"Activity checkpoint {activity_ckpt_path} "
+            "does not contain token_grid metadata."
+        )
+
+    saved_grid = tuple(
+        map(
+            int,
+            activity_meta["token_grid"],
+        )
+    )
+
+    expected_grid = tuple(
+        int(model.img_size[i] // model.patch_size[i])
+        for i in range(3)
+    )
+
+    if saved_grid != expected_grid:
+        raise RuntimeError(
+            f"Activity checkpoint token grid {saved_grid} "
+            f"does not match VQ-VAE token grid "
+            f"{expected_grid}."
+        )
+
+    prior = build_prior_from_model(
+        model,
+        device,
+        Kmax=int(activity_meta["Kmax"]),
+    )
+
+    motif_ckpt = torch.load(
+        CKPTS["motif_prior_best"],
+        map_location=device,
+    )
+    
+
+    prior.motif_prior.load_state_dict(motif_ckpt["model"], strict=True)
+
+    if CKPTS["activity_prior_refined_best"].exists():
+        activity_ckpt = torch.load(CKPTS["activity_prior_refined_best"], map_location=device)
+        prior.activity_prior.load_state_dict(activity_ckpt["activity_prior"], strict=True)
+        print(f"Loaded refined activity prior: {CKPTS['activity_prior_refined_best']}")
+    else:
+        activity_ckpt = torch.load(CKPTS["activity_prior_best"], map_location=device)
+        prior.activity_prior.load_state_dict(activity_ckpt["model"], strict=True)
+        print(f"Loaded activity prior: {CKPTS['activity_prior_best']}")
+
+    prior.eval()
+
+    print(f"Loaded VQVAE for Stage 3 eval: {vq_ckpt}")
+    print(f"Loaded motif prior: {CKPTS['motif_prior_best']}")
+    return prior
+
+
+@torch.no_grad()
+def collect_generation_diagnostics(
+    model,
+    sampled,
+    gen,
+    grid,
+):
+    activity_out = sampled["activity_out"]
+    activity = sampled["activity"].bool()
+    codes = sampled["codes"].long()
+
+    count_prob = torch.softmax(
+        activity_out["count_logits"],
+        dim=-1,
+    )
+
+    count_values = torch.arange(
+        count_prob.shape[-1],
+        device=count_prob.device,
+        dtype=count_prob.dtype,
+    )
+
+    prob = gen["prob"]
+    x_gen = gen["x_gen"]
+
+    # (B,N,P), then count thresholded voxels per latent patch.
+    generated_patches = model.patchify(
+        x_gen,
+        grid,
+    )
+
+    patch_spike_count = generated_patches.sum(
+        dim=-1
+    )
+
+    rows = []
+
+    for b in range(activity.shape[0]):
+        active_mask = activity[b]
+        active_count = int(
+            active_mask.sum().item()
+        )
+
+        blank_active_count = int(
+            (
+                active_mask
+                & patch_spike_count[b].eq(0)
+            ).sum().item()
+        )
+
+        p = prob[b].float().reshape(-1)
+
+        z1 = codes[b, :, 0]
+        z2 = codes[b, :, 1]
+
+        invalid = (
+            (z1 < -1)
+            | (z1 >= int(model.vq.num_codes_per_level[0]))
+            | (z2 < -1)
+            | (z2 >= int(model.vq.num_codes_per_level[1]))
+            | (z1.eq(-1) ^ z2.eq(-1))
+        )
+
+        rows.append({
+            "threshold_used": float(
+                gen["threshold"]
+            ),
+            "patch_size": [
+                int(v)
+                for v in model.patch_size
+            ],
+            "token_grid_shape": [
+                int(v)
+                for v in grid
+            ],
+            "Ntok": int(activity.shape[1]),
+            "Kmax": int(
+                activity_out["count_logits"].shape[-1] - 1
+            ),
+            "sampled_active_token_count": active_count,
+            "count_argmax": int(
+                count_prob[b].argmax().item()
+            ),
+            "expected_count": float(
+                (
+                    count_prob[b]
+                    * count_values
+                ).sum().item()
+            ),
+            "p_count_zero": float(
+                count_prob[b, 0].item()
+            ),
+            "count_entropy": float(
+                -(
+                    count_prob[b]
+                    * count_prob[b]
+                    .clamp_min(1e-12)
+                    .log()
+                ).sum().item()
+            ),
+            "generated_nonblank_motif_tokens": int(
+                z1.ne(-1).sum().item()
+            ),
+            "invalid_motif_codes": int(
+                invalid.sum().item()
+            ),
+            "decoded_probability_mean": float(
+                p.mean().item()
+            ),
+            "decoded_probability_max": float(
+                p.max().item()
+            ),
+            "decoded_probability_p50": float(
+                torch.quantile(p, 0.50).item()
+            ),
+            "decoded_probability_p90": float(
+                torch.quantile(p, 0.90).item()
+            ),
+            "decoded_probability_p95": float(
+                torch.quantile(p, 0.95).item()
+            ),
+            "decoded_probability_p99": float(
+                torch.quantile(p, 0.99).item()
+            ),
+            "decoded_probability_p99_9": float(
+                torch.quantile(p, 0.999).item()
+            ),
+            "voxels_above_threshold": int(
+                x_gen[b].sum().item()
+            ),
+            "final_generated_spike_count": int(
+                x_gen[b].sum().item()
+            ),
+            "fraction_active_latents_decoding_zero_spikes": (
+                float(
+                    blank_active_count
+                    / active_count
+                )
+                if active_count > 0
+                else None
+            ),
+        })
+
+    return rows
+
+
+@torch.no_grad()
+def evaluate_stage3_prior(
+    model,
+    test_loader,
+    device,
+    *,
+    out_dir="../viz_out_vqvae/vqvae_stage3/stage3_prior_gen",
+    max_batches=20,
+    samples_per_context=4,
+    task_id_override=None,
+    steps=12,
+    temperature=1.0,
+):
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    prior = load_stage3_prior(model, device)
+
+    model.eval()
+    prior.eval()
+
+    rows = []
+
+    for bidx, batch in enumerate(test_loader):
+        if bidx >= max_batches:
+            break
+
+        x = batch["x"].to(device).float()
+        gct = batch["global_ctx"].to(device).float()
+        lct = batch["local_ctx"].to(device).float()
+
+        # Use test-loader context as the requested condition.
+        # Repeat each real context to draw multiple generated samples.
+        B = x.shape[0]
+        gct_rep = gct.repeat_interleave(samples_per_context, dim=0)
+        lct_rep = lct.repeat_interleave(samples_per_context, dim=0)
+
+        if task_id_override is None:
+            task_id = batch["task_id"].to(device).long()
+            task_id = task_id.repeat_interleave(samples_per_context, dim=0)
+        else:
+            task_id = torch.full(
+                (B * samples_per_context,),
+                int(task_id_override),
+                dtype=torch.long,
+                device=device,
+            )
+
+        # Get grid/N from frozen VQVAE using the real x only as tokenizer geometry reference.
+        # x is not used as generation input.
+        mask_spec = batch.get("mask_spec", None)
+
+        tok_out = model(
+            x,
+            global_ctx=gct,
+            local_ctx=lct,
+            predict_mask_spec=mask_spec,
+        )
+        
+        grid = tok_out["grid"]
+        full_codes = tok_out["codes"].long()
+        predict_mask = tok_out["predict_mask"]
+        
+        full_codes_rep = full_codes.repeat_interleave(samples_per_context, dim=0)
+        predict_mask_rep = predict_mask.repeat_interleave(samples_per_context, dim=0)
+        
+        sampled = sample_hierarchical_roi(
+            prior=prior,
+            global_ctx=gct_rep,
+            local_ctx=lct_rep,
+            task_id=task_id,
+            roi_mask=predict_mask_rep,
+            visible_codes=full_codes_rep,
+            activity_count_temperature=1.0,
+            activity_coord_temperature=temperature,
+            motif_steps=steps,
+            motif_temperature=temperature,
+        )
+        
+        codes_roi = sampled["codes"]
+
+        codes = full_codes_rep.clone()
+        roi = predict_mask_rep.bool()
+        if roi.dim() == 3:
+            roi = roi.squeeze(-1)
+        
+        codes[roi] = codes_roi[roi]
+
+        gen = decode_codes_to_xgen(
+            model,
+            codes,
+            grid=grid,
+            global_ctx=gct_rep,   # or ctx_t["global_ctx"]
+            local_ctx=lct_rep,    # or ctx_t["local_ctx"]
+        )
+        
+        x_gen = gen["x_gen"]
+        
+        diagnostic_rows = collect_generation_diagnostics(
+            model=model,
+            sampled=sampled,
+            gen=gen,
+            grid=grid,
+        )
+
+        batch_rows = save_generated_batch_outputs(
+            x_gen=x_gen,
+            out_dir=out_dir,
+            prefix=f"stage3_testctx_b{bidx:04d}",
+            intended_local_ctx=lct_rep,
+            fps=30,
+        )
+        
+        for i, r in enumerate(batch_rows):
+            r.update(
+                diagnostic_rows[i]
+            )
+        
+            r["generation_mode"] = "test_context"
+            r["batch"] = int(bidx)
+            r["task_id"] = int(
+                task_id[i].item()
+            )
+            r["target_active_token_count"] = int(
+                full_codes_rep[i, :, 0]
+                .ne(-1)
+                .sum()
+                .item()
+            )
+        
+            rows.append(r)
+
+        # torch.save(
+        #     {
+        #         "codes": codes.detach().cpu(),
+        #         "logits": logits.detach().cpu(),
+        #         "prob": prob.detach().cpu(),
+        #         "x_gen": x_gen.detach().cpu(),
+        #         "global_ctx": gct_rep.detach().cpu(),
+        #         "local_ctx": lct_rep.detach().cpu(),
+        #         "task_id": task_id.detach().cpu(),
+        #         "grid": tuple(map(int, grid)),
+        #     },
+        #     out_dir / f"stage3_gen_batch_{bidx:04d}.pt",
+        # )
+
+    with open(out_dir / "stage3_generation_metrics.json", "w") as f:
+        json.dump(rows, f, indent=2)
+
+    print(f"Saved Stage 3 generated samples/metrics to: {out_dir}")
+    return rows
+
+@torch.no_grad()
+def evaluate_stage3_prior_sampled_contexts(
+    model,
+    ref_loader,
+    device,
+    *,
+    out_dir="../viz_out_vqvae/vqvae_stage3/stage3_prior_sampled_ctx",
+    context_bank_path="ckpts/context_prior.pkl",
+    mode="random_full",
+    fixed_global_ctx=None,
+    partial_local=None,
+    assay_id=None,
+    k=64,
+    max_samples=64,
+    batch_size_gen=4,
+    task_id=0,
+    steps=12,
+    temperature=1.0,
+    ctx_temperature=0.05,
+):
+    """
+    Stage-3 free-generation eval with controllable context sampling.
+
+    Modes:
+      random_full:
+          sample realistic (global_ctx, local_ctx) pairs from context bank
+
+      fixed_global:
+          keep/query global_ctx fixed, retrieve realistic matching local_ctx
+
+      partial_local:
+          retrieve realistic full contexts matching partial local constraints
+
+      fixed_global_partial_local:
+          retrieve realistic local_ctx matching both fixed global_ctx and partial local constraints
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    prior = load_stage3_prior(model, device)
+    model.eval()
+    prior.eval()
+
+    ctx_sampler = ContextBankSampler.from_file(
+        context_bank_path,
+        model=model,
+        device=device,
+        seed=0,
+    )
+
+    # Only used to infer token grid geometry. This does not provide generation context.
+    ref_batch = next(iter(ref_loader))
+    x_ref = ref_batch["x"].to(device).float()
+    g_ref = ref_batch["global_ctx"].to(device).float()
+    l_ref = ref_batch["local_ctx"].to(device).float()
+
+    tok_out = model(x_ref, global_ctx=g_ref, local_ctx=l_ref)
+    grid = tok_out["grid"]
+    N = int(grid[0] * grid[1] * grid[2])
+
+    fixed_global_np = None
+    if fixed_global_ctx is not None:
+        fixed_global_np = fixed_global_ctx
+        if isinstance(fixed_global_np, torch.Tensor):
+            fixed_global_np = fixed_global_np.detach().cpu().numpy()
+
+    rows = []
+    n_done = 0
+    sample_id = 0
+
+    while n_done < max_samples:
+        B = min(batch_size_gen, max_samples - n_done)
+
+        if mode == "random_full":
+            ctx_np = ctx_sampler.sample(
+                assay_id=assay_id,
+                batch_size=B,
+                return_index=True,
+            )
+
+        elif mode == "fixed_global":
+            if fixed_global_np is None:
+                raise ValueError("mode='fixed_global' requires fixed_global_ctx.")
+            ctx_np = ctx_sampler.sample(
+                global_ctx=fixed_global_np,
+                assay_id=assay_id,
+                batch_size=B,
+                k=k,
+                temperature=ctx_temperature,
+                return_index=True,
+            )
+
+        elif mode == "partial_local":
+            if partial_local is None:
+                raise ValueError("mode='partial_local' requires partial_local.")
+            ctx_np = ctx_sampler.sample(
+                partial_local=partial_local,
+                assay_id=assay_id,
+                batch_size=B,
+                k=k,
+                temperature=ctx_temperature,
+                return_index=True,
+            )
+
+        elif mode == "fixed_global_partial_local":
+            if fixed_global_np is None:
+                raise ValueError("mode='fixed_global_partial_local' requires fixed_global_ctx.")
+            if partial_local is None:
+                raise ValueError("mode='fixed_global_partial_local' requires partial_local.")
+            ctx_np = ctx_sampler.sample(
+                global_ctx=fixed_global_np,
+                partial_local=partial_local,
+                assay_id=assay_id,
+                batch_size=B,
+                k=k,
+                temperature=ctx_temperature,
+                return_index=True,
+            )
+
+        else:
+            raise ValueError(f"Unknown context sampling mode: {mode}")
+
+        ctx_t = ctx_sampler.to_torch(ctx_np, device=device, task_id=task_id)
+
+        roi_mask = torch.ones(
+            (B, N),
+            device=device,
+            dtype=torch.bool,
+        )
+        
+        sampled = sample_hierarchical_roi(
+            prior=prior,
+            global_ctx=ctx_t["global_ctx"],
+            local_ctx=ctx_t["local_ctx"],
+            task_id=ctx_t["task_id"],
+            roi_mask=roi_mask,
+            activity_count_temperature=1.0,
+            activity_coord_temperature=temperature,
+            motif_steps=steps,
+            motif_temperature=temperature,
+        )
+        
+        codes = sampled["codes"]
+
+        gen = decode_codes_to_xgen(
+            model,
+            codes,
+            grid=grid,
+            global_ctx=ctx_t["global_ctx"],
+            local_ctx=ctx_t["local_ctx"],
+        )
+        x_gen = gen["x_gen"]
+        
+        diagnostic_rows = collect_generation_diagnostics(
+            model=model,
+            sampled=sampled,
+            gen=gen,
+            grid=grid,
+        )
+
+        batch_rows = save_generated_batch_outputs(
+            x_gen=x_gen,
+            out_dir=out_dir,
+            prefix=f"{mode}_gen_{sample_id:04d}",
+            intended_local_ctx=ctx_t["local_ctx"],
+            fps=30,
+            local_min=ctx_sampler.local_min,
+            local_max=ctx_sampler.local_max,
+            local_mean=ctx_sampler.local_mean,
+            local_std=ctx_sampler.local_std,
+            partial_local=partial_local,
+        )
+        
+        for i, r in enumerate(batch_rows):
+            r.update(
+                diagnostic_rows[i]
+            )
+        
+            r["mode"] = str(mode)
+            r["generation_mode"] = str(mode)
+            r["sample_id"] = int(sample_id)
+            r["context_bank_index"] = int(
+                ctx_np["index"][i]
+            )
+            r["assay_id"] = int(
+                ctx_np["assay_id"][i]
+            )
+            r["task_id"] = int(
+                ctx_t["task_id"][i].item()
+            )
+        
+            rows.append(r)
+            sample_id += 1
+
+        n_done += B
+        
+        
+    save_generation_metrics_json(rows, out_dir /  f"{mode}_generation_metrics.json")
+
+
+    print(f"Saved sampled-context Stage 3 generations to: {out_dir} | mode={mode}")
+    return rows
 
 
 def make_viz_loader(test_loader):
@@ -763,6 +1664,8 @@ def evaluate_and_visualize(model, test_loader, stage: int, assay_indices, assay_
                 pool_t=1,
                 thr=None,
                 cmap_name="viridis",
+                isi_gap_bins=gap_bins,
+                isi_max_gap=max(b for _, b in gap_bins),
             )
             
         if RUN_PLOTTER:
@@ -1031,6 +1934,211 @@ def debug_vq_codebooks(
             json.dump(out_json, f, indent=2)
 
 
+def run_stage_evaluation(
+    stage,
+    model,
+    train_loader,
+    test_loader,
+    device,
+    assay_indices,
+):
+    print("\n" + "=" * 80)
+    print(f"STAGE {stage}: evaluation and visualization")
+    print("=" * 80)
+
+    # ============================================================
+    # Stage 0
+    # ============================================================
+    if stage == 0:
+        if not RUN_VIZ:
+            print("Skipping Stage 0 visualization because RUN_VIZ=False.")
+            return
+
+        if model.spatial_map_prior is None:
+            print(
+                "Skipping Stage 0 evaluation/visualization: "
+                "model has no spatial_map_prior."
+            )
+            return
+
+        # Always evaluate the best saved Stage 0 checkpoint,
+        # not the final in-memory early-stopping epoch.
+        load_spatial_pretrain_if_available(model)
+
+        out_dir = Path(
+            "../viz_out_vqvae/pre_stage1_spatial_maps"
+        )
+        out_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        assay_codebook = (
+            train_loader
+            .dataset
+            .dataset
+            .assay_codebook
+        )
+
+        save_assaywise_spatial_maps(
+            model,
+            assay_indices=assay_indices,
+            n_assays=num_assays_for_emb,
+            out_dir=str(out_dir),
+            assay_codebook=assay_codebook,
+        )
+
+        save_assaywise_adjacency_diagnostics(
+            model,
+            assay_indices=assay_indices,
+            n_assays=num_assays_for_emb,
+            out_dir=str(out_dir),
+            assay_codebook=assay_codebook,
+        )
+
+        if (
+            hasattr(model, "memory_adj")
+            and model.memory_adj is not None
+        ):
+            model.memory_adj.debug_print(
+                max_items=5
+            )
+
+        print(
+            f"Saved Stage 0 visualizations to: "
+            f"{out_dir.resolve()}"
+        )
+        return
+
+    # ============================================================
+    # Stages 1 and 2
+    # ============================================================
+    if stage in (1, 2):
+        evaluate_and_visualize(
+            model,
+            test_loader,
+            stage=stage,
+            assay_indices=assay_indices,
+            assay_codebook=(
+                test_loader
+                .dataset
+                .dataset
+                .assay_codebook
+            ),
+        )
+
+        if RUN_CODEBOOK_DEBUG:
+            out_root = VIZ_ROOTS[stage]
+
+            debug_vq_codebooks(
+                model,
+                save_txt_path=str(
+                    out_root / "codebook_debug.txt"
+                ),
+                save_json_path=str(
+                    out_root / "codebook_debug.json"
+                ),
+            )
+
+        return
+
+    # ============================================================
+    # Stage 3
+    # ============================================================
+    if stage == 3:
+        # A. Held-out exact-context evaluation
+        evaluate_stage3_prior(
+            model,
+            test_loader,
+            device,
+            out_dir=(
+                "../viz_out_vqvae/vqvae_stage3/"
+                "stage3_prior_test_ctx"
+            ),
+            max_batches=20,
+            samples_per_context=4,
+            task_id_override=None,
+            steps=12,
+            temperature=1.0,
+        )
+
+        ref_batch = next(iter(test_loader))
+        fixed_gctx = ref_batch["global_ctx"][0:1]
+
+        # B1. Random realistic complete context
+        evaluate_stage3_prior_sampled_contexts(
+            model,
+            test_loader,
+            device,
+            out_dir=(
+                "../viz_out_vqvae/vqvae_stage3/"
+                "stage3_prior_random_full"
+            ),
+            context_bank_path="ckpts/context_prior.pkl",
+            mode="random_full",
+            max_samples=64,
+        )
+
+        # B2. Fixed global, retrieved local
+        evaluate_stage3_prior_sampled_contexts(
+            model,
+            test_loader,
+            device,
+            out_dir=(
+                "../viz_out_vqvae/vqvae_stage3/"
+                "stage3_prior_fixed_global"
+            ),
+            context_bank_path="ckpts/context_prior.pkl",
+            mode="fixed_global",
+            fixed_global_ctx=fixed_gctx,
+            max_samples=64,
+        )
+
+        # B3. Partial local constraints
+        evaluate_stage3_prior_sampled_contexts(
+            model,
+            test_loader,
+            device,
+            out_dir=(
+                "../viz_out_vqvae/vqvae_stage3/"
+                "stage3_prior_partial_local"
+            ),
+            context_bank_path="ckpts/context_prior.pkl",
+            mode="partial_local",
+            partial_local={
+                "log_mean_firing_density": -9.1,
+                "temporal_trend": 0.0,
+            },
+            max_samples=64,
+        )
+
+        # B4. Fixed global and partial local constraints
+        evaluate_stage3_prior_sampled_contexts(
+            model,
+            test_loader,
+            device,
+            out_dir=(
+                "../viz_out_vqvae/vqvae_stage3/"
+                "stage3_prior_fixed_global_partial_local"
+            ),
+            context_bank_path="ckpts/context_prior.pkl",
+            mode="fixed_global_partial_local",
+            fixed_global_ctx=fixed_gctx,
+            partial_local={
+                "log_mean_firing_density": -9.1,
+                "temporal_trend": 0.0,
+            },
+            max_samples=64,
+        )
+
+        return
+
+    raise ValueError(
+        f"Unsupported EVAL_STAGE={stage}"
+    )
+
+
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -1068,7 +2176,7 @@ def main():
 
     isi_target_gap_rates = compute_short_gap_target_rates_from_loader(
         train_loader,
-        max_gap=max_gap,
+        gap_bins=gap_bins,
         max_batches=None,
     )
 
@@ -1083,94 +2191,126 @@ def main():
         decoder_cross_attn_layers=(),
     )
 
-    # =========================
-    # TRAINING
-    # =========================
-    if 0 in TRAIN_STAGES:
-        run_stage0_spatial_pretrain(model, train_loader, device)
+    # ============================================================
+    # Sequential training followed immediately by stage evaluation
+    # ============================================================
     
-    # Load Stage-0 pretrained GCT/spatial/memory banks before VQVAE/prior training or evaluation.
-    if any(s in TRAIN_STAGES for s in (1, 2, 3)) or any(s in EVAL_STAGES for s in (0, 1, 2)):
+    evaluated_stages = set()
+    
+    # When Stage 0 is not being retrained, load its saved state before
+    # any downstream VQVAE/prior training begins.
+    needs_spatial_pretrain = (
+        any(
+            stage in TRAIN_STAGES
+            for stage in (1, 2, 3)
+        )
+        or any(
+            stage in EVAL_STAGES
+            for stage in (0, 1, 2, 3)
+        )
+    )
+    
+    if 0 not in TRAIN_STAGES and needs_spatial_pretrain:
         load_spatial_pretrain_if_available(model)
     
+    
     for stage in TRAIN_STAGES:
+        # ========================================================
+        # Train one stage
+        # ========================================================
+    
         if stage == 0:
-            continue
+            run_stage0_spatial_pretrain(
+                model,
+                train_loader,
+                device,
+            )
+    
+            # Restore the best Stage 0 checkpoint rather than using
+            # the final early-stopping epoch.
+            load_spatial_pretrain_if_available(model)
+    
+            # Build the retrieval bank using the best Stage 0
+            # global-context embedding.
+            build_context_prior(
+                train_loader,
+                save_path="ckpts/context_prior.pkl",
+                model=model,
+                device=device,
+            )
     
         elif stage == 1:
-            run_stage1(model, train_loader, val_loader, baseline_prob, logit_baseline)
+            run_stage1(
+                model,
+                train_loader,
+                val_loader,
+                baseline_prob,
+                logit_baseline,
+            )
     
         elif stage == 2:
-            run_stage2(model, train_loader, val_loader)
+            run_stage2(
+                model,
+                train_loader,
+                val_loader,
+            )
     
         elif stage == 3:
-            run_stage3_prior(model, train_loader, val_loader, device)
+            run_stage3_prior(
+                model,
+                train_loader,
+                val_loader,
+                device,
+            )
     
         else:
-            raise ValueError(f"Unsupported TRAIN_STAGE={stage}")
+            raise ValueError(
+                f"Unsupported TRAIN_STAGE={stage}"
+            )
+    
+        # ========================================================
+        # Immediately evaluate the stage that just finished
+        # ========================================================
+    
+        if stage in EVAL_STAGES:
+            run_stage_evaluation(
+                stage=stage,
+                model=model,
+                train_loader=train_loader,
+                test_loader=test_loader,
+                device=device,
+                assay_indices=assay_indices,
+            )
+    
+            evaluated_stages.add(stage)
     
     
-    # =========================
-    # EVALUATION / VISUALIZATION
-    # =========================
+    # ============================================================
+    # Evaluation-only stages
+    # ============================================================
+    #
+    # This preserves configurations such as:
+    #
+    # TRAIN_STAGES = ()
+    # EVAL_STAGES = (1, 2)
+    #
+    # or:
+    #
+    # TRAIN_STAGES = (2,)
+    # EVAL_STAGES = (1, 2)
+    #
     for stage in EVAL_STAGES:
-    
-        if stage == 0:
-            if not RUN_VIZ:
-                continue
-    
-            if model.spatial_map_prior is None:
-                print("Skipping stage 0 eval/viz: model has no spatial_map_prior.")
-                continue
-    
-            out_dir = Path("../viz_out_vqvae/pre_stage1_spatial_maps")
-            out_dir.mkdir(parents=True, exist_ok=True)
-    
-            save_assaywise_spatial_maps(
-                model,
-                assay_indices=assay_indices,
-                n_assays=num_assays_for_emb,
-                out_dir=str(out_dir),
-                assay_codebook=train_loader.dataset.dataset.assay_codebook,
-            )
-            save_assaywise_adjacency_diagnostics(
-                model,
-                assay_indices=assay_indices,
-                n_assays=num_assays_for_emb,
-                out_dir=str(out_dir),
-                assay_codebook=train_loader.dataset.dataset.assay_codebook,
-            )
-    
-            if hasattr(model, "memory_adj") and model.memory_adj is not None:
-                model.memory_adj.debug_print(max_items=5)
-    
-            print(f"Saved stage 0 spatial maps to: {out_dir}")
+        if stage in evaluated_stages:
             continue
     
-        if stage in (1, 2):
-            evaluate_and_visualize(
-                model,
-                test_loader,
-                stage=stage,
-                assay_indices=assay_indices,
-                assay_codebook=test_loader.dataset.dataset.assay_codebook,
-            )
-    
-            if RUN_CODEBOOK_DEBUG:
-                if stage == 1:
-                    save_txt_path="../viz_out_vqvae/vqvae_stage1/codebook_debug.txt"
-                    save_json_path="../viz_out_vqvae/vqvae_stage1/codebook_debug.json"
-                elif stage == 2:
-                    save_txt_path="../viz_out_vqvae/vqvae_stage2/codebook_debug.txt"
-                    save_json_path="../viz_out_vqvae/vqvae_stage2/codebook_debug.json"
-                debug_vq_codebooks(
-                    model,
-                    save_txt_path=save_txt_path,
-                    save_json_path=save_json_path,
-                )
-    
-        else:
-            raise ValueError(f"Unsupported EVAL_STAGE={stage}")
+        run_stage_evaluation(
+            stage=stage,
+            model=model,
+            train_loader=train_loader,
+            test_loader=test_loader,
+            device=device,
+            assay_indices=assay_indices,
+        )
 
     # ============================================================
     # Combined Stage 1 → Stage 2 plots/reports

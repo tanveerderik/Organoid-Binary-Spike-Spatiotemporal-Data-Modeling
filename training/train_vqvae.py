@@ -23,6 +23,7 @@ from ..utils.losses import (
     tolerant_spike_loss,
     short_gap_excess_loss_from_logits_batch_targets,
     ctx_loss_soft,
+    local_moment_field_loss,
     variance_floor_loss, encoder_isotropy_loss,
     spatial_support_violation_loss,
     blank_patch_logit_hinge_loss,
@@ -61,6 +62,7 @@ def fit_vqvae(
 
     lambda_isi: float = 1e-2,
     lambda_ctx: float = 1e-3,
+    lambda_ctx_field: float = 1e-4,
     
     ctx_start_epoch: int = 30,         # start ctx after 20
     ctx_warmup_epochs: int = 50,       # ramp duration (or shorter, like 10–15)
@@ -111,6 +113,7 @@ def fit_vqvae(
     
     # ---- ISI maintenance loss terms ----
     isi_max_gap: int = 3,
+    isi_gap_bins=None,
     isi_tau: float = 0.25,
     isi_margin: float = 0.25,
     
@@ -195,6 +198,7 @@ def fit_vqvae(
             "loss_isi": 0.0,
             
             "loss_ctx": 0.0,
+            "loss_ctx_field": 0.0,
             "loss_sp_cons": 0.0,
             "loss_sp_token": 0.0,
             "loss_sp_pixel": 0.0,
@@ -513,6 +517,7 @@ def fit_vqvae(
                             logits_b1thw=logits_vol_raw.float(),
                             target_gap_rates_bg=adj_target_bg.float(),
                             max_gap=isi_max_gap,
+                            gap_bins=isi_gap_bins,
                             tau=isi_tau,
                             margin=isi_margin,
                             confidence_bg=adj_conf_bg.float(),
@@ -561,10 +566,26 @@ def fit_vqvae(
                 
                 loss_ctx = ctx_loss_soft(
                     logits_b1thw=logits_vol_raw,
-                    ctx_tgt_b5=lct,
+                    ctx_tgt_b9=lct,
                     dims=ctx_dims,
                     tau=0.25,
                 )
+                lambda_ctx_field_eff = (
+                    float(lambda_ctx_field)
+                    * float(ctx_ramp)
+                )
+                
+                loss_ctx_field = logits_vol_raw.new_zeros(())
+                
+                if lambda_ctx_field_eff > 0.0:
+                    loss_ctx_field = local_moment_field_loss(
+                        logits_b1thw=logits_vol_raw,
+                        target_b1thw=tgt_vol,
+                        patch_size=model.patch_size,
+                        tau=0.25,
+                        min_active_spikes=1,
+                        min_shape_spikes=3,
+                    )
                 
                 # --- blank patch enforcing loss ---
                 t_blank = (epoch - blank_start_epoch) / max(1, blank_warmup_epochs)
@@ -710,6 +731,7 @@ def fit_vqvae(
                 + lambda_isi_eff * loss_isi
                 + lambda_enc_var * loss_enc_var
                 + lambda_ctx_eff * loss_ctx
+                + lambda_ctx_field_eff * loss_ctx_field
                 + loss_sp_cons
                 + lambda_blank_eff * loss_blank + lambda_blank_sep_eff * loss_blank_sep
             )
@@ -730,6 +752,7 @@ def fit_vqvae(
             
             sums["loss_isi"] += float(loss_isi.detach().cpu())
             sums["loss_ctx"] += float(loss_ctx.detach().cpu())
+            sums["loss_ctx_field"] += float(loss_ctx_field.detach().cpu())
             sums["loss_sp_cons"] += float(loss_sp_cons.detach().cpu())
             sums["loss_sp_token"] += float(loss_sp_token.detach().cpu())
             sums["loss_sp_pixel"] += float(loss_sp_pixel.detach().cpu())
@@ -827,6 +850,7 @@ def fit_vqvae(
             "loss_isi": sums["loss_isi"] / max(1, num_batches),
             
             "loss_ctx": sums["loss_ctx"] / max(1, num_batches),
+            "loss_ctx_field": sums["loss_ctx_field"] / max(1, num_batches),
             "loss_sp_cons": sums["loss_sp_cons"] / max(1, num_batches),
             "loss_sp_token": sums["loss_sp_token"] / max(1, num_batches),
             "loss_sp_pixel": sums["loss_sp_pixel"] / max(1, num_batches),
@@ -935,6 +959,7 @@ def fit_vqvae(
             f"vq={train_log.get('loss_vq', 0):.5f} "
             f"enc_var={train_log.get('loss_enc_var', 0):.5f} "
             f"ctx={train_log.get('loss_ctx', 0):.5f} "
+            f"ctx_field={train_log.get('loss_ctx_field', 0):.5f} "
             f"sp_cons={train_log.get('loss_sp_cons', 0):.6e} "
             f"isi={train_log.get('loss_isi', 0):.5f} "
             f"sp_mem={train_log.get('sp_memory_used', 0):.2f} "

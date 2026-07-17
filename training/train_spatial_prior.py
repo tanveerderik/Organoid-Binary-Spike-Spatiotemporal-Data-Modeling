@@ -52,6 +52,7 @@ def fit_spatial_prior_pretrain(
     memory_mode: str = "max",   # "max" or "ema"
     lambda_sep: float = 1e-4,
     adj_max_gap: int = 3,
+    adj_gap_bins=None,
     lambda_adj: float = 0.5,
     early_stop_patience: Optional[int] = None,
 ):
@@ -76,9 +77,15 @@ def fit_spatial_prior_pretrain(
         round_decimals=6,
     )
     
-    max_gap = adj_max_gap
+    if adj_gap_bins is None:
+        adj_gap_bins = [(g, g) for g in range(1, int(adj_max_gap) + 1)]
+        
+    adj_gap_bins = [(int(a), int(b)) for a, b in adj_gap_bins]
+    adj_max_gap = max(b for _, b in adj_gap_bins)
+
     memory_adj = GlobalContextAdjacencyBank(
-        max_gap=max_gap,
+        gap_bins=adj_gap_bins,
+        max_gap=adj_max_gap,
         alpha=1.0,
         beta=20.0,
         round_decimals=6,

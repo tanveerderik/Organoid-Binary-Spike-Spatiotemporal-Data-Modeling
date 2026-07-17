@@ -44,7 +44,7 @@ class TransformerVQVAE(nn.Module):
         # (yours is currently 2 = assay(2) + ...)
         global_ctx_in_dim: int = 2,
         global_emb_dim: int = 16,
-        local_ctx_in_dim: int = 5,
+        local_ctx_in_dim: int = 9,
         local_emb_dim: int = 16,
         ctx_hidden_mult: float = 2.0,
 
@@ -52,6 +52,7 @@ class TransformerVQVAE(nn.Module):
         
         # ---- gct-conditioned spatial map bias ----
         use_spatial_map_prior: bool = True,
+        gap_bins = None,
 
         # context dropout (helps prevent shortcutting) and CFG knobs
         ctx_drop_p=0.25,
@@ -235,6 +236,11 @@ class TransformerVQVAE(nn.Module):
         self.use_spatial_map_prior = bool(use_spatial_map_prior)
         self.use_learned_spatial_prior_diagnostics = False
         
+        if gap_bins is None:
+            gap_bins = [(1, 1), (2, 2), (3, 3)]
+        gap_bins = [(int(a), int(b)) for a, b in gap_bins]
+        self.gap_bins = gap_bins
+        
         if self.use_spatial_map_prior:
             self.spatial_map_prior = SpatialMapPrior(
                 global_emb_dim=self.global_emb_dim,
@@ -243,6 +249,7 @@ class TransformerVQVAE(nn.Module):
                 patch_size_hw=(pH, pW),
                 drop=0.1,
                 basis_k=32,
+                num_adj_bins=len(self.gap_bins),
             )
         else:
             self.spatial_map_prior = None

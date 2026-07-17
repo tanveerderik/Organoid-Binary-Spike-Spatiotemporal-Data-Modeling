@@ -14,6 +14,13 @@ import matplotlib.pyplot as plt
 from scipy.ndimage import maximum_filter
 
 
+ADJ_GAP_BINS = [(1, 1), (2, 2), (3, 3), (4, 6), (7, 12), (13, 24), (25, 48)]
+
+def _gap_bin_label(gap_idx, gap_bins=None):
+    gap_bins = gap_bins or ADJ_GAP_BINS
+    lo, hi = gap_bins[gap_idx]
+    return f"{lo}" if lo == hi else f"{lo}-{hi}"
+
 def detect_spatial_peaks(img, min_rel_height=0.3, footprint=5):
     """
     Detect local maxima in spatial bias map.
@@ -263,23 +270,29 @@ def save_assaywise_adjacency_diagnostics(
     tgt_arr = np.stack(tgt_list, axis=0)
     den_arr = np.stack(den_list, axis=0)
 
+    gap_bins = getattr(model.memory_adj, "gap_bins", None)
+    num_bins = pred_arr.shape[1]
+    if gap_bins is None:
+        gap_bins = [(i + 1, i + 1) for i in range(num_bins)]
+    gap_bins = [(int(a), int(b)) for a, b in gap_bins]
+    gap_labels = [_gap_bin_label(i, gap_bins) for i in range(num_bins)]
+
     np.savez(
         os.path.join(out_dir, "assaywise_adjacency_pred_vs_gt.npz"),
         pred=pred_arr,
         target=tgt_arr,
         denominator=den_arr,
         assay_indices=np.array(assay_list),
+        gap_bins=np.array(gap_bins, dtype=np.int64),
     )
 
-    max_gap = pred_arr.shape[1]
-
-    fig, axes = plt.subplots(1, max_gap, figsize=(4 * max_gap, 4), squeeze=False)
+    fig, axes = plt.subplots(1, num_bins, figsize=(4 * num_bins, 4), squeeze=False)
     axes = axes[0]
 
     lim_max = max(float(pred_arr.max()), float(tgt_arr.max())) * 1.1
     lim_max = max(lim_max, 1e-4)
 
-    for gi in range(max_gap):
+    for gi in range(num_bins):
         ax = axes[gi]
         ax.scatter(tgt_arr[:, gi], pred_arr[:, gi], s=35, alpha=0.8)
         ax.plot([0, lim_max], [0, lim_max], linestyle="--", linewidth=1)
@@ -291,7 +304,7 @@ def save_assaywise_adjacency_diagnostics(
 
         mae = np.mean(np.abs(tgt_arr[:, gi] - pred_arr[:, gi]))
 
-        ax.set_title(f"Gap {gi + 1}: r={r:.3f}, MAE={mae:.3e}")
+        ax.set_title(f"Gap {gap_labels[gi]}: r={r:.3f}, MAE={mae:.3e}")
         ax.set_xlabel("GT memory adjacency rate")
         ax.set_ylabel("Predicted adjacency rate")
         ax.set_xlim(0, lim_max)
@@ -303,16 +316,16 @@ def save_assaywise_adjacency_diagnostics(
 
     data, labels = [], []
 
-    for gi in range(max_gap):
+    for gi in range(num_bins):
         data.append(tgt_arr[:, gi])
-        labels.append(f"GT\ngap {gi + 1}")
+        labels.append(f"GT\ngap {gap_labels[gi]}")
         data.append(pred_arr[:, gi])
-        labels.append(f"Pred\ngap {gi + 1}")
+        labels.append(f"Pred\ngap {gap_labels[gi]}")
 
-    plt.figure(figsize=(2.2 * max_gap, 4))
+    plt.figure(figsize=(2.2 * num_bins, 4))
     plt.boxplot(data, labels=labels, showfliers=True)
 
-    for gi in range(max_gap):
+    for gi in range(num_bins):
         x_gt = 2 * gi + 1
         x_pr = 2 * gi + 2
         for a in range(tgt_arr.shape[0]):
