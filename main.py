@@ -84,8 +84,8 @@ from .utils.constants import (
 #   (2,)       -> load stage-1 ckpt, train context-conditioned decoder only
 #   (1, 2, 3)  -> run the whole pipeline sequentially
 #   (0,)     -> run spatial-map pretraining only
-TRAIN_STAGES = (0,)        # 0,1,2,3
-EVAL_STAGES  = (0,3)   # 0,1,2,3
+TRAIN_STAGES = (3,)        # 0,1,2,3
+EVAL_STAGES  = (3,)   # 0,1,2,3
 
 RUN_EVAL = True
 RUN_VIZ  = True
@@ -96,9 +96,9 @@ RUN_SKIP_MISSING_EVAL = True
 
 # Stage-0 spatial map checkpoint. If this file exists, it will be loaded before
 # stages 1/2/3. If TRAIN_STAGES contains 0.5, it will be overwritten/trained first.
-SPATIAL_CKPT = Path("../ckpts/spatial_bias_pretrain.pt")
+SPATIAL_CKPT = Path("ckpts/spatial_bias_pretrain.pt")
 
-CKPT_DIR = Path("../ckpts")
+CKPT_DIR = Path("ckpts")
 CKPT_DIR.mkdir(parents=True, exist_ok=True)
 
 CKPTS = {
@@ -113,12 +113,12 @@ CKPTS = {
 }
 
 REPORTS = {
-    "stage1": Path("../training_report_vqvae_stage1.json"),
-    "stage2": Path("../training_report_vqvae_stage2.json"),
+    "stage1": Path("reports/training_report_vqvae_stage1.json"),
+    "stage2": Path("reports/training_report_vqvae_stage2.json"),
 
-    "prior_motif": Path("../training_report_prior_3A_motif.json"),
-    "prior_activity": Path("../training_report_prior_3B_activity.json"),
-    "prior_refine": Path("../training_report_prior_3C_refine.json"),
+    "prior_motif": Path("reports/training_report_prior_3A_motif.json"),
+    "prior_activity": Path("reports/training_report_prior_3B_activity.json"),
+    "prior_refine": Path("reports/training_report_prior_3C_refine.json"),
 }
 
 VIZ_ROOTS = {
@@ -2351,7 +2351,7 @@ def main():
         export_base_finetune_flat_xlsx(
             report_base_path=str(REPORTS["stage1"]),
             report_ft_path=str(REPORTS["stage2"]),
-            out_xlsx="../training_report_stage1_stage2_flat.xlsx",
+            out_xlsx="reports/training_report_stage1_stage2_flat.xlsx",
             shift_finetune_by="best",
         )
         
