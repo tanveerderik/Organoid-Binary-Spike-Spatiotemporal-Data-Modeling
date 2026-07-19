@@ -429,7 +429,7 @@ def build_activity_targets_from_codes(
     raw_count = active.sum(dim=1)                  # (B,)
     
     overflow = raw_count > int(Kmax)
-    
+
     if overflow.any():
         overflow_counts = (
             raw_count[overflow]
@@ -438,12 +438,22 @@ def build_activity_targets_from_codes(
             .tolist()
         )
     
+        largest_count = int(
+            raw_count.max().item()
+        )
+    
+        Ntok = int(
+            active.shape[1]
+        )
+    
         raise RuntimeError(
             f"Active-token target exceeds Kmax={Kmax}. "
-            f"Overflow counts: {overflow_counts}. "
-            "Do not silently clamp these targets. "
-            "Rebuild Stage 3B with a sufficiently large, "
-            "data-derived Kmax."
+            f"Overflow counts={overflow_counts}; "
+            f"largest count={largest_count}; "
+            f"Ntok={Ntok}; "
+            f"required ratio={largest_count / Ntok:.6f}. "
+            "Increase Kmax and restart Stage 3B. "
+            "Targets must not be silently clipped."
         )
     
     count_target = raw_count.long()

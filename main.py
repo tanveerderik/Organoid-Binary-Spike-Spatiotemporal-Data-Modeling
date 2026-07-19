@@ -737,44 +737,80 @@ def measure_stage3_active_token_counts(
     model,
     loader,
     device,
+    *,
+    num_passes=5,
 ):
     model.eval()
 
     all_counts = []
 
-    for batch in loader:
-        x = batch["x"].to(
-            device,
-            non_blocking=True,
-        ).float()
+    num_passes = int(num_passes)
 
-        gct = batch["global_ctx"].to(
-            device,
-            non_blocking=True,
-        ).float()
-
-        lct = batch["local_ctx"].to(
-            device,
-            non_blocking=True,
-        ).float()
-
-        out = model(
-            x,
-            global_ctx=gct,
-            local_ctx=lct,
-            predict_mask_spec=None,
+    if num_passes < 1:
+        raise ValueError(
+            f"num_passes must be at least 1, got {num_passes}"
         )
 
-        codes = out["codes"].long()
+    for pass_idx in range(num_passes):
+        pass_counts = []
 
-        counts = (
-            codes[..., 0]
-            .ne(-1)
-            .sum(dim=1)
-        )
+        for batch in loader:
+            x = batch["x"].to(
+                device,
+                non_blocking=True,
+            ).float()
 
-        all_counts.append(
-            counts.detach().cpu()
+            gct = batch["global_ctx"].to(
+                device,
+                non_blocking=True,
+            ).float()
+
+            lct = batch["local_ctx"].to(
+                device,
+                non_blocking=True,
+            ).float()
+
+            out = model(
+                x,
+                global_ctx=gct,
+                local_ctx=lct,
+                predict_mask_spec=None,
+            )
+
+            codes = out["codes"].long()
+
+            counts = (
+                codes[..., 0]
+                .ne(-1)
+                .sum(dim=1)
+            )
+
+            counts_cpu = counts.detach().cpu()
+
+            pass_counts.append(
+                counts_cpu
+            )
+            all_counts.append(
+                counts_cpu
+            )
+
+        if not pass_counts:
+            raise RuntimeError(
+                f"Kmax estimation pass {pass_idx + 1} "
+                "produced no samples."
+            )
+
+        pass_counts_np = torch.cat(
+            pass_counts,
+            dim=0,
+        ).numpy()
+
+        print(
+            f"Stage 3 Kmax estimation pass "
+            f"{pass_idx + 1}/{num_passes}: "
+            f"n={pass_counts_np.size}, "
+            f"mean={pass_counts_np.mean():.2f}, "
+            f"maximum={pass_counts_np.max()}"
         )
 
     if not all_counts:
@@ -789,6 +825,7 @@ def measure_stage3_active_token_counts(
     ).numpy()
 
     stats = {
+        "num_passes": int(num_passes),
         "num_samples": int(counts.size),
         "minimum": int(counts.min()),
         "maximum": int(counts.max()),
@@ -882,12 +919,55 @@ def run_stage3_prior(model, train_loader, val_loader, device):
         model=model,
         loader=train_loader,
         device=device,
+        num_passes=5,
     )
 
     # Use the observed training maximum so no target is dropped.
-    stage3_kmax = max(
-        1,
-        int(count_stats["maximum"]),
+    T, H, W = model.img_size
+    pT, pH, pW = model.patch_size
+       
+    token_grid = (
+        T // pT,
+        H // pH,
+        W // pW,
+    )
+       
+    Ntok = int(
+        token_grid[0]
+        * token_grid[1]
+        * token_grid[2]
+    )
+       
+    kmax_margin = 1.25
+       
+    observed_max = int(
+        count_stats["maximum"]
+    )
+       
+    stage3_kmax = min(
+        Ntok,
+        max(
+            1,
+            int(np.ceil(
+                kmax_margin * observed_max
+            )),
+        ),
+    )
+       
+    print(
+        "Selected Stage 3 Kmax:\n"
+        f"  estimation passes = "
+        f"{count_stats['num_passes']}\n"
+        f"  observed maximum = "
+        f"{observed_max}\n"
+        f"  safety multiplier = "
+        f"{kmax_margin:.2f}\n"
+        f"  selected Kmax = "
+        f"{stage3_kmax}\n"
+        f"  Ntok = "
+        f"{Ntok}\n"
+        f"  capacity ratio = "
+        f"{stage3_kmax / Ntok:.6f}"
     )
 
     prior = build_prior_from_model(
