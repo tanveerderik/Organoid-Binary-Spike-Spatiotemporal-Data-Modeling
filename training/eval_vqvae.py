@@ -6,11 +6,10 @@ Created on Fri Mar 13 12:10:22 2026
 @author: derik
 """
 import torch
-from typing import Optional
 from contextlib import nullcontext
 
 
-from ..utils.metrics import pr_curve, pr_curve_tolerant
+from ..utils.metrics import PRCurveAccumulator
 from ..utils.losses import tolerant_spike_loss
 
 
@@ -24,9 +23,6 @@ def evaluate_vqvae(
     pos_weight: float = 1.0,
     recon_tolerance: tuple[int, int, int] = (2, 2, 2),
     metric_tolerance: tuple[int, int, int] = (2, 2, 2),
-    # NOTE: kept for backward-compat with your caller; NOT used for randomness in eval.
-    # In eval we use deterministic cfg_ctx_force_unc=True/False instead.
-    cfg_ctx_drop_p: float = 0.0,
     # If True: compute both conditioned (FiLM on) and unconditioned (FiLM off) metrics.
     eval_cfg_modes: bool = True,
 ):
@@ -36,9 +32,9 @@ def evaluate_vqvae(
     - "Conditional" = FiLM always ON  (cfg_ctx_force_unc=False)
     - "Unconditional" = FiLM always OFF (cfg_ctx_force_unc=True)
 
-    Returns the usual keys (BCE_full, AUPRC, BestF1, ...) for CONDITIONAL mode,
-    plus *_uncond keys if eval_cfg_modes=True.
-
+    PR metrics are calculated once from TP/FP/FN accumulated over the complete
+    loader. Conditional keys end in ``_cond``; optional unconditional keys end
+    in ``_uncond``.
     """
     model.eval()
 
@@ -52,13 +48,38 @@ def evaluate_vqvae(
     
     # ---- accumulators (conditional) ----
     total_bce_c, total_bce_full_c, sum_vq_c = 0.0, 0.0, 0.0
-    auprcs_c, bestf1s_c, bestthrs_c = [], [], []
-    auprcs_tol_c, bestf1s_tol_c, bestthrs_tol_c = [], [], []
     
     # ---- accumulators (unconditional) ----
     total_bce_u, total_bce_full_u, sum_vq_u = 0.0, 0.0, 0.0
-    auprcs_u, bestf1s_u, bestthrs_u = [], [], []
-    auprcs_tol_u, bestf1s_tol_u, bestthrs_tol_u = [], [], []
+    
+    mt, mh, mw = metric_tolerance
+
+    exact_c = PRCurveAccumulator(
+        num_thr=num_thr,
+        device=device,
+    )
+    tolerant_c = PRCurveAccumulator(
+        num_thr=num_thr,
+        device=device,
+        radius_t=mt,
+        radius_h=mh,
+        radius_w=mw,
+    )
+    
+    exact_u = None
+    tolerant_u = None
+    if eval_cfg_modes:
+        exact_u = PRCurveAccumulator(
+            num_thr=num_thr,
+            device=device,
+        )
+        tolerant_u = PRCurveAccumulator(
+            num_thr=num_thr,
+            device=device,
+            radius_t=mt,
+            radius_h=mh,
+            radius_w=mw,
+        )
     
     total_frames = 0
     total_eval_voxels = 0
@@ -84,7 +105,12 @@ def evaluate_vqvae(
         refinement_sums_u[f"ref{ridx}_exact"] = 0.0
         refinement_sums_u[f"ref{ridx}_tol"] = 0.0
 
-    def _metrics_from_out(out, x):
+    def _metrics_from_out(
+        out,
+        x,
+        exact_accumulator,
+        tolerant_accumulator,
+    ):
         """
         Compute eval metrics for one output dict.
     
@@ -214,39 +240,11 @@ def evaluate_vqvae(
             pmask_vol = full_mask_vol
             bce_active = bce_full
     
-        # ---- PR metrics use the same "active" mask ----       
-        
-        auprcs, bestf1s, bestthrs = [], [], []
-        auprcs_tol, bestf1s_tol, bestthrs_tol = [], [], []
-        
-        B = x.shape[0]
-        for b in range(B):
-            auprc, bestf1, bestthr = pr_curve(
-                prob_vol[b:b+1],
-                tgt_vol[b:b+1],
-                pmask_vol[b:b+1],
-                num_thr,
-                prob_vol.device,
-            )
-            auprcs.append(auprc)
-            bestf1s.append(bestf1)
-            bestthrs.append(bestthr)
-        
-            auprc_t, bestf1_t, bestthr_t = pr_curve_tolerant(
-                prob_vol[b:b+1],
-                tgt_vol[b:b+1],
-                pmask_vol[b:b+1],
-                num_thr,
-                prob_vol.device,
-                radius_t=mt,
-                radius_h=mh,
-                radius_w=mw,
-            )
-            auprcs_tol.append(auprc_t)
-            bestf1s_tol.append(bestf1_t)
-            bestthrs_tol.append(bestthr_t)
-        
+        # Update the one validation-population PR curve once per batch.
+        exact_accumulator.update(prob_vol, tgt_vol, pmask_vol)
+        tolerant_accumulator.update(prob_vol, tgt_vol, pmask_vol)
 
+        B = x.shape[0]
         eval_voxels = int((pmask_vol > 0).sum().item())
         full_voxels = int(full_mask_vol.sum().item())
         eval_frames = int(Tp * B)
@@ -255,15 +253,10 @@ def evaluate_vqvae(
             float(bce_active.item()),
             float(bce_full.item()),
             float(out["vq_loss"].detach().cpu()),
-            auprcs,
-            bestf1s,
-            bestthrs,
-            auprcs_tol,
-            bestf1s_tol,
-            bestthrs_tol,
             eval_frames,
             eval_voxels,
             full_voxels,
+            B,
             refinement_losses,
             refinement_exact,
             refinement_tol,
@@ -323,10 +316,13 @@ def evaluate_vqvae(
                 )
 
         # ---- metrics: conditional ----
-        bce_c, bce_full_c, vq_c, auprc_c, bestf1_c, bestthr_c, \
-            auprc_tol_c, bestf1_tol_c, bestthr_tol_c, \
-            frames_c, vox_c, full_vox_c, \
-            ref_losses_c, ref_exact_c, ref_tol_c = _metrics_from_out(out_c, x)
+        bce_c, bce_full_c, vq_c, frames_c, vox_c, full_vox_c, samples_c, \
+            ref_losses_c, ref_exact_c, ref_tol_c = _metrics_from_out(
+                out_c,
+                x,
+                exact_c,
+                tolerant_c,
+            )
             
         for ridx, val in enumerate(ref_losses_c, start=1):
             refinement_sums_c[f"ref{ridx}"] += val
@@ -338,32 +334,23 @@ def evaluate_vqvae(
         total_bce_c += bce_c
         total_bce_full_c += bce_full_c
         sum_vq_c += vq_c
-        auprcs_c.extend(auprc_c)
-        bestf1s_c.extend(bestf1_c)
-        bestthrs_c.extend(bestthr_c)
-        auprcs_tol_c.extend(auprc_tol_c)
-        bestf1s_tol_c.extend(bestf1_tol_c)
-        bestthrs_tol_c.extend(bestthr_tol_c)
         total_frames += frames_c
         total_eval_voxels += vox_c
         total_full_voxels += full_vox_c
-        eval_passes += len(auprc_c)
+        eval_passes += samples_c
 
         # ---- metrics: unconditional ----
         if eval_cfg_modes and out_u is not None:
-            bce_u, bce_full_u, vq_u, auprc_u, bestf1_u, bestthr_u, \
-                auprc_tol_u, bestf1_tol_u, bestthr_tol_u, \
-                _, _, _, \
-                ref_losses_u, ref_exact_u, ref_tol_u = _metrics_from_out(out_u, x)
+            bce_u, bce_full_u, vq_u, _, _, _, _, \
+                ref_losses_u, ref_exact_u, ref_tol_u = _metrics_from_out(
+                    out_u,
+                    x,
+                    exact_u,
+                    tolerant_u,
+                )
             total_bce_u += bce_u
             total_bce_full_u += bce_full_u
             sum_vq_u += vq_u
-            auprcs_u.extend(auprc_u)
-            bestf1s_u.extend(bestf1_u)
-            bestthrs_u.extend(bestthr_u)
-            auprcs_tol_u.extend(auprc_tol_u)
-            bestf1s_tol_u.extend(bestf1_tol_u)
-            bestthrs_tol_u.extend(bestthr_tol_u)
             
             for ridx, val in enumerate(ref_losses_u, start=1):
                 refinement_sums_u[f"ref{ridx}"] += val
@@ -373,21 +360,45 @@ def evaluate_vqvae(
                 refinement_sums_u[f"ref{ridx}_tol"] += val
 
 
-    n = max(1, eval_passes)
+    (
+        auprc_c,
+        bestf1_c,
+        bestthr_c,
+    ) = exact_c.compute()
+    
+    (
+        auprc_tol_c,
+        bestf1_tol_c,
+        bestthr_tol_c,
+    ) = tolerant_c.compute()
+    
+    if eval_cfg_modes:
+        (
+            auprc_u,
+            bestf1_u,
+            bestthr_u,
+        ) = exact_u.compute()
+    
+        (
+            auprc_tol_u,
+            bestf1_tol_u,
+            bestthr_tol_u,
+        ) = tolerant_u.compute()
 
-    # Keep the "classic" keys mapped to CONDITIONAL metrics (so your existing checkpointing keeps working).
     report = {
-        # active BCE: ROI-masked if use_ROI_mask=True, otherwise full-volume
         "val_loss_BCE": total_bce_c / max(1, len(loader)),
-    
-        # always full-volume diagnostic
         "val_loss_BCE_full": total_bce_full_c / max(1, len(loader)),
-    
         "val_loss_vq": sum_vq_c / max(1, len(loader)),
-        "AUPRC": (sum(auprcs_c) / n) if auprcs_c else 0.0,
-        "BestF1": (sum(bestf1s_c) / n) if bestf1s_c else 0.0,
-        "BestF1_threshold": (sum(bestthrs_c) / n) if bestthrs_c else 0.5,
-        "eval_count": n,
+        "val_loss_BCE_cond": total_bce_c / max(1, len(loader)),
+        "val_loss_BCE_full_cond": total_bce_full_c / max(1, len(loader)),
+        "val_loss_vq_cond": sum_vq_c / max(1, len(loader)),
+        "AUPRC_cond": auprc_c,
+        "BestF1_cond": bestf1_c,
+        "BestF1_threshold_cond": bestthr_c,
+        "AUPRC_tol_cond": auprc_tol_c,
+        "BestF1_tol_cond": bestf1_tol_c,
+        "BestF1_threshold_tol_cond": bestthr_tol_c,
+        "eval_count": eval_passes,
         "eval_density": float(total_eval_voxels) / max(1.0, float(total_frames)),
         "eval_mask_frac": float(total_eval_voxels) / max(1.0, float(total_full_voxels)),
     }
@@ -397,19 +408,6 @@ def evaluate_vqvae(
         report[f"val_loss_recon_ref{ridx}_exact_cond"] = refinement_sums_c[f"ref{ridx}_exact"] / max(1, len(loader))
         report[f"val_loss_recon_ref{ridx}_tol_cond"] = refinement_sums_c[f"ref{ridx}_tol"] / max(1, len(loader))
 
-    # Extra explicit keys (recommended to log)
-    report.update({
-        "val_loss_BCE_cond": report["val_loss_BCE"],
-        "val_loss_BCE_full_cond": report["val_loss_BCE_full"],
-        "val_loss_vq_cond": report["val_loss_vq"],
-        "AUPRC_cond": report["AUPRC"],
-        "BestF1_cond": report["BestF1"],
-        "BestF1_threshold_cond": report["BestF1_threshold"],
-        "AUPRC_tol_cond": (sum(auprcs_tol_c) / n) if auprcs_tol_c else 0.0,
-        "BestF1_tol_cond": (sum(bestf1s_tol_c) / n) if bestf1s_tol_c else 0.0,
-        "BestF1_threshold_tol_cond": (sum(bestthrs_tol_c) / n) if bestthrs_tol_c else 0.5,
-    })
-    
     if sb_count > 0:
         sb_mean = sb_sum / sb_count
         sb_abs_mean = sb_abs_sum / sb_count
@@ -429,12 +427,12 @@ def evaluate_vqvae(
             "val_loss_BCE_uncond": total_bce_u / max(1, len(loader)),
             "val_loss_BCE_full_uncond": total_bce_full_u / max(1, len(loader)),
             "val_loss_vq_uncond": sum_vq_u / max(1, len(loader)),
-            "AUPRC_uncond": (sum(auprcs_u) / n) if auprcs_u else 0.0,
-            "BestF1_uncond": (sum(bestf1s_u) / n) if bestf1s_u else 0.0,
-            "BestF1_threshold_uncond": (sum(bestthrs_u) / n) if bestthrs_u else 0.5,
-            "AUPRC_tol_uncond": (sum(auprcs_tol_u) / n) if auprcs_tol_u else 0.0,
-            "BestF1_tol_uncond": (sum(bestf1s_tol_u) / n) if bestf1s_tol_u else 0.0,
-            "BestF1_threshold_tol_uncond": (sum(bestthrs_tol_u) / n) if bestthrs_tol_u else 0.5,
+            "AUPRC_uncond": auprc_u,
+            "BestF1_uncond": bestf1_u,
+            "BestF1_threshold_uncond": bestthr_u,
+            "AUPRC_tol_uncond": auprc_tol_u,
+            "BestF1_tol_uncond": bestf1_tol_u,
+            "BestF1_threshold_tol_uncond": bestthr_tol_u,
         })
         
         for ridx in range(1, max_ref_levels + 1):

@@ -392,7 +392,7 @@ def soft_code_usage_loss(
 def blank_patch_logit_hinge_loss(
     pred_patches_raw,
     blank_mask,
-    margin: float = -6.0,
+    margin: float = -9.0,
     tau: float = 0.25,
     sharpness: float = 10.0,
     bad_buffer: float = 0.0,
@@ -481,6 +481,45 @@ def blank_active_decoder_separation_loss(
         "offset_norm": offset.detach().float().norm(),
     }
 
+
+# ---------- Threshold-aware soft binary approximation ----------
+
+def soft_binary_from_logits(
+    logits: torch.Tensor,
+    *,
+    tau: float = 0.25,
+    prob_threshold: Optional[float] = None,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """
+    Smooth approximation of:
+
+        sigmoid(logits) >= prob_threshold
+
+    If prob_threshold is None, preserve the historical 0.5 boundary.
+    """
+    if tau <= 0:
+        raise ValueError(f"tau must be positive, got {tau}")
+
+    threshold_value = (
+        0.5
+        if prob_threshold is None
+        else float(prob_threshold)
+    )
+
+    threshold = torch.as_tensor(
+        threshold_value,
+        device=logits.device,
+        dtype=logits.dtype,
+    ).clamp(eps, 1.0 - eps)
+
+    threshold_logit = torch.logit(threshold)
+
+    return torch.sigmoid(
+        (logits - threshold_logit) / float(tau)
+    )
+
+
 # ---------- ISI / refractory constraint helpers ----------
 def short_gap_excess_loss_from_logits_batch_targets(
     logits_b1thw,
@@ -489,6 +528,7 @@ def short_gap_excess_loss_from_logits_batch_targets(
     gap_bins=None,
     tau=0.25,
     margin=0.25,
+    prob_threshold=None,
     confidence_bg=None,
     eps=1e-8,
     return_parts=False,
@@ -505,7 +545,13 @@ def short_gap_excess_loss_from_logits_batch_targets(
     assert logits_b1thw.dim() == 5 and logits_b1thw.size(1) == 1
 
     logits_b1thw = logits_b1thw.float().clamp(-20.0, 20.0)
-    p = torch.sigmoid(logits_b1thw / tau)
+
+    p = soft_binary_from_logits(
+        logits_b1thw,
+        tau=tau,
+        prob_threshold=prob_threshold,
+        eps=eps,
+    )
 
     target_gap_rates_bg = target_gap_rates_bg.to(
         device=logits_b1thw.device,
@@ -594,14 +640,10 @@ def short_gap_excess_loss_from_logits_batch_targets(
 
 
 # ---------- Local context losses ----------
-
-import torch
-
 def soft_active_site_ratio_from_logits(
     logits_b1thw: torch.Tensor,
     tau_prob: float = 0.25,
-    tau_time: float = 0.5,
-    site_threshold: float = 0.5,
+    prob_threshold: Optional[float] = None,
     max_active_site: float = 1024.0,
     clamp_max: bool = True,
 ) -> torch.Tensor:
@@ -626,17 +668,29 @@ def soft_active_site_ratio_from_logits(
     if C != 1:
         raise ValueError(f"Expected channel dim = 1, got {C}")
 
-    # soft temporal max in logit space
-    site_logit = tau_time * torch.logsumexp(
-        logits_b1thw / max(tau_time, 1e-6),
-        dim=2
-    )  # (B,1,H,W)
+    # A site is hard-active when any temporal logit crosses the decoder
+    # threshold. Therefore max(logit_t) has exactly the correct boundary.
+    site_logit = logits_b1thw.amax(dim=2)  # (B,1,H,W)
+    
+    threshold_value = (
+        0.5
+        if prob_threshold is None
+        else float(prob_threshold)
+    )
+    
+    threshold = site_logit.new_tensor(
+        threshold_value
+    ).clamp(1e-6, 1.0 - 1e-6)
+    
+    site_boundary = torch.logit(threshold)
 
-    # soft site activation indicator
+    # Soft approximation of whether any time point crosses the
+    # decoder's calibrated firing boundary.
     site_active = torch.sigmoid(
-        (site_logit - site_threshold) / max(tau_prob, 1e-6)
+        (site_logit - site_boundary)
+        / max(tau_prob, 1e-6)
     )  # (B,1,H,W)
-
+    
     # soft active-site count
     soft_active_count = site_active.sum(dim=(1, 2, 3))  # (B,)
 
@@ -683,6 +737,7 @@ def ctx_features_soft_from_logits(
     eps_prob: float = 1e-6,
     eps_time: float = 1e-6,
     tau: float = 0.25,
+    prob_threshold: Optional[float] = None,
 ) -> torch.Tensor:
     """
     FP32 soft local context from logits.
@@ -704,7 +759,14 @@ def ctx_features_soft_from_logits(
     # Critical: do moment math in FP32, outside AMP.
     with torch.cuda.amp.autocast(enabled=False):
         logits_f = logits_b1thw.float()
-        p = torch.sigmoid(logits_f / max(1e-6, float(tau)))
+
+        p = soft_binary_from_logits(
+            logits_f,
+            tau=max(1e-6, float(tau)),
+            prob_threshold=prob_threshold,
+            eps=eps_prob,
+        )
+        
         p0 = p[:, 0]  # (B,T,H,W)
 
         # 0) log mean firing density
@@ -739,8 +801,7 @@ def ctx_features_soft_from_logits(
         d7 = soft_active_site_ratio_from_logits(
             logits_f,
             tau_prob=tau,
-            tau_time=0.5,
-            site_threshold=0.5,
+            prob_threshold=prob_threshold,
         ).float()
 
         frame_mean = p.mean(dim=(1, 3, 4))  # (B,T)
@@ -948,6 +1009,7 @@ def local_moment_field_loss(
     target_b1thw: torch.Tensor,
     patch_size: tuple[int, int, int],
     tau: float = 0.25,
+    prob_threshold: Optional[float] = None,
     min_active_spikes: int = 1,
     min_shape_spikes: int = 3,
     eps: float = 1e-6,
@@ -990,9 +1052,11 @@ def local_moment_field_loss(
         return logits_b1thw.sum() * 0.0
 
     # Only calculate predicted moments for target-active patches.
-    pred_prob = torch.sigmoid(
-        logit_patches[active_mask].float()
-        / max(float(tau), eps)
+    pred_prob = soft_binary_from_logits(
+        logit_patches[active_mask].float(),
+        tau=max(float(tau), eps),
+        prob_threshold=prob_threshold,
+        eps=eps,
     )
 
     target_prob = target_patches[
@@ -1045,18 +1109,25 @@ def local_moment_field_loss(
         / feature_mask.sum().clamp_min(1.0)
     )
 
+
+
 def ctx_loss_soft(
     logits_b1thw: torch.Tensor,
     ctx_tgt_b9: torch.Tensor,
     dims: Sequence[int] = tuple(range(9)),
     weights: Optional[Sequence[float]] = None,
     tau: float = 0.25,
+    prob_threshold: Optional[float] = None,
 ) -> torch.Tensor:
 
     if ctx_tgt_b9.dim() != 2 or ctx_tgt_b9.size(1) < 9:
         raise ValueError(f"ctx_tgt_b9 must be (B,>=9), got {tuple(ctx_tgt_b9.shape)}")
     
-    pred9 = ctx_features_soft_from_logits(logits_b1thw.float(), tau=tau)
+    pred9 = ctx_features_soft_from_logits(
+        logits_b1thw.float(),
+        tau=tau,
+        prob_threshold=prob_threshold,
+    )
 
 
     if weights is None:

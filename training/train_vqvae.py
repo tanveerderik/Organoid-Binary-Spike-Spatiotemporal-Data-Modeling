@@ -50,12 +50,7 @@ def fit_vqvae(
     recon_tolerance: tuple[int, int, int] = (2, 2, 2),
     metric_tolerance: tuple[int, int, int] = (2, 2, 2),
     
-    # ---- training parameters ---
-    use_logit_bias_schedule: bool = True,
-    logit_bias_start: float = -2.5,
-    logit_bias_end: float = 0.0,
-    logit_bias_decay_epochs: int = 15,
-
+    # ---- training parameters ----
     pos_weight_start: float = 50.0,
     pos_weight_end: float = 20.0,
     pos_decay_epochs: int = 50,        # reach pos_weight by epoch 50
@@ -66,6 +61,9 @@ def fit_vqvae(
     
     ctx_start_epoch: int = 30,         # start ctx after 20
     ctx_warmup_epochs: int = 50,       # ramp duration (or shorter, like 10–15)
+    
+    training_threshold_update_every: int = 30,
+    training_threshold_ema_alpha: float = 0.5,
     
     # ---- hierarchical refinement supervision ----
     refinement_loss_weights: Optional[list[float]] = None,
@@ -90,7 +88,7 @@ def fit_vqvae(
     
     # --- Blank embedding and patch enforcement ---
     lambda_blank: float = 0.05,
-    blank_logit_margin: float = -6.0,
+    blank_logit_margin: float = -9.0,
     blank_start_epoch: int = 1,
     blank_warmup_epochs: int = 20,
     lambda_blank_sep: float = 0.01,
@@ -130,10 +128,21 @@ def fit_vqvae(
     scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
     best_val = -math.inf if val_metric_goal == "max" else math.inf
     best_epoch = -1
-    best_thr_for_best_model = 0.5
+    best_thr_exact_for_best_model = 0.5
+    best_thr_tol_for_best_model = 0.5
     no_improve = 0
     eval_report = None
     history = {"train_log": [], "val_metrics": []}
+    
+    if training_threshold_update_every <= 0:
+        raise ValueError(
+            "training_threshold_update_every must be positive"
+        )
+    
+    if not 0.0 < training_threshold_ema_alpha <= 1.0:
+        raise ValueError(
+            "training_threshold_ema_alpha must be in (0, 1]"
+        )
     
     target_std_start = 1.0
     target_std_end = 0.25
@@ -173,17 +182,10 @@ def fit_vqvae(
         cos_t = 0.5 * (1 + math.cos(math.pi * t))
         return v1 + (v0 - v1) * cos_t
 
-    def _scheduled_logit_bias(epoch_idx: int) -> float:
-        if not use_logit_bias_schedule:
-            return float(logit_bias_end)
-
-        if logit_bias_decay_epochs <= 0:
-            return float(logit_bias_end)
-
-        frac = min(1.0, max(0.0, (epoch_idx - 1) / float(logit_bias_decay_epochs)))
-        return float(logit_bias_start + frac * (logit_bias_end - logit_bias_start))
-
     for epoch in range(1, epochs + 1):
+        active_prob_threshold = float(
+            model.training_prob_threshold.item()
+        )
         model.train()
         t0 = time.time()
         accum = 0
@@ -263,10 +265,6 @@ def fit_vqvae(
         else:
             raise ValueError(f"Unsupported active quantizer count: {L_active}")
         
-        current_logit_bias = _scheduled_logit_bias(epoch)
-        if hasattr(model, "set_logit_bias"):
-            model.set_logit_bias(current_logit_bias)
-        
         for batch in train_loader:
             x = batch["x"].to(device, non_blocking=True)
             gct = batch.get("global_ctx", None)
@@ -307,7 +305,7 @@ def fit_vqvae(
                 predict_mask = out["predict_mask"]
                 logits_vol = out["logits_vol"]
                 logits_vol_raw = out["logits_vol_raw"]
-                prob_vol_raw = torch.sigmoid(logits_vol_raw/tau_logit)
+                prob_vol_raw = torch.sigmoid(logits_vol_raw)
                 
                 refinements = out.get("refinements", None)
                 if refinements is None or len(refinements) == 0:
@@ -454,7 +452,7 @@ def fit_vqvae(
                             logits=logits_ref,
                             target=tgt_vol,
                             mask_vol=mask_vol,
-                            pos_weight=pos_weight_end,
+                            pos_weight=pos_weight_eff,
                             radius_t=0,
                             radius_h=1,
                             radius_w=1,
@@ -522,6 +520,7 @@ def fit_vqvae(
                             margin=isi_margin,
                             confidence_bg=adj_conf_bg.float(),
                             return_parts=True,
+                            prob_threshold=active_prob_threshold,
                         )
                 
                         loss_isi = adj_parts["loss"]
@@ -569,6 +568,7 @@ def fit_vqvae(
                     ctx_tgt_b9=lct,
                     dims=ctx_dims,
                     tau=0.25,
+                    prob_threshold=active_prob_threshold,
                 )
                 lambda_ctx_field_eff = (
                     float(lambda_ctx_field)
@@ -585,6 +585,7 @@ def fit_vqvae(
                         tau=0.25,
                         min_active_spikes=1,
                         min_shape_spikes=3,
+                        prob_threshold=active_prob_threshold,
                     )
                 
                 # --- blank patch enforcing loss ---
@@ -661,6 +662,7 @@ def fit_vqvae(
                             logits_b1thw=logits_vol_raw,
                             patch_size=model.patch_size,
                             tau=0.25,
+                            prob_threshold=active_prob_threshold,
                         )
                 
                         teacher_tok_tol = dilate_spatial_support_hw(
@@ -704,6 +706,7 @@ def fit_vqvae(
                         student_pix = soft_spatial_pixel_map_from_logits(
                             logits_b1thw=logits_vol_raw,
                             tau=0.25,
+                            prob_threshold=active_prob_threshold,
                         )
                 
                         teacher_pix_tol = dilate_spatial_support_hw(
@@ -813,8 +816,6 @@ def fit_vqvae(
 
         lrs = [pg["lr"] for pg in optimizer.param_groups]
         lr = max(lrs)  # or keep all of them for logging
-
-        lb = float(model.global_logit_bias.item())
         
         with torch.no_grad():
             blank_token_norm = (
@@ -878,12 +879,11 @@ def fit_vqvae(
             "lambda_ctx_eff": float(lambda_ctx_eff),
             "lambda_isi": float(lambda_isi),
             "cfg_drop_prob": float(cfg_p),
-
+            "training_prob_threshold_used": active_prob_threshold,
             
             # activities
             "pred_mean_p": pred_mean_p_epoch,
             "tgt_mean": tgt_mean_epoch,
-            "logit_bias": lb,
 
         }
         
@@ -914,10 +914,16 @@ def fit_vqvae(
         cb_stats = get_vq_codebook_stats(model)
         train_log.update(cb_stats)
     
-            
-        if on_epoch: on_epoch(train_log)
-
         val_metric = None
+        threshold_candidate = None
+        threshold_deployed = False
+
+        threshold_ema_before = float(
+            model.training_threshold_ema.item()
+        )
+        threshold_ema_next = threshold_ema_before
+        threshold_next = active_prob_threshold
+
         if val_loader is not None:
             eval_report = evaluate_vqvae(
                 model,
@@ -928,16 +934,73 @@ def fit_vqvae(
                 recon_tolerance=recon_tolerance,
                 metric_tolerance=metric_tolerance,
             )
-            # train_log.update(eval_report)
+
             if val_metric_name in eval_report:
                 val_metric = eval_report[val_metric_name]
             else:
-                val_metric = -eval_report["val_loss_BCE"] if val_metric_goal == "max" else eval_report["val_loss_BCE"]
+                val_metric = (
+                    -eval_report["val_loss_BCE"]
+                    if val_metric_goal == "max"
+                    else eval_report["val_loss_BCE"]
+                )
+
             train_log[val_metric_name] = val_metric
-            
+
+            # These remain raw evaluation operating points.
+            exact_thr = eval_report["BestF1_threshold_cond"]
+            tolerant_thr = eval_report["BestF1_threshold_tol_cond"]
+
+            model._set_best_thresholds(
+                exact=exact_thr,
+                tolerant=tolerant_thr,
+            )
+
+            if tolerant_thr is not None:
+                threshold_candidate = float(tolerant_thr)
+                alpha = float(training_threshold_ema_alpha)
+
+                # Update the EMA after every validation epoch.
+                threshold_ema_next = (
+                    (1.0 - alpha) * threshold_ema_before
+                    + alpha * threshold_candidate
+                )
+
+                model._set_training_threshold_ema(
+                    threshold_ema_next
+                )
+
+                # Deploy the accumulated EMA only every 30 epochs.
+                if epoch % training_threshold_update_every == 0:
+                    threshold_next = threshold_ema_next
+
+                    model._set_training_prob_threshold(
+                        threshold_next
+                    )
+                    threshold_deployed = True
+
             history["val_metrics"].append(eval_report)
 
+        train_log["training_prob_threshold_candidate"] = (
+            threshold_candidate
+        )
+        train_log["training_threshold_ema_before"] = (
+            threshold_ema_before
+        )
+        train_log["training_threshold_ema_next"] = (
+            threshold_ema_next
+        )
+        train_log["training_prob_threshold_next"] = (
+            threshold_next
+        )
+        train_log["training_prob_threshold_deployed"] = (
+            threshold_deployed
+        )
+
         history["train_log"].append(train_log)
+
+        if on_epoch:
+            on_epoch(train_log)
+
 
         log_str = (
             f"[Epoch {epoch}] lr={lr:.6g} "
@@ -971,11 +1034,17 @@ def fit_vqvae(
             f"blank_sep={train_log.get('blank_sep', 0):.5f}\n"            
             f"\n"
             
-            f"logit_bias={train_log.get('logit_bias', 0):.5f} "
             f"pred_mean_p={train_log.get('pred_mean_p', 0):.6e}, "
-            f"tgt_mean={train_log.get('tgt_mean', 0):.6e}\n"
-            f"\n"
-            
+            f"tgt_mean={train_log.get('tgt_mean', 0):.6e}\n"            
+            f"training_threshold="
+            f"{train_log.get('training_prob_threshold_used', 0.5):.4f}"
+            f"->{train_log.get('training_prob_threshold_next', 0.5):.4f} "
+            f"ema="
+            f"{train_log.get('training_threshold_ema_before', 0.5):.4f}"
+            f"->{train_log.get('training_threshold_ema_next', 0.5):.4f} "
+            f"deployed="
+            f"{train_log.get('training_prob_threshold_deployed', False)}\n"
+
             f"\n"
             f"---"
             f"\n\n"
@@ -1063,21 +1132,6 @@ def fit_vqvae(
         print("===========================================")
         print(" ")
 
-        
-        # ---- update model.best_thr every epoch from current eval_report ----
-        if eval_report is not None:
-            if val_metric_name == "AUPRC_uncond":
-                thr_key = "BestF1_threshold_uncond"
-            elif val_metric_name == "AUPRC_tol_uncond":
-                thr_key = "BestF1_threshold_tol_uncond"
-            elif val_metric_name == "AUPRC_tol_cond":
-                thr_key = "BestF1_threshold_tol_cond"
-            else:
-                thr_key = "BestF1_threshold"
-
-            if thr_key in eval_report:
-                best_thr = float(eval_report[thr_key])
-                model._set_best_thr(best_thr)
 
         improved = False
         checkpointing_active = (epoch >= save_start_epoch)
@@ -1088,7 +1142,13 @@ def fit_vqvae(
                     improved = True
                     best_val = val_metric
                     best_epoch = epoch
-                    best_thr_for_best_model = float(getattr(model, "best_thr", 0.5))
+                    best_thr_exact_for_best_model = float(
+                        model.best_thr_exact.item()
+                    )
+                    
+                    best_thr_tol_for_best_model = float(
+                        model.best_thr_tol.item()
+                    )
                     no_improve = 0
                 else:
                     no_improve += 1
@@ -1104,7 +1164,9 @@ def fit_vqvae(
             model.save_checkpoint(ckpt_best_path)
             print(
                 f"✔️  Saved new best model at epoch {epoch} to '{ckpt_best_path}' "
-                f"(val_{val_metric_name} = {val_metric:.5f}, best_thr = {best_thr_for_best_model:.4f})"
+                f"(val_{val_metric_name} = {val_metric:.5f}, "
+                f"thr_exact = {best_thr_exact_for_best_model:.4f}, "
+                f"thr_tol = {best_thr_tol_for_best_model:.4f})"
             )
 
         if early_stop_patience is not None and no_improve >= early_stop_patience:
@@ -1114,6 +1176,13 @@ def fit_vqvae(
     return {
         "best_epoch": best_epoch,
         "best_val": best_val,
-        "best_thr": best_thr_for_best_model,
+        "best_thr_exact": best_thr_exact_for_best_model,
+        "best_thr_tol": best_thr_tol_for_best_model,
+        "final_training_prob_threshold": float(
+            model.training_prob_threshold.item()
+        ),
+        "final_training_threshold_ema": float(
+            model.training_threshold_ema.item()
+        ),
         "history": history,
     }

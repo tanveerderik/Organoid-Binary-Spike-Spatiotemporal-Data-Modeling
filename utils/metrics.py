@@ -8,47 +8,9 @@ Created on Tue Oct 28 13:21:29 2025
 
 # utils/metrics.py
 import numpy as np
-from typing import Optional, Tuple
+from typing import Optional
 import torch
 import torch.nn.functional as F
-
-
-@torch.no_grad()
-def confusion_at_threshold(
-    prob: torch.Tensor,       # (B,1,T,H,W)
-    target: torch.Tensor,     # (B,1,T,H,W)
-    mask_vol: Optional[torch.Tensor],  # (B,1,T,H,W) or None
-    thr: float
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    pred = (prob >= thr).to(target.dtype)
-    if mask_vol is not None:
-        pred = pred * mask_vol
-        tgt  = target * mask_vol
-    else:
-        tgt = target
-    TP = (pred * tgt).sum()
-    FP = (pred * (1.0 - tgt)).sum()
-    FN = ((1.0 - pred) * tgt).sum()
-    return TP, FP, FN
-
-
-def pr_curve(prob, target, mask_vol, num_thr, device):
-    thr_grid = torch.linspace(0, 1, steps=num_thr, device=device)
-    TP = torch.zeros_like(thr_grid)
-    FP = torch.zeros_like(thr_grid)
-    FN = torch.zeros_like(thr_grid)
-    for i, thr in enumerate(thr_grid):
-        tp, fp, fn = confusion_at_threshold(prob, target, mask_vol, thr)
-        TP[i], FP[i], FN[i] = tp, fp, fn
-    precision = TP / (TP + FP).clamp(min=1.0)
-    recall    = TP / (TP + FN).clamp(min=1.0)
-    rec, idx  = torch.sort(recall)
-    prec_sorted = precision[idx]
-    auprc = torch.trapz(prec_sorted, rec)
-    f1 = (2 * precision * recall) / (precision + recall).clamp(min=1e-8)
-    j = torch.argmax(f1)
-    return float(auprc.item()), float(f1[j].item()), float(thr_grid[j].item())
-
 
 
 def f1_from_bool(y_true: np.ndarray, y_pred: np.ndarray, eps: float = 1e-8) -> float:
@@ -61,76 +23,115 @@ def f1_from_bool(y_true: np.ndarray, y_pred: np.ndarray, eps: float = 1e-8) -> f
     return (2.0 * precision * recall) / (precision + recall + eps)
 
 
+class PRCurveAccumulator:
+    """
+    One PR curve for the complete evaluation population.
 
-@torch.no_grad()
-def confusion_at_threshold_tolerant(
-    prob: torch.Tensor,       # (B,1,T,H,W)
-    target: torch.Tensor,     # (B,1,T,H,W)
-    mask_vol: Optional[torch.Tensor],
-    thr: float,
-    radius_t: int = 1,
-    radius_h: int = 0,
-    radius_w: int = 0,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    pred = (prob >= thr).to(target.dtype)
+    TP, FP, and FN are summed across every batch before AUPRC, Best-F1,
+    and its operating threshold are calculated. ``radius_t=None`` selects
+    exact evaluation; otherwise predictions receive tolerant credit inside
+    the configured spatiotemporal radius.
+    """
 
-    # Dilate target only: prediction gets credit if it lands near a true spike.
-    tgt_tol = F.max_pool3d(
-        target.float(),
-        kernel_size=(2 * radius_t + 1, 2 * radius_h + 1, 2 * radius_w + 1),
-        stride=1,
-        padding=(radius_t, radius_h, radius_w),
-    ).to(target.dtype)
-
-    if mask_vol is not None:
-        pred = pred * mask_vol
-        tgt_exact = target * mask_vol
-        tgt_tol = tgt_tol * mask_vol
-    else:
-        tgt_exact = target
-
-    TP = (pred * tgt_tol).sum()
-    FP = (pred * (1.0 - tgt_tol)).sum()
-    FN = ((1.0 - pred) * tgt_exact).sum()
-
-    return TP, FP, FN
-
-
-def pr_curve_tolerant(
-    prob,
-    target,
-    mask_vol,
-    num_thr,
-    device,
-    radius_t: int = 1,
-    radius_h: int = 0,
-    radius_w: int = 0,
-):
-    thr_grid = torch.linspace(0, 1, steps=num_thr, device=device)
-    TP = torch.zeros_like(thr_grid)
-    FP = torch.zeros_like(thr_grid)
-    FN = torch.zeros_like(thr_grid)
-
-    for i, thr in enumerate(thr_grid):
-        tp, fp, fn = confusion_at_threshold_tolerant(
-            prob, target, mask_vol, thr,
-            radius_t=radius_t, radius_h=radius_h, radius_w=radius_w
+    def __init__(
+        self,
+        num_thr: int,
+        device: torch.device,
+        radius_t: Optional[int] = None,
+        radius_h: int = 0,
+        radius_w: int = 0,
+    ):
+        self.thr_grid = torch.linspace(
+            0.0,
+            1.0,
+            steps=num_thr,
+            device=device,
+            dtype=torch.float32,
         )
-        TP[i], FP[i], FN[i] = tp, fp, fn
 
-    precision = TP / (TP + FP).clamp(min=1.0)
-    recall    = TP / (TP + FN).clamp(min=1.0)
+        # Float64 preserves integer count precision across the full loader.
+        self.tp = torch.zeros(num_thr, device=device, dtype=torch.float64)
+        self.fp = torch.zeros(num_thr, device=device, dtype=torch.float64)
+        self.fn = torch.zeros(num_thr, device=device, dtype=torch.float64)
 
-    rec, idx = torch.sort(recall)
-    prec_sorted = precision[idx]
-    auprc = torch.trapz(prec_sorted, rec)
+        self.radius_t = radius_t
+        self.radius_h = int(radius_h)
+        self.radius_w = int(radius_w)
+        self.num_updates = 0
 
-    f1 = (2 * precision * recall) / (precision + recall).clamp(min=1e-8)
-    j = torch.argmax(f1)
+    @staticmethod
+    def _summarize(tp, fp, fn, thr_grid):
+        precision = tp / (tp + fp).clamp(min=1.0)
+        recall = tp / (tp + fn).clamp(min=1.0)
 
-    return float(auprc.item()), float(f1[j].item()), float(thr_grid[j].item())
+        # Thresholds run low -> high, so reverse them to integrate recall
+        # from low -> high without reordering equal-recall points.
+        auprc = torch.trapezoid(precision.flip(0), recall.flip(0))
 
+        f1 = 2.0 * tp / (2.0 * tp + fp + fn).clamp(min=1.0)
+        best_f1 = f1.max()
 
+        # Prefer the highest threshold when several thresholds have the
+        # same Best-F1. This is the conservative choice for sparse data.
+        j = torch.where(f1 == best_f1)[0][-1]
+
+        return (
+            float(auprc.item()),
+            float(best_f1.item()),
+            float(thr_grid[j].item()),
+        )
+
+    @torch.no_grad()
+    def update(
+        self,
+        prob: torch.Tensor,
+        target: torch.Tensor,
+        mask_vol: Optional[torch.Tensor],
+    ) -> None:
+        target_exact = target > 0.5
+        valid = (
+            torch.ones_like(target_exact)
+            if mask_vol is None
+            else mask_vol > 0
+        )
+
+        if self.radius_t is None:
+            target_match = target_exact
+        else:
+            target_match = F.max_pool3d(
+                target_exact.float(),
+                kernel_size=(
+                    2 * self.radius_t + 1,
+                    2 * self.radius_h + 1,
+                    2 * self.radius_w + 1,
+                ),
+                stride=1,
+                padding=(
+                    self.radius_t,
+                    self.radius_h,
+                    self.radius_w,
+                ),
+            ) > 0
+
+        for i, thr in enumerate(self.thr_grid):
+            pred = prob >= thr
+            self.tp[i].add_((pred & target_match & valid).sum().double())
+            self.fp[i].add_((pred & ~target_match & valid).sum().double())
+            self.fn[i].add_((~pred & target_exact & valid).sum().double())
+
+        self.num_updates += 1
+
+    @torch.no_grad()
+    def compute(self):
+        if self.num_updates == 0:
+            return 0.0, 0.0, 0.5
+
+        return self._summarize(
+            self.tp,
+            self.fp,
+            self.fn,
+            self.thr_grid,
+        )
 
 @torch.no_grad()
 def get_vq_codebook_stats(model, near_zero_thresh: float = 1e-6):

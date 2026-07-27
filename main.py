@@ -23,7 +23,7 @@ import copy
 import json
 from pathlib import Path
 from typing import Iterable, Optional
-
+import math
 import numpy as np
 import torch
 import torch.nn as nn
@@ -48,9 +48,10 @@ from .training import (
 from .inference import (
     ContextBankSampler,
     decode_codes_to_xgen,
+    evaluate_generation_global_metrics,
     save_generated_batch_outputs,
     save_generation_metrics_json,
-    sample_hierarchical_roi
+    sample_hierarchical_roi,
 )
 from .visualization import (
     make_model_videos_vqvae,
@@ -84,8 +85,8 @@ from .utils.constants import (
 #   (2,)       -> load stage-1 ckpt, train context-conditioned decoder only
 #   (1, 2, 3)  -> run the whole pipeline sequentially
 #   (0,)     -> run spatial-map pretraining only
-TRAIN_STAGES = (3,)        # 0,1,2,3
-EVAL_STAGES  = (3,)   # 0,1,2,3
+TRAIN_STAGES = (1,2,3)        # 0,1,2,3
+EVAL_STAGES  = (1,2,3)   # 0,1,2,3
 
 RUN_EVAL = True
 RUN_VIZ  = True
@@ -130,8 +131,8 @@ VIZ_ROOTS = {
 patch_size = (6, 15, 14)
 temporal_crop = 6000
 temporal_pool = 120
-batch_size = 1
-grad_accum_steps = 32
+batch_size = 4
+grad_accum_steps = 8
 num_workers = 2
 per_assay_quota_stage12 = 30
 
@@ -346,10 +347,11 @@ def freeze_for_stage(model: nn.Module, stage: float):
       - Decoder cross-attn OFF.
 
     Stage 2: context-conditioned decoder calibration.
-      - Freeze encoder/codebook.
-      - Train decoder + local/global ctx-to-dec branches.
-      - Keep pretrained spatial map frozen.
-      - Decoder cross-attn ON in selected layer(s).
+      - Train decoder and decoder-context branches.
+      - Allow tiny adaptation of the final encoder block and to_code.
+      - Keep the hierarchical EMA codebooks fixed.
+      - Keep the codebook-to-decoder interface fixed.
+      - Keep the pretrained global embedder and spatial map fixed.
 
     Stage 3: prior learning.
       - Freeze VQVAE completely.
@@ -381,29 +383,66 @@ def freeze_for_stage(model: nn.Module, stage: float):
                 p.requires_grad = False
 
     elif stage == 2:
-        set_decoder_cross_attention(model, enabled=True, layers=(0,))
+        set_decoder_cross_attention(
+            model,
+            enabled=True,
+            layers=(0,),
+        )
     
+        # Main Stage-2 components.
         for name in [
-            "dec_blocks", "dec_norm", "patch_renderer",
-            "local_embedder", "local_to_dec_ctx", "global_to_dec_ctx"
+            "dec_blocks",
+            "dec_norm",
+            "patch_renderer",
+            "local_embedder",
+            "local_to_dec_ctx",
+            "global_to_dec_ctx",
         ]:
-            set_requires_grad(getattr(model, name, None), True)
+            set_requires_grad(
+                getattr(model, name, None),
+                True,
+            )
     
-        # freeze latent-code interface
-        set_requires_grad(getattr(model, "code_to_dec", None), False)
+        # Slow motif refinement.
+        set_requires_grad(
+            model.sparse_encoder.blocks[-1],
+            True,
+        )
+        set_requires_grad(
+            model.to_code,
+            True,
+        )
     
-        set_requires_grad(getattr(model, "global_embedder", None), False)
-        set_requires_grad(getattr(model, "spatial_map_prior", None), False)
+        # Keep this interface anchored initially.
+        set_requires_grad(
+            getattr(model, "code_to_dec", None),
+            False,
+        )
+    
+        set_requires_grad(
+            getattr(model, "global_embedder", None),
+            False,
+        )
+        set_requires_grad(
+            getattr(model, "spatial_map_prior", None),
+            False,
+        )
     
         if hasattr(model, "activity_type_offset"):
             model.activity_type_offset.requires_grad = False
     
-        model.vq.freeze_codebook_updates = True
+        # Stage-2 codebook refinement:
+        # codebook tensors remain excluded from gradient optimization,
+        # but manual EMA updates are enabled.
+        for p in model.vq.tree_embeds:
+            p.requires_grad = False
     
-        if hasattr(model, "vq") and hasattr(model.vq, "tree_embeds"):
-            for p in model.vq.tree_embeds:
-                p.requires_grad = False
-
+        model.vq.decay = 0.999
+        model.vq.freeze_codebook_updates = False
+    
+        # Do not perform destructive code replacement during refinement.
+        model.vq.dead_code_restart_every = 0
+        model.vq.duplicate_restart_every = 0
 
     elif stage == 3:
         set_decoder_cross_attention(model, enabled=True, layers=(0,))
@@ -480,6 +519,58 @@ def load_spatial_pretrain_if_available(model: nn.Module):
     print(f"Loaded spatial pretrain: {SPATIAL_CKPT}")
 
 
+def load_stage0_memories_for_eval(model):
+    if not SPATIAL_CKPT.exists():
+        raise FileNotFoundError(
+            f"Stage 3 global metrics require {SPATIAL_CKPT}"
+        )
+
+    ckpt = torch.load(SPATIAL_CKPT, map_location="cpu")
+
+    required = ("memory_tok", "memory_pix", "memory_adj")
+    missing = [name for name in required if name not in ckpt]
+    if missing:
+        raise RuntimeError(
+            f"Stage 0 checkpoint is missing required memories: {missing}"
+        )
+
+    model.memory_tok = GlobalContextSpatialBank()
+    model.memory_tok.load_state_dict(ckpt["memory_tok"])
+
+    model.memory_pix = GlobalContextSpatialBank()
+    model.memory_pix.load_state_dict(ckpt["memory_pix"])
+
+    model.memory_adj = GlobalContextAdjacencyBank()
+    model.memory_adj.load_state_dict(ckpt["memory_adj"])
+
+    expected_bins = tuple(normalize_gap_bins(gap_bins))
+    if tuple(model.memory_adj.gap_bins) != expected_bins:
+        raise RuntimeError(
+            "Stale Stage 0 adjacency checkpoint: "
+            f"saved={model.memory_adj.gap_bins}, "
+            f"current={expected_bins}"
+        )
+
+    expected_tok = (
+        int(np.ceil(model.full_spatial_size[0] / model.patch_size[1])),
+        int(np.ceil(model.full_spatial_size[1] / model.patch_size[2])),
+    )
+    expected_pix = tuple(model.full_spatial_size)
+
+    for key, value in model.memory_tok._bank.items():
+        if tuple(value.shape) != expected_tok:
+            raise RuntimeError(
+                f"Stale memory_tok entry {key}: "
+                f"{tuple(value.shape)} != {expected_tok}"
+            )
+
+    for key, value in model.memory_pix._bank.items():
+        if tuple(value.shape) != expected_pix:
+            raise RuntimeError(
+                f"Stale memory_pix entry {key}: "
+                f"{tuple(value.shape)} != {expected_pix}"
+            )
+
 def run_stage0_spatial_pretrain(model, train_loader, device):
     if model.spatial_map_prior is None:
         raise RuntimeError("Cannot run stage 0 because model.spatial_map_prior is None.")
@@ -526,7 +617,7 @@ def common_fit_kwargs(model):
         isi_gap_bins=gap_bins,
         isi_tau=0.25,
         isi_margin=0.25,
-        lambda_isi=1e-4,
+        lambda_isi=1e-2,
         
         memory_tok=getattr(model, "memory_tok", None),
         memory_pix=getattr(model, "memory_pix", None),
@@ -569,14 +660,19 @@ def save_json_report(obj, path: Path):
     print(f"Saved report: {path}")
    
     
-def run_stage1(model, train_loader, val_loader, baseline_prob, logit_baseline):
+def run_stage1(model, train_loader, val_loader, blank_logit_threshold):
     print("\n" + "=" * 80)
     print("STAGE 1: context-agnostic VQVAE motif learning")
     print("=" * 80)
 
     freeze_for_stage(model, 1)
 
+    # Stage 1 begins at 0.5 for both the deployed value and EMA.
+    model._set_training_prob_threshold(0.5)
+    model._set_training_threshold_ema(0.5)
+
     n_epoch = 300
+    
     optimizer = make_optimizer(model, lr=1e-3, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epoch, eta_min=1e-5)
 
@@ -599,18 +695,18 @@ def run_stage1(model, train_loader, val_loader, baseline_prob, logit_baseline):
         # without allowing cross-attention shortcuts.
         lambda_ctx=1e-1,
         lambda_ctx_field=5e-2,
-        ctx_start_epoch=10,
-        ctx_warmup_epochs=10,
+        ctx_start_epoch=5,
+        ctx_warmup_epochs=15,
         ctx_epoch_schedule={
-            0: 20,   # log_mean_firing_density
-            7: 30,   # active_site_ratio
-            1: 60,   # var_x
-            2: 60,   # var_y
-            3: 60,   # var_t
-            8: 80,   # temporal_trend
-            4: 100,  # cov_xy
-            5: 120,  # cov_xt
-            6: 120,  # cov_yt
+            0: 5,   # log_mean_firing_density
+            7: 10,   # active_site_ratio
+            1: 20,   # var_x
+            2: 20,   # var_y
+            3: 20,   # var_t
+            8: 40,   # temporal_trend
+            4: 30,  # cov_xy
+            5: 40,  # cov_xt
+            6: 40,  # cov_yt
         },
         
         # CFG context dropout is irrelevant in Stage 1 because cross-attn is OFF.
@@ -618,16 +714,16 @@ def run_stage1(model, train_loader, val_loader, baseline_prob, logit_baseline):
         cfg_ctx_drop_end=0.0,
         cfg_ctx_start_epoch=10**9,
         cfg_ctx_warmup_epochs=1,
+        blank_logit_margin=blank_logit_threshold,
 
         # Spike discovery but avoid permanent overactivation.
         pos_weight_start=100.0,
         pos_weight_end=5.0,
         pos_decay_epochs=100,
+        training_threshold_update_every=30,
+        training_threshold_ema_alpha=0.5,
 
-        use_logit_bias_schedule=False,
-        logit_bias_start=logit_baseline,
-        logit_bias_end=0.0,
-        logit_bias_decay_epochs=5,
+
         save_start_epoch = 125,
         **common_fit_kwargs(model),
     )
@@ -638,14 +734,49 @@ def run_stage1(model, train_loader, val_loader, baseline_prob, logit_baseline):
     return report
 
 
-def run_stage2(model, train_loader, val_loader):
+def run_stage2(model, train_loader, val_loader, blank_logit_threshold):
     print("\n" + "=" * 80)
     print("STAGE 2: context-conditioned decoder calibration")
     print("=" * 80)
 
-    stage1_ckpt = select_ckpt(1, prefer_best=True)
-    model.load_checkpoint(str(stage1_ckpt), map_location=next(model.parameters()).device)
-    print(f"Loaded Stage 1 checkpoint for Stage 2: {stage1_ckpt}")
+    map_location = next(model.parameters()).device
+
+    # Get the final threshold state from the last Stage 1 epoch.
+    stage1_endpoint_ckpt = select_ckpt(1, prefer_best=False)
+    model.load_checkpoint(
+        str(stage1_endpoint_ckpt),
+        map_location=map_location,
+    )
+
+    stage1_endpoint_threshold = float(
+        model.training_prob_threshold.item()
+    )
+    stage1_endpoint_ema = float(
+        model.training_threshold_ema.item()
+    )
+
+    # Load the best Stage 1 model weights.
+    stage1_best_ckpt = select_ckpt(1, prefer_best=True)
+    model.load_checkpoint(
+        str(stage1_best_ckpt),
+        map_location=map_location,
+    )
+
+    # Restore the final moving-threshold state.
+    model._set_training_prob_threshold(
+        stage1_endpoint_threshold
+    )
+    model._set_training_threshold_ema(
+        stage1_endpoint_ema
+    )
+
+    print(
+        f"Loaded Stage 1 best weights from: {stage1_best_ckpt}\n"
+        f"Stage 2 starting threshold: "
+        f"{stage1_endpoint_threshold:.4f}\n"
+        f"Stage 2 starting threshold EMA: "
+        f"{stage1_endpoint_ema:.4f}"
+    )
 
     freeze_for_stage(model, 2)
 
@@ -655,23 +786,53 @@ def run_stage2(model, train_loader, val_loader):
     optimizer = torch.optim.AdamW(
         [
             {
-                "params": list(model.local_embedder.parameters())
-                        + list(model.local_to_dec_ctx.parameters())
-                        + list(model.global_to_dec_ctx.parameters()),
+                "params": (
+                    list(model.local_embedder.parameters())
+                    + list(model.local_to_dec_ctx.parameters())
+                    + list(model.global_to_dec_ctx.parameters())
+                ),
                 "lr": 1e-4,
                 "weight_decay": 1e-4,
             },
             {
-                "params": list(model.dec_blocks.parameters())
-                        + list(model.dec_norm.parameters())
-                        + list(model.patch_renderer.parameters()),
+                "params": (
+                    list(model.dec_blocks.parameters())
+                    + list(model.dec_norm.parameters())
+                    + list(model.patch_renderer.parameters())
+                ),
                 "lr": 1e-5,
                 "weight_decay": 1e-4,
             },
+            {
+                "params": (
+                    list(model.sparse_encoder.blocks[-1].parameters())
+                    + list(model.to_code.parameters())
+                ),
+                "lr": 1e-6,
+                "weight_decay": 1e-4,
+            },
         ]
-    )        
+    )     
     
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epoch, eta_min=1e-5)
+    def stage2_lr_multiplier(epoch):
+        progress = min(
+            1.0,
+            max(0.0, epoch / float(max(1, n_epoch))),
+        )
+        cosine = 0.5 * (
+            1.0 + math.cos(math.pi * progress)
+        )
+        return 0.10 + 0.90 * cosine
+    
+    
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lr_lambda=[
+            stage2_lr_multiplier,
+            stage2_lr_multiplier,
+            stage2_lr_multiplier,
+        ],
+    )
 
     report = fit_vqvae(
         model,
@@ -713,13 +874,15 @@ def run_stage2(model, train_loader, val_loader):
         pos_weight_start=5.0,
         pos_weight_end=1.0,
         pos_decay_epochs=100,
-
-        use_logit_bias_schedule=False,
-        
+        training_threshold_update_every=30,
+        training_threshold_ema_alpha=0.5,
+        blank_logit_margin=blank_logit_threshold,
+                
         save_start_epoch = 50,
         **{
             **common_fit_kwargs(model),
-            "lambda_isi": 1e-3,
+            "lambda_isi": 1e-1,
+            "lambda_sp_pixel": 1e-3,
             "lambda_enc_var": 0.0,
             "level2_start_epoch": 1,
             "level2_full_loss_epoch": 1,
@@ -979,139 +1142,121 @@ def run_stage3_prior(model, train_loader, val_loader, device):
     # ============================================================
     # 3A: motif prior
     # ============================================================
-    if CKPTS["motif_prior_best"].exists():
-        print(f"[3A] Found motif prior checkpoint. Skipping training: {CKPTS['motif_prior_best']}")
-        motif_ckpt = torch.load(CKPTS["motif_prior_best"], map_location=device)
-        prior.motif_prior.load_state_dict(motif_ckpt["model"], strict=True)
-        hist_motif = None
-    else:
-        print("[3A] Training motif prior.")
+    print("[3A] Training motif prior.")
 
-        opt_motif = torch.optim.AdamW(
-            [p for p in prior.motif_prior.parameters() if p.requires_grad],
-            lr=3e-4,
-            weight_decay=0.01,
+    opt_motif = torch.optim.AdamW(
+        [p for p in prior.motif_prior.parameters() if p.requires_grad],
+        lr=3e-4,
+        weight_decay=0.01,
+    )
+
+    hist_motif = train_motif_prior_mgit(
+        motif_prior=prior.motif_prior,
+        vqvae=model,
+        opt=opt_motif,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        epochs=200,
+        grad_clip=1.0,
+        ckpt_out=str(CKPTS["motif_prior_best"]),
+        early_stop_patience=30,
+        grad_accum_steps=grad_accum_steps,
+        full_mask_prob=0.15,
+
+        lambda_ctx=1.0,
+        lambda_ctx_field=0.05,
+        lambda_adj=1.0,
+        lambda_spatial=1.0,
+
+        ctx_tau=0.25,
+        ctx_field_tau=0.25,
+
+        memory_tok=getattr(model, "memory_tok", None),
+        memory_adj=getattr(model, "memory_adj", None),
+        isi_gap_bins=gap_bins,
+        isi_max_gap=max_gap_from_bins(
+            gap_bins
         )
+    )
 
-        hist_motif = train_motif_prior_mgit(
-            motif_prior=prior.motif_prior,
-            vqvae=model,
-            opt=opt_motif,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            epochs=200,
-            grad_clip=1.0,
-            ckpt_out=str(CKPTS["motif_prior_best"]),
-            early_stop_patience=30,
-            grad_accum_steps=grad_accum_steps,
-            full_mask_prob=0.15,
+    save_json_report(hist_motif, REPORTS["prior_motif"])
 
-            lambda_ctx=1.0,
-            lambda_ctx_field=0.05,
-            lambda_adj=1.0,
-            lambda_spatial=1.0,
-
-            ctx_tau=0.25,
-            ctx_field_tau=0.25,
-
-            memory_tok=getattr(model, "memory_tok", None),
-            memory_adj=getattr(model, "memory_adj", None),
-            isi_gap_bins=gap_bins,
-            isi_max_gap=max_gap_from_bins(
-                gap_bins
-            )
-        )
-
-        save_json_report(hist_motif, REPORTS["prior_motif"])
-
-        motif_ckpt = torch.load(CKPTS["motif_prior_best"], map_location=device)
-        prior.motif_prior.load_state_dict(motif_ckpt["model"], strict=True)
+    motif_ckpt = torch.load(CKPTS["motif_prior_best"], map_location=device)
+    prior.motif_prior.load_state_dict(motif_ckpt["model"], strict=True)
 
     # ============================================================
     # 3B: activity prior
     # ============================================================
-    if CKPTS["activity_prior_best"].exists():
-        print(f"[3B] Found activity prior checkpoint. Skipping training: {CKPTS['activity_prior_best']}")
-        activity_ckpt = torch.load(CKPTS["activity_prior_best"], map_location=device)
-        prior.activity_prior.load_state_dict(activity_ckpt["model"], strict=True)
-        hist_activity = None
-    else:
-        print("[3B] Training activity prior.")
+    print("[3B] Training activity prior.")
 
-        opt_activity = torch.optim.AdamW(
-            [p for p in prior.activity_prior.parameters() if p.requires_grad],
-            lr=3e-4,
-            weight_decay=0.01,
-        )
+    opt_activity = torch.optim.AdamW(
+        [p for p in prior.activity_prior.parameters() if p.requires_grad],
+        lr=3e-4,
+        weight_decay=0.01,
+    )
 
-        hist_activity = train_activity_prior_detr(
-            activity_prior=prior.activity_prior,
-            vqvae=model,
-            opt=opt_activity,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            epochs=200,
-            grad_clip=1.0,
-            lambda_soft_grid=1.0,
-            ckpt_out=str(CKPTS["activity_prior_best"]),
-            early_stop_patience=30,
-            grad_accum_steps=grad_accum_steps,
-        )
+    hist_activity = train_activity_prior_detr(
+        activity_prior=prior.activity_prior,
+        vqvae=model,
+        opt=opt_activity,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        epochs=200,
+        grad_clip=1.0,
+        lambda_soft_grid=1.0,
+        ckpt_out=str(CKPTS["activity_prior_best"]),
+        early_stop_patience=30,
+        grad_accum_steps=grad_accum_steps,
+    )
 
-        save_json_report(hist_activity, REPORTS["prior_activity"])
+    save_json_report(hist_activity, REPORTS["prior_activity"])
 
-        activity_ckpt = torch.load(CKPTS["activity_prior_best"], map_location=device)
-        prior.activity_prior.load_state_dict(activity_ckpt["model"], strict=True)
+    activity_ckpt = torch.load(CKPTS["activity_prior_best"], map_location=device)
+    prior.activity_prior.load_state_dict(activity_ckpt["model"], strict=True)
 
     # ============================================================
     # 3C: activity refinement through frozen motif + frozen VQVAE
     # ============================================================
-    if CKPTS["activity_prior_refined_best"].exists():
-        print(f"[3C] Found refined activity prior checkpoint. Skipping training: {CKPTS['activity_prior_refined_best']}")
-        refine_ckpt = torch.load(CKPTS["activity_prior_refined_best"], map_location=device)
-        prior.activity_prior.load_state_dict(refine_ckpt["activity_prior"], strict=True)
-        hist_refine = None
-    else:
-        print("[3C] Training activity refinement.")
+    print("[3C] Training activity refinement.")
 
-        opt_refine = torch.optim.AdamW(
-            [p for p in prior.activity_prior.parameters() if p.requires_grad],
-            lr=1e-4,
-            weight_decay=0.01,
-        )
+    opt_refine = torch.optim.AdamW(
+        [p for p in prior.activity_prior.parameters() if p.requires_grad],
+        lr=1e-4,
+        weight_decay=0.01,
+    )
 
-        hist_refine = train_activity_prior_with_frozen_motif(
-            activity_prior=prior.activity_prior,
-            motif_prior=prior.motif_prior,
-            vqvae=model,
-            opt=opt_refine,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            epochs=100,
-            grad_clip=1.0,
-            ckpt_out=str(CKPTS["activity_prior_refined_best"]),
-            early_stop_patience=20,
-            grad_accum_steps=grad_accum_steps,
-            freeze_motif=True,
-            lambda_detr=1.0,
-              
-            lambda_ctx=1.0,
-            lambda_adj=1.0,
-            lambda_spatial=1.0,
-            lambda_soft_grid=1.0,
-            
-            lambda_ctx_field=0.05,
-            ctx_field_tau=0.25,
-            
-            memory_tok=getattr(model, "memory_tok", None),
-            memory_adj=getattr(model, "memory_adj", None),
-            isi_gap_bins=gap_bins,
-            isi_max_gap=max_gap_from_bins(
-                gap_bins
-            ),
-        )
+    hist_refine = train_activity_prior_with_frozen_motif(
+        activity_prior=prior.activity_prior,
+        motif_prior=prior.motif_prior,
+        vqvae=model,
+        opt=opt_refine,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        epochs=100,
+        grad_clip=1.0,
+        ckpt_out=str(CKPTS["activity_prior_refined_best"]),
+        early_stop_patience=20,
+        grad_accum_steps=grad_accum_steps,
+        freeze_motif=True,
+        lambda_detr=1.0,
+          
+        lambda_ctx=1.0,
+        lambda_adj=1.0,
+        lambda_spatial=1.0,
+        lambda_soft_grid=1.0,
+        
+        lambda_ctx_field=0.05,
+        ctx_field_tau=0.25,
+        
+        memory_tok=getattr(model, "memory_tok", None),
+        memory_adj=getattr(model, "memory_adj", None),
+        isi_gap_bins=gap_bins,
+        isi_max_gap=max_gap_from_bins(
+            gap_bins
+        ),
+    )
 
-        save_json_report(hist_refine, REPORTS["prior_refine"])
+    save_json_report(hist_refine, REPORTS["prior_refine"])
 
     return {
         "motif": hist_motif,
@@ -1127,6 +1272,7 @@ def load_stage3_prior(model, device):
     )
 
     model.load_checkpoint(str(vq_ckpt), map_location=device)
+    load_stage0_memories_for_eval(model)
     freeze_for_stage(model, 3)
 
 
@@ -1360,7 +1506,6 @@ def evaluate_stage3_prior(
     out_dir="../viz_out_vqvae/vqvae_stage3/stage3_prior_gen",
     max_batches=20,
     samples_per_context=4,
-    task_id_override=None,
     steps=12,
     temperature=1.0,
 ):
@@ -1382,73 +1527,117 @@ def evaluate_stage3_prior(
         gct = batch["global_ctx"].to(device).float()
         lct = batch["local_ctx"].to(device).float()
 
-        # Use test-loader context as the requested condition.
-        # Repeat each real context to draw multiple generated samples.
+        # Each real test video provides only the requested global/local context.
+        # Stage 3 then performs complete task-0 generation over all tokens.
         B = x.shape[0]
-        gct_rep = gct.repeat_interleave(samples_per_context, dim=0)
-        lct_rep = lct.repeat_interleave(samples_per_context, dim=0)
 
-        if task_id_override is None:
-            task_id = batch["task_id"].to(device).long()
-            task_id = task_id.repeat_interleave(samples_per_context, dim=0)
-        else:
-            task_id = torch.full(
-                (B * samples_per_context,),
-                int(task_id_override),
-                dtype=torch.long,
-                device=device,
-            )
+        gct_rep = gct.repeat_interleave(
+            samples_per_context,
+            dim=0,
+        )
+        lct_rep = lct.repeat_interleave(
+            samples_per_context,
+            dim=0,
+        )
 
-        # Get grid/N from frozen VQVAE using the real x only as tokenizer geometry reference.
-        # x is not used as generation input.
-        mask_spec = batch.get("mask_spec", None)
+        roi_hw = batch.get("roi_hw", None)
+        pad_hw = batch.get("pad_hw", None)
 
+        # Preserve the exact crop/padding metadata for every repeated sample.
+        roi_hw_rep = (
+            None
+            if roi_hw is None
+            else [
+                roi
+                for roi in roi_hw
+                for _ in range(samples_per_context)
+            ]
+        )
+
+        pad_hw_rep = (
+            None
+            if pad_hw is None
+            else [
+                pad
+                for pad in pad_hw
+                for _ in range(samples_per_context)
+            ]
+        )
+
+        # Encode the ground-truth video only to obtain its VQ codes,
+        # reconstruction and token-grid geometry.
+        # Do not inherit the randomly sampled dataset mask.
         tok_out = model(
             x,
             global_ctx=gct,
             local_ctx=lct,
-            predict_mask_spec=mask_spec,
+            predict_mask_spec=None,
+            roi_hw=roi_hw,
+            pad_hw=pad_hw,
         )
-        
+
         grid = tok_out["grid"]
         full_codes = tok_out["codes"].long()
-        predict_mask = tok_out["predict_mask"]
-        
-        full_codes_rep = full_codes.repeat_interleave(samples_per_context, dim=0)
-        predict_mask_rep = predict_mask.repeat_interleave(samples_per_context, dim=0)
+
+        N = int(
+            grid[0]
+            * grid[1]
+            * grid[2]
+        )
+
+        # Full generation: every token is inside the prediction ROI.
+        generation_roi = torch.ones(
+            (B * samples_per_context, N),
+            dtype=torch.bool,
+            device=device,
+        )
+
+        # Task 0 = full/exact generation.
+        task_id = torch.zeros(
+            (B * samples_per_context,),
+            dtype=torch.long,
+            device=device,
+        )
         
         sampled = sample_hierarchical_roi(
             prior=prior,
             global_ctx=gct_rep,
             local_ctx=lct_rep,
             task_id=task_id,
-            roi_mask=predict_mask_rep,
-            visible_codes=full_codes_rep,
+            roi_mask=generation_roi,
+            visible_codes=None,
             activity_count_temperature=1.0,
             activity_coord_temperature=temperature,
             motif_steps=steps,
             motif_temperature=temperature,
         )
-        
-        codes_roi = sampled["codes"]
 
-        codes = full_codes_rep.clone()
-        roi = predict_mask_rep.bool()
-        if roi.dim() == 3:
-            roi = roi.squeeze(-1)
-        
-        codes[roi] = codes_roi[roi]
+        # This is a completely generated latent field.
+        codes = sampled["codes"]
 
         gen = decode_codes_to_xgen(
             model,
             codes,
             grid=grid,
-            global_ctx=gct_rep,   # or ctx_t["global_ctx"]
-            local_ctx=lct_rep,    # or ctx_t["local_ctx"]
+            global_ctx=gct_rep,
+            local_ctx=lct_rep,
+            roi_hw=roi_hw_rep,
+            pad_hw=pad_hw_rep,
         )
         
         x_gen = gen["x_gen"]
-        
+
+        global_metric_rows = evaluate_generation_global_metrics(
+            model=model,
+            logits=gen["logits"],
+            x_hard=x_gen,
+            global_ctx=gct_rep,
+            roi_hw=roi_hw_rep,
+            pad_hw=pad_hw_rep,
+            gap_bins=gap_bins,
+            prob_threshold=float(gen["threshold"]),
+        )
+
         diagnostic_rows = collect_generation_diagnostics(
             model=model,
             sampled=sampled,
@@ -1465,22 +1654,82 @@ def evaluate_stage3_prior(
         )
         
         for i, r in enumerate(batch_rows):
-            r.update(
-                diagnostic_rows[i]
-            )
-        
+            source_i = i // samples_per_context
+
+            decoder_support = diagnostic_rows[i]
+            global_metrics = global_metric_rows[i]
+
+            # Keep the old flat fields temporarily for compatibility.
+            r.update(decoder_support)
+
+            r["local_context_metrics"] = {
+                key: value
+                for key, value in r.items()
+                if (
+                    key.startswith("gen_")
+                    or key.startswith("target_")
+                    or key.startswith("err_")
+                    or key.startswith("match_")
+                    or key == "all_context_matches"
+                )
+            }
+
+            r["global_spatial_metrics"] = global_metrics[
+                "global_spatial_metrics"
+            ]
+            r["global_adjacency_metrics"] = global_metrics[
+                "global_adjacency_metrics"
+            ]
+            r["decoder_support_metrics"] = decoder_support
+
             r["generation_mode"] = "test_context"
             r["batch"] = int(bidx)
-            r["task_id"] = int(
-                task_id[i].item()
+            r["sample_within_context"] = int(
+                i % samples_per_context
             )
+            r["task_id"] = int(task_id[i].item())
+
+            r["assay_id"] = int(
+                batch["assay_idx"][source_i].item()
+            )
+
+            r["global_ctx"] = (
+                gct_rep[i]
+                .detach()
+                .cpu()
+                .tolist()
+            )
+
+            r["roi_hw"] = (
+                None
+                if roi_hw_rep is None
+                else [
+                    int(v)
+                    for v in roi_hw_rep[i]
+                ]
+            )
+
+            r["pad_hw"] = (
+                None
+                if pad_hw_rep is None
+                else [
+                    int(v)
+                    for v in pad_hw_rep[i]
+                ]
+            )
+
+            r["full_spatial_size"] = [
+                int(v)
+                for v in model.full_spatial_size
+            ]
+
             r["target_active_token_count"] = int(
-                full_codes_rep[i, :, 0]
+                full_codes[source_i, :, 0]
                 .ne(-1)
                 .sum()
                 .item()
             )
-        
+
             rows.append(r)
 
         # torch.save(
@@ -1625,7 +1874,69 @@ def evaluate_stage3_prior_sampled_contexts(
         else:
             raise ValueError(f"Unknown context sampling mode: {mode}")
 
-        ctx_t = ctx_sampler.to_torch(ctx_np, device=device, task_id=task_id)
+        if mode in (
+            "fixed_global",
+            "fixed_global_partial_local",
+        ):
+            fixed_global_array = np.asarray(
+                fixed_global_np,
+                dtype=np.float32,
+            ).reshape(1, -1)
+
+            ctx_np["global_ctx"] = np.repeat(
+                fixed_global_array,
+                B,
+                axis=0,
+            )
+
+        ctx_t = ctx_sampler.to_torch(
+            ctx_np,
+            device=device,
+            task_id=task_id,
+        )
+
+        full_H, full_W = map(
+            int,
+            model.full_spatial_size,
+        )
+
+        runtime_H = int(
+            grid[1] * model.patch_size[1]
+        )
+        runtime_W = int(
+            grid[2] * model.patch_size[2]
+        )
+
+        pad_h = runtime_H - full_H
+        pad_w = runtime_W - full_W
+
+        if pad_h < 0 or pad_w < 0:
+            raise RuntimeError(
+                "Runtime spatial size is smaller than the "
+                "full spatial memory: "
+                f"runtime={(runtime_H, runtime_W)}, "
+                f"full={(full_H, full_W)}"
+            )
+
+        pad_top = pad_h // 2
+        pad_bottom = pad_h - pad_top
+        pad_left = pad_w // 2
+        pad_right = pad_w - pad_left
+
+        generation_roi_hw = [
+            (0, 0, full_H, full_W)
+            for _ in range(B)
+        ]
+
+        generation_pad_hw = [
+            (
+                pad_top,
+                pad_bottom,
+                pad_left,
+                pad_right,
+            )
+            for _ in range(B)
+        ]
 
         roi_mask = torch.ones(
             (B, N),
@@ -1653,9 +1964,22 @@ def evaluate_stage3_prior_sampled_contexts(
             grid=grid,
             global_ctx=ctx_t["global_ctx"],
             local_ctx=ctx_t["local_ctx"],
+            roi_hw=generation_roi_hw,
+            pad_hw=generation_pad_hw,
         )
+
         x_gen = gen["x_gen"]
-        
+
+        global_metric_rows = evaluate_generation_global_metrics(
+            model=model,
+            logits=gen["logits"],
+            x_hard=x_gen,
+            global_ctx=ctx_t["global_ctx"],
+            roi_hw=generation_roi_hw,
+            pad_hw=generation_pad_hw,
+            gap_bins=gap_bins,
+        )
+
         diagnostic_rows = collect_generation_diagnostics(
             model=model,
             sampled=sampled,
@@ -1677,13 +2001,40 @@ def evaluate_stage3_prior_sampled_contexts(
         )
         
         for i, r in enumerate(batch_rows):
-            r.update(
-                diagnostic_rows[i]
-            )
-        
+            decoder_support = diagnostic_rows[i]
+            global_metrics = global_metric_rows[i]
+
+            # Keep existing flat fields for compatibility.
+            r.update(decoder_support)
+
+            r["local_context_metrics"] = {
+                key: value
+                for key, value in r.items()
+                if (
+                    key.startswith("gen_")
+                    or key.startswith("target_")
+                    or key.startswith("err_")
+                    or key.startswith("match_")
+                    or key.startswith("partial_")
+                    or key.startswith("in_bank_")
+                    or key.startswith("z_from_bank_")
+                    or key == "all_context_matches"
+                    or key == "all_features_in_bank_range"
+                )
+            }
+
+            r["global_spatial_metrics"] = global_metrics[
+                "global_spatial_metrics"
+            ]
+            r["global_adjacency_metrics"] = global_metrics[
+                "global_adjacency_metrics"
+            ]
+            r["decoder_support_metrics"] = decoder_support
+
             r["mode"] = str(mode)
             r["generation_mode"] = str(mode)
             r["sample_id"] = int(sample_id)
+
             r["context_bank_index"] = int(
                 ctx_np["index"][i]
             )
@@ -1693,7 +2044,27 @@ def evaluate_stage3_prior_sampled_contexts(
             r["task_id"] = int(
                 ctx_t["task_id"][i].item()
             )
-        
+
+            r["global_ctx"] = (
+                ctx_t["global_ctx"][i]
+                .detach()
+                .cpu()
+                .tolist()
+            )
+
+            r["roi_hw"] = [
+                int(v)
+                for v in generation_roi_hw[i]
+            ]
+            r["pad_hw"] = [
+                int(v)
+                for v in generation_pad_hw[i]
+            ]
+            r["full_spatial_size"] = [
+                full_H,
+                full_W,
+            ]
+
             rows.append(r)
             sample_id += 1
 
@@ -2154,13 +2525,15 @@ def run_stage_evaluation(
             ),
             max_batches=20,
             samples_per_context=4,
-            task_id_override=None,
             steps=12,
             temperature=1.0,
         )
 
         ref_batch = next(iter(test_loader))
         fixed_gctx = ref_batch["global_ctx"][0:1]
+        fixed_assay_id = int(
+            ref_batch["assay_idx"][0].item()
+        )
 
         # B1. Random realistic complete context
         evaluate_stage3_prior_sampled_contexts(
@@ -2188,6 +2561,7 @@ def run_stage_evaluation(
             context_bank_path="ckpts/context_prior.pkl",
             mode="fixed_global",
             fixed_global_ctx=fixed_gctx,
+            assay_id=fixed_assay_id,
             max_samples=64,
         )
 
@@ -2221,6 +2595,7 @@ def run_stage_evaluation(
             context_bank_path="ckpts/context_prior.pkl",
             mode="fixed_global_partial_local",
             fixed_global_ctx=fixed_gctx,
+            assay_id=fixed_assay_id,
             partial_local={
                 "log_mean_firing_density": -9.1,
                 "temporal_trend": 0.0,
@@ -2266,7 +2641,6 @@ def main():
     meta["spike_voxel_prob"] = baseline_prob
     baseline_prob_clip = float(np.clip(baseline_prob, 1e-8, 1.0 - 1e-8))
     logit_baseline = float(np.log(baseline_prob_clip / (1.0 - baseline_prob_clip)))
-    logit_baseline = max(logit_baseline, -5.0)
 
     print("meta =", meta)
     print("baseline_prob =", baseline_prob, "logit_baseline =", logit_baseline)
@@ -2342,8 +2716,7 @@ def main():
                 model,
                 train_loader,
                 val_loader,
-                baseline_prob,
-                logit_baseline,
+                blank_logit_threshold=1.05*logit_baseline
             )
     
         elif stage == 2:
@@ -2351,6 +2724,7 @@ def main():
                 model,
                 train_loader,
                 val_loader,
+                blank_logit_threshold=1.05*logit_baseline
             )
     
         elif stage == 3:

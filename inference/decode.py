@@ -196,7 +196,11 @@ def decode_motif_logits_soft_given_activity(
 
     mz1 = targets.get("z1_loss_mask", targets["z_loss_mask"]).bool()
     mz2 = targets.get("z2_loss_mask", targets["z_loss_mask"]).bool()
-    m = mz1 | mz2
+    
+    m = targets.get(
+        "decode_motif_mask",
+        mz1 | mz2,
+    ).bool()
 
     def _straight_through_onehot(p_soft):
         idx = p_soft.argmax(dim=-1)
@@ -308,18 +312,22 @@ def decode_codes_to_xgen(
     global_ctx,
     local_ctx,
     threshold: Optional[float] = None,
+    roi_hw=None,
+    pad_hw=None,
 ):
     dec = model.decode_from_codes(
         codes,
         grid=grid,
         global_ctx=global_ctx,
         local_ctx=local_ctx,
+        roi_hw=roi_hw,
+        pad_hw=pad_hw,
     )
 
     logits = dec["logits_vol"]
     prob = torch.sigmoid(logits)
     if threshold is None:
-        threshold = float(getattr(model, "best_thr", 0.5))
+        threshold = float(model.best_thr_tol.item())
     
     x_gen = (prob >= threshold).float()
 

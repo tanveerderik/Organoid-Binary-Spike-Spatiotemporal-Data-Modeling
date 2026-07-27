@@ -206,9 +206,9 @@ def train_motif_prior_mgit(
     full_mask_prob: float = 0.15,
     log_every: int = 50,
     blank_code: int = None,
-    loss_weights=(5.0, 0.5),
+    loss_weights=(1.0, 1.0),
     
-    lambda_topk: Union[float, tuple, list] = (5, 0.5),
+    lambda_topk: Union[float, tuple, list] = (1.0, 1.0),
     topk: Union[int, tuple, list] = (5, 2),
     topk_margin: float = 0.25,
     
@@ -410,6 +410,9 @@ def train_motif_prior_mgit(
                                 ctx_tgt_b9=lct,
                                 dims=tuple(range(9)),
                                 tau=ctx_tau,
+                                prob_threshold=float(
+                                    float(vqvae.best_thr_tol.item())
+                                ),
                             )
                         
                         if lambda_ctx_field > 0.0:
@@ -435,6 +438,9 @@ def train_motif_prior_mgit(
                                 target_b1thw=target_vol,
                                 patch_size=vqvae.patch_size,
                                 tau=ctx_field_tau,
+                                prob_threshold=float(
+                                    float(vqvae.best_thr_tol.item())
+                                ),
                             )
                             
                             
@@ -462,6 +468,9 @@ def train_motif_prior_mgit(
                                 max_gap=isi_max_gap,
                                 gap_bins=isi_gap_bins,
                                 tau=isi_tau,
+                                prob_threshold=float(
+                                    float(vqvae.best_thr_tol.item())
+                                ),
                                 margin=isi_margin,
                                 confidence_bg=adj_conf_bg.float(),
                                 return_parts=True,
@@ -498,6 +507,9 @@ def train_motif_prior_mgit(
                                 logits_b1thw=logits_vol,
                                 patch_size=vqvae.patch_size,
                                 tau=0.25,
+                                prob_threshold=float(
+                                    float(vqvae.best_thr_tol.item())
+                                ),
                             )
                 
                             teacher_tok_tol = dilate_spatial_support_hw(
@@ -598,6 +610,9 @@ def train_motif_prior_mgit(
                                 ctx_tgt_b9=lct,
                                 dims=tuple(range(9)),
                                 tau=ctx_tau,
+                                prob_threshold=float(
+                                    float(vqvae.best_thr_tol.item())
+                                ),
                             )
                         
                         if lambda_ctx_field > 0.0:
@@ -624,6 +639,9 @@ def train_motif_prior_mgit(
                                 target_b1thw=target_vol,
                                 patch_size=vqvae.patch_size,
                                 tau=ctx_field_tau,
+                                prob_threshold=float(
+                                    float(vqvae.best_thr_tol.item())
+                                ),
                             )
                 
                         if lambda_adj > 0.0:
@@ -649,6 +667,9 @@ def train_motif_prior_mgit(
                                 max_gap=isi_max_gap,
                                 gap_bins=isi_gap_bins,
                                 tau=isi_tau,
+                                prob_threshold=float(
+                                    float(vqvae.best_thr_tol.item())
+                                ),
                                 margin=isi_margin,
                                 confidence_bg=adj_conf_bg.float(),
                                 return_parts=True,
@@ -685,6 +706,9 @@ def train_motif_prior_mgit(
                                 logits_b1thw=logits_vol,
                                 patch_size=vqvae.patch_size,
                                 tau=0.25,
+                                prob_threshold=float(
+                                    float(vqvae.best_thr_tol.item())
+                                ),
                             )
                 
                             teacher_tok_tol = dilate_spatial_support_hw(
@@ -1193,7 +1217,7 @@ def train_activity_prior_with_frozen_motif(
         z1_in[~active] = motif_prior.z1_null_id
         z2_in[~active] = motif_prior.z2_null_id
     
-        motif_mask = pmask & active
+        motif_mask = pmask
         z1_in[motif_mask] = motif_prior.z1_mask_id
         z2_in[motif_mask] = motif_prior.z2_mask_id
     
@@ -1240,6 +1264,10 @@ def train_activity_prior_with_frozen_motif(
                 motif_targets["z1_loss_mask"] = roi_mask & active
                 motif_targets["z2_loss_mask"] = roi_mask & active
                 motif_targets["z_loss_mask"] = roi_mask & active
+                
+                # Motif CE remains restricted to GT-active tokens, but soft decoding
+                # must use motif predictions anywhere Stage 3C predicts soft activity.
+                motif_targets["decode_motif_mask"] = roi_mask
                 
                 z1_in, z2_in = _make_roi_mask_inputs(motif_targets)
                 
@@ -1331,6 +1359,9 @@ def train_activity_prior_with_frozen_motif(
                             ctx_tgt_b9=lct,
                             dims=tuple(range(9)),
                             tau=ctx_tau,
+                            prob_threshold=float(
+                                float(vqvae.best_thr_tol.item())
+                            ),
                         )
 
                     if lambda_ctx_field > 0.0:
@@ -1356,6 +1387,9 @@ def train_activity_prior_with_frozen_motif(
                             target_b1thw=target_vol,
                             patch_size=vqvae.patch_size,
                             tau=ctx_field_tau,
+                            prob_threshold=float(
+                                float(vqvae.best_thr_tol.item())
+                            ),
                         )
 
                     if lambda_adj > 0.0:
@@ -1381,6 +1415,9 @@ def train_activity_prior_with_frozen_motif(
                             max_gap=isi_max_gap,
                             gap_bins=isi_gap_bins,
                             tau=isi_tau,
+                            prob_threshold=float(
+                                float(vqvae.best_thr_tol.item())
+                            ),
                             margin=isi_margin,
                             confidence_bg=adj_conf_bg.float(),
                             return_parts=True,
@@ -1417,6 +1454,9 @@ def train_activity_prior_with_frozen_motif(
                             logits_b1thw=logits_vol,
                             patch_size=vqvae.patch_size,
                             tau=0.25,
+                            prob_threshold=float(
+                                float(vqvae.best_thr_tol.item())
+                            ),
                         )
 
                         teacher_tok_tol = dilate_spatial_support_hw(

@@ -365,7 +365,7 @@ def make_model_videos_vqvae(
     device = next(model.parameters()).device
 
     if thr is None:
-        thr = float(getattr(model, "best_thr", 0.5))
+        thr = float(model.best_thr_tol.item())
         print("Using threshold:", thr)
 
     os.makedirs(out_root, exist_ok=True)
@@ -438,11 +438,12 @@ def make_model_videos_vqvae(
                 )
         
                 adj_parts = short_gap_excess_loss_from_logits_batch_targets(
-                    logits_b1thw=logits_raw.float(),
+                    logits_b1thw=logits.float(),
                     target_gap_rates_bg=adj_target_bg.float(),
                     max_gap=isi_max_gap,
                     gap_bins=isi_gap_bins,
                     tau=isi_tau,
+                    prob_threshold=float(thr),
                     margin=isi_margin,
                     confidence_bg=adj_conf_bg.float(),
                     return_parts=True,

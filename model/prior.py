@@ -1270,16 +1270,11 @@ class MaskGITMotifPrior(nn.Module):
         full_mask_prob: float = 0.15,
     ):
         """
-        Staged hierarchical masking.
-    
-        Per sample:
-            gamma ~ Uniform(0, 1)
-    
-        Meaning:
-            Layer 2/fine is never less masked than Layer 1/coarse.
-    
-        Token-level dependency:
-            If z1/a is masked at position i, then z2 is also masked at i.
+        Pairwise motif masking.
+        
+        z1 and z2 jointly identify one hierarchical motif. They therefore use
+        the exact same patch mask and are predicted together. Activity is
+        supplied separately and is not corrupted here.
         """
         a = targets["a"].long()
         z1 = targets["z1"].long().clamp(0, self.K1 - 1)

@@ -17,6 +17,8 @@ from .constants import (
     ACTIVITY_CTX_DIM,
 )
 
+from .losses import soft_binary_from_logits
+
 def tokens_to_voxel_masks(model, pred_patches: torch.Tensor, grid: Tuple[int,int,int], predict_mask: Optional[torch.Tensor]):
     """
     pred_patches: (B,N,P); grid: (t_tok,h_tok,w_tok); predict_mask: (B,N) or (B,N,1) or None
@@ -199,6 +201,7 @@ def soft_spatial_token_map_from_logits(
     pad_hw=None,
     eps: float = 1e-6,
     tau: float = 0.25,
+    prob_threshold: Optional[float] = None,
 ) -> torch.Tensor:
     """
     Build a soft spatial support map from decoder logits.
@@ -246,8 +249,13 @@ def soft_spatial_token_map_from_logits(
             f"Spatial size {(H, W)} must be divisible by patch_size_hw {(pH, pW)}"
         )
 
-    # voxel probabilities
-    p = torch.sigmoid(logits_b1thw / tau).clamp(eps, 1.0 - eps)   # (B,1,T,H,W)
+    # Threshold-aware soft approximation of the final binary video.
+    p = soft_binary_from_logits(
+        logits_b1thw,
+        tau=tau,
+        prob_threshold=prob_threshold,
+        eps=eps,
+    ).clamp(eps, 1.0 - eps)
 
     # soft probability each spatial site was active at least once over time
     # P(active at least once) = 1 - prod_t (1 - p_t)
@@ -295,6 +303,7 @@ def soft_spatial_pixel_map_from_logits(
     logits_b1thw: torch.Tensor,
     eps: float = 1e-6,
     tau: float = 0.25,
+    prob_threshold: Optional[float] = None,
 ) -> torch.Tensor:
     """
     logits_b1thw: (B,1,T,H,W)
@@ -303,7 +312,12 @@ def soft_spatial_pixel_map_from_logits(
     if logits_b1thw.dim() != 5 or logits_b1thw.size(1) != 1:
         raise ValueError(f"Expected (B,1,T,H,W), got {tuple(logits_b1thw.shape)}")
 
-    p = torch.sigmoid(logits_b1thw / tau).clamp(eps, 1.0 - eps)
+    p = soft_binary_from_logits(
+        logits_b1thw,
+        tau=tau,
+        prob_threshold=prob_threshold,
+        eps=eps,
+    ).clamp(eps, 1.0 - eps)
     site_support = 1.0 - torch.prod(1.0 - p, dim=2)
     return site_support[:, 0].clamp(eps, 1.0 - eps)
 

@@ -230,10 +230,6 @@ class TransformerVQVAE(nn.Module):
         # use cross-attn only in early decoder blocks
         self.use_decoder_cross_attn = bool(use_decoder_cross_attn)
         self.decoder_cross_attn_layers = set(decoder_cross_attn_layers) if self.use_decoder_cross_attn else set()
-
-
-        # global bias toward sparsity
-        self.register_buffer("global_logit_bias", torch.tensor(0.0, dtype=torch.float32))
         
         # global context based spatial support prior
         self.use_spatial_map_prior = bool(use_spatial_map_prior)
@@ -260,13 +256,29 @@ class TransformerVQVAE(nn.Module):
             self.spatial_map_prior = None
             
 
-        self.best_thr = 0.5
+        self.register_buffer(
+            "best_thr_exact",
+            torch.tensor(0.5, dtype=torch.float32),
+        )
+        
+        self.register_buffer(
+            "best_thr_tol",
+            torch.tensor(0.5, dtype=torch.float32),
+        )
+        
+        # Threshold currently used by threshold-aware training losses.
+        self.register_buffer(
+            "training_prob_threshold",
+            torch.tensor(0.5, dtype=torch.float32),
+        )
+        
+        # EMA updated after every validation epoch.
+        self.register_buffer(
+            "training_threshold_ema",
+            torch.tensor(0.5, dtype=torch.float32),
+        )
         
         self.cfg_ctx_drop_p = float(cfg_ctx_drop_p)
-
-    
-    def set_logit_bias(self, value: float):
-        self.global_logit_bias.fill_(float(value))
     
         
     def _global_emb_only(self, global_ctx: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
@@ -374,9 +386,6 @@ class TransformerVQVAE(nn.Module):
         roi_hw=None,
         pad_hw=None,
     ):
-        # existing global scalar sparsity prior
-        pred_patches = pred_patches + self.global_logit_bias.to(dtype=pred_patches.dtype, device=pred_patches.device)
-    
         spatial_diag = None
     
         # assay-conditioned spatial prior
@@ -396,9 +405,41 @@ class TransformerVQVAE(nn.Module):
             spatial_diag = sp
     
         return pred_patches, spatial_diag
+    
+    @torch.no_grad()
+    def _set_training_prob_threshold(self, value):
+        value = float(value)
+    
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(
+                f"training_prob_threshold must be in [0, 1], got {value}"
+            )
+    
+        self.training_prob_threshold.fill_(value)
+    
+    @torch.no_grad()
+    def _set_training_threshold_ema(self, value):
+        value = float(value)
+    
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(
+                f"training_threshold_ema must be in [0, 1], got {value}"
+            )
+    
+        self.training_threshold_ema.fill_(value)
         
-    def _set_best_thr(self, best_thr):
-        self.best_thr = best_thr
+    @torch.no_grad()
+    def _set_best_thresholds(
+        self,
+        *,
+        exact=None,
+        tolerant=None,
+    ):
+        if exact is not None:
+            self.best_thr_exact.fill_(float(exact))
+    
+        if tolerant is not None:
+            self.best_thr_tol.fill_(float(tolerant))
 
     # ----- reuse your pos-embed cache helper -----
     def _get_pos_embed(self, grid, device, dtype):
@@ -789,7 +830,6 @@ class TransformerVQVAE(nn.Module):
     def save_checkpoint(self, path, optimizer=None, scheduler=None, epoch=None):
         ckpt = {
             "model": self.state_dict(),
-            "best_thr": float(getattr(self, "best_thr", 0.5)),
         }
         if optimizer is not None:
             ckpt["optimizer"] = optimizer.state_dict()
@@ -802,8 +842,6 @@ class TransformerVQVAE(nn.Module):
     def load_checkpoint(self, path, map_location=None, optimizer=None, scheduler=None):
         ckpt = torch.load(path, map_location=map_location)
         self.load_state_dict(ckpt["model"])
-        if "best_thr" in ckpt:
-            self._set_best_thr(float(ckpt["best_thr"]))
         if optimizer is not None and "optimizer" in ckpt:
             optimizer.load_state_dict(ckpt["optimizer"])
         if scheduler is not None and "scheduler" in ckpt:

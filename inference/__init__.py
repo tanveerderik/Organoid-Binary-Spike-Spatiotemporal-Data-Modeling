@@ -11,6 +11,9 @@ from .sample_prior import (
     sample_hierarchical_roi
 )
 from .sample_context import ContextBankSampler
+
+from .metrics_gen import evaluate_generation_global_metrics
+
 from .decode import (
     decode_motif_logits_soft_given_activity,
     decode_codes_to_xgen,
@@ -25,4 +28,5 @@ __all__ = [
     "decode_codes_to_xgen",
     "save_generated_batch_outputs",
     "save_generation_metrics_json",
+    "evaluate_generation_global_metrics",
 ]
