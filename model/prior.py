@@ -743,6 +743,11 @@ class MaskGITMotifPrior(nn.Module):
         max_len: int = 5040,
         dropout: float = 0.25,
         pad_mask: bool = False,
+        z1_codebook: Optional[torch.Tensor] = None,
+        z2_codebook: Optional[torch.Tensor] = None,
+        z1_scale: float = 1.0,
+        z2_scale: float = 1.0,
+        hull_margin_fraction: float = 0.0,
     ):
         super().__init__()
     
@@ -751,6 +756,31 @@ class MaskGITMotifPrior(nn.Module):
         self.num_tasks = int(num_tasks)
         self.d_model = int(d_model)
         self.max_len = int(max_len)
+        self.z1_scale = float(z1_scale)
+        self.z2_scale = float(z2_scale)
+        self.hull_margin_fraction = float(hull_margin_fraction)
+
+        if z1_codebook is None or z2_codebook is None:
+            raise ValueError("MaskGITMotifPrior requires frozen z1/z2 codebooks.")
+        z1_cb = z1_codebook.detach().float().clone()
+        z2_cb = z2_codebook.detach().float().clone()
+        if z1_cb.shape[0] != self.K1 or z2_cb.shape[:2] != (self.K1, self.K2):
+            raise ValueError(
+                f"Codebook shape mismatch: z1={tuple(z1_cb.shape)}, "
+                f"z2={tuple(z2_cb.shape)}, expected K1={self.K1}, K2={self.K2}."
+            )
+        self.register_buffer("z1_codebook", z1_cb, persistent=True)
+        self.register_buffer("z2_codebook", z2_cb, persistent=True)
+
+        z1_scaled = self.z1_scale * z1_cb
+        z1_d2 = torch.cdist(z1_scaled, z1_scaled, p=2).pow(2)
+        nonzero = z1_d2[z1_d2 > 0]
+        norm = nonzero.mean() if nonzero.numel() else z1_d2.new_tensor(1.0)
+        self.register_buffer(
+            "z1_distance_matrix",
+            z1_d2 / norm.clamp_min(1e-8),
+            persistent=True,
+        )
     
         # activity ids
         self.a_blank_id = 0
@@ -800,7 +830,11 @@ class MaskGITMotifPrior(nn.Module):
             nn.GELU(),
             nn.LayerNorm(d_model),
         )
-        self.z2_head = nn.Linear(d_model, K2)
+        # Continuous child-hull coordinates use a logistic-normal prior.
+        # mu/log_std live in unconstrained logit space; softmax maps samples
+        # to valid simplex coefficients alpha.
+        self.alpha_mu_head = nn.Linear(d_model, K2)
+        self.alpha_log_std_head = nn.Linear(d_model, K2)
     
         # Prefix context tokens
         self.task_emb = nn.Embedding(num_tasks, d_model)        
@@ -868,6 +902,7 @@ class MaskGITMotifPrior(nn.Module):
         z1_in,
         z2_in,
         roi_mask: Optional[torch.Tensor] = None,
+        alpha_in: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Compact per-position hierarchical token fusion.
@@ -883,6 +918,17 @@ class MaskGITMotifPrior(nn.Module):
         a_e = self.a_emb(a_in)
         z1_e = self.z1_emb(z1_in)
         z2_e = self.z2_emb(z2_in)
+
+        if alpha_in is not None:
+            if alpha_in.shape != (*z2_in.shape, self.K2):
+                raise ValueError(
+                    f"alpha_in must have shape {(*z2_in.shape, self.K2)}, "
+                    f"got {tuple(alpha_in.shape)}"
+                )
+            alpha_in = alpha_in.to(device=z2_e.device, dtype=z2_e.dtype)
+            alpha_e = alpha_in @ self.z2_emb.weight[:self.K2]
+            visible_alpha = z2_in.ge(0) & z2_in.lt(self.K2)
+            z2_e = torch.where(visible_alpha.unsqueeze(-1), alpha_e, z2_e)
     
         x_tok = a_e + z1_e + z2_e
         
@@ -958,11 +1004,17 @@ class MaskGITMotifPrior(nn.Module):
             z1_info = z1_pred_info  # (B,N,D)
     
         h_z2 = h_z1 + self.z1_to_z2(z1_info)  # (B,N,D)
-        z2_logits = self.z2_head(h_z2)        # (B,N,K2)
+        alpha_mu = self.alpha_mu_head(h_z2)
+        alpha_log_std = self.alpha_log_std_head(h_z2).clamp(-5.0, 2.0)
     
         return {
             "z1": z1_logits,
-            "z2": z2_logits,
+            # z2 is retained as a compatibility alias for code that expects a
+            # K2-sized score tensor. It now represents alpha logit means.
+            "z2": alpha_mu,
+            "alpha_mu": alpha_mu,
+            "alpha_log_std": alpha_log_std,
+            "alpha_mean": F.softmax(alpha_mu, dim=-1),
         }
     
     def _build_motif_sparse_mask(
@@ -1004,11 +1056,12 @@ class MaskGITMotifPrior(nn.Module):
         z1_in: torch.LongTensor,
         z2_in: torch.LongTensor,
         *,
-        activity_prob: torch.Tensor,       # (B,N), differentiable soft activity
+        activity_prob: torch.Tensor,
         global_ctx: torch.Tensor,
         local_ctx: torch.Tensor,
         task_id: torch.Tensor,
         roi_mask: Optional[torch.Tensor] = None,
+        alpha_in: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         Differentiable motif forward used when refining the activity prior.
@@ -1041,6 +1094,26 @@ class MaskGITMotifPrior(nn.Module):
     
         z1_e = self.z1_emb(z1_in)
         z2_e = self.z2_emb(z2_in)
+
+        if alpha_in is not None:
+            expected_shape = (*z2_in.shape, self.K2)
+            if alpha_in.shape != expected_shape:
+                raise ValueError(
+                    f"alpha_in must have shape {expected_shape}, "
+                    f"got {tuple(alpha_in.shape)}"
+                )
+
+            alpha_in = alpha_in.to(
+                device=z2_e.device,
+                dtype=z2_e.dtype,
+            )
+
+            alpha_e = (
+                alpha_in @ self.z2_emb.weight[:self.K2]
+            )  # (B,N,D)
+
+            has_alpha = alpha_in.sum(dim=-1, keepdim=True).gt(0)
+            z2_e = torch.where(has_alpha, alpha_e, z2_e)
     
         prefix = self._build_prefix(global_ctx, local_ctx, task_id)
         ctx_tok = self.ctx_fuse(prefix.mean(dim=1)).unsqueeze(1)
@@ -1096,6 +1169,7 @@ class MaskGITMotifPrior(nn.Module):
         z1_in: torch.LongTensor,
         z2_in: torch.LongTensor,
         *,
+        alpha_in: Optional[torch.Tensor] = None,
         global_ctx: torch.Tensor,
         local_ctx: torch.Tensor,
         task_id: torch.Tensor,
@@ -1130,7 +1204,9 @@ class MaskGITMotifPrior(nn.Module):
         if roi_mask is None and targets is not None:
             roi_mask = targets.get("predict_mask", None)
         
-        x_tok = self._embed_layer_streams(a_in, z1_in, z2_in, roi_mask=roi_mask)
+        x_tok = self._embed_layer_streams(
+            a_in, z1_in, z2_in, roi_mask=roi_mask, alpha_in=alpha_in
+        )
         
         tok_pos = self.pos_emb(
             torch.arange(N, device=a_in.device)
@@ -1177,19 +1253,15 @@ class MaskGITMotifPrior(nn.Module):
             return logits, None, {}
     
         z1_t = targets["z1"].long()
-        z2_t = targets["z2"].long()
-    
         z1_loss_mask = targets.get("z1_loss_mask", targets["z_loss_mask"]).bool()
-        z2_loss_mask = targets.get("z2_loss_mask", targets["z_loss_mask"]).bool()
-    
+        alpha_loss_mask = targets.get(
+            "alpha_loss_mask",
+            targets.get("z2_loss_mask", targets["z_loss_mask"]),
+        ).bool()
+
         ignore_z1 = torch.full_like(z1_t, -100)
-        ignore_z2 = torch.full_like(z2_t, -100)
-    
         z1_target = torch.where(z1_loss_mask, z1_t, ignore_z1)
-        z2_target = torch.where(z2_loss_mask, z2_t, ignore_z2)
-        
-    
-    
+
         if z1_loss_mask.any():
             loss_z1 = F.cross_entropy(
                 logits["z1"].reshape(-1, self.K1),
@@ -1198,34 +1270,70 @@ class MaskGITMotifPrior(nn.Module):
             )
         else:
             loss_z1 = logits["z1"].sum() * 0.0
-        
-        if z2_loss_mask.any():
-            loss_z2 = F.cross_entropy(
-                logits["z2"].reshape(-1, self.K2),
-                z2_target.reshape(-1),
-                ignore_index=-100,
-            )
+
+        alpha_target = targets.get("alpha", None)
+        if alpha_target is None:
+            raise KeyError("Stage 3 motif targets must include exact convex alpha.")
+        alpha_target = alpha_target.to(
+            device=logits["alpha_mu"].device,
+            dtype=logits["alpha_mu"].dtype,
+        )
+
+        if alpha_loss_mask.any():
+            eps = 1e-6
+            a_t = alpha_target[alpha_loss_mask].clamp_min(eps)
+            a_t = a_t / a_t.sum(dim=-1, keepdim=True).clamp_min(eps)
+            clr_t = a_t.log()
+            clr_t = clr_t - clr_t.mean(dim=-1, keepdim=True)
+
+            mu = logits["alpha_mu"][alpha_loss_mask]
+            mu = mu - mu.mean(dim=-1, keepdim=True)
+            log_std = logits["alpha_log_std"][alpha_loss_mask]
+            inv_var = torch.exp(-2.0 * log_std)
+            loss_alpha_nll = 0.5 * (
+                (clr_t - mu).pow(2) * inv_var + 2.0 * log_std
+            ).mean()
+
+            alpha_mean = F.softmax(mu, dim=-1)
+            parent = z1_t[alpha_loss_mask].clamp(0, self.K1 - 1)
+            children = (
+                self.z2_scale
+                * (1.0 + max(0.0, self.hull_margin_fraction))
+                * self.z2_codebook[parent]
+            ).to(dtype=alpha_mean.dtype)
+            r_pred = torch.einsum("mk,mkd->md", alpha_mean, children)
+            r_tgt = torch.einsum("mk,mkd->md", a_t, children)
+            loss_alpha_residual = F.mse_loss(r_pred, r_tgt)
+            loss_alpha = loss_alpha_nll + loss_alpha_residual
         else:
-            loss_z2 = logits["z2"].sum() * 0.0
-    
+            zero = logits["alpha_mu"].sum() * 0.0
+            loss_alpha_nll = zero
+            loss_alpha_residual = zero
+            loss_alpha = zero
+
         w1, w2 = loss_weights
-        loss = w1 * loss_z1 + w2 * loss_z2
+        loss = w1 * loss_z1 + w2 * loss_alpha
     
         aux = {
             "loss": loss.detach(),
             "loss_z1": loss_z1.detach(),
-            "loss_z2": loss_z2.detach(),
+            "loss_z2": loss_alpha.detach(),
+            "loss_alpha": loss_alpha.detach(),
+            "loss_alpha_nll": loss_alpha_nll.detach(),
+            "loss_alpha_residual": loss_alpha_residual.detach(),
             "z1_loss_tokens": z1_loss_mask.sum().detach(),
-            "z2_loss_tokens": z2_loss_mask.sum().detach(),
+            "z2_loss_tokens": alpha_loss_mask.sum().detach(),
+            "alpha_loss_tokens": alpha_loss_mask.sum().detach(),
         }
     
         return logits, loss, aux
 
-    @staticmethod
     def make_targets_from_codes(
+        self,
         codes: torch.Tensor,
         predict_mask: torch.Tensor,
         blank_code: int = -1,
+        alpha: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         codes:
@@ -1251,15 +1359,29 @@ class MaskGITMotifPrior(nn.Module):
     
         pmask = predict_mask.bool()
     
+        if alpha is None:
+            alpha = F.one_hot(
+                z2.clamp(0, self.K2 - 1), num_classes=self.K2
+            ).to(dtype=torch.float32)
+        else:
+            alpha = alpha.to(device=codes.device, dtype=torch.float32)
+            if alpha.shape != (*z1.shape, self.K2):
+                raise ValueError(
+                    f"alpha must have shape {(*z1.shape, self.K2)}, "
+                    f"got {tuple(alpha.shape)}"
+                )
+
         return {
             "a": a,
             "z1": z1,
             "z2": z2,
+            "alpha": alpha,
             "active": active,
             "predict_mask": pmask,
             "a_loss_mask": pmask,
             "z1_loss_mask": pmask & active,
             "z2_loss_mask": pmask & active,
+            "alpha_loss_mask": pmask & active,
             "z_loss_mask": pmask & active,
         }
 
@@ -1279,6 +1401,7 @@ class MaskGITMotifPrior(nn.Module):
         a = targets["a"].long()
         z1 = targets["z1"].long().clamp(0, self.K1 - 1)
         z2 = targets["z2"].long().clamp(0, self.K2 - 1)
+        alpha = targets["alpha"].float()
     
         active = targets["active"].bool()
         pmask = targets["predict_mask"].bool()
@@ -1313,10 +1436,12 @@ class MaskGITMotifPrior(nn.Module):
         a_in = a.clone()
         z1_in = z1.clone()
         z2_in = z2.clone()
+        alpha_in = alpha.clone()
     
         # Inactive/blank positions should not expose fake clamped code 0.
         z1_in[~active] = self.z1_null_id
         z2_in[~active] = self.z2_null_id
+        alpha_in[~active] = 0.0
     
         # Coarse-stage masking.
         # Activity is externally supplied / teacher-forced.
@@ -1325,15 +1450,17 @@ class MaskGITMotifPrior(nn.Module):
     
         # Fine-stage masking.
         z2_in[m] = self.z2_mask_id
+        alpha_in[m] = 0.0
     
         targets = dict(targets)
         targets["a_loss_mask"] = m
         targets["z1_loss_mask"] = m & active
         targets["z2_loss_mask"] = m & active
-        targets["z_loss_mask"] = targets["z1_loss_mask"] | targets["z2_loss_mask"]
+        targets["alpha_loss_mask"] = m & active
+        targets["z_loss_mask"] = targets["z1_loss_mask"] | targets["alpha_loss_mask"]
         targets["gamma"] = gamma.squeeze(1)
     
-        return a_in, z1_in, z2_in, targets
+        return a_in, z1_in, z2_in, alpha_in, targets
     
     
 class HierarchicalCodebookPrior(nn.Module):
@@ -1458,8 +1585,9 @@ class HierarchicalCodebookPrior(nn.Module):
             task_id,
             roi_mask=roi_mask,
         )
-        return self.activity_prior.sample_hard_activity_gridtopk(
+        return self.activity_prior.sample_hard_activity(
             out,
             count_temperature=count_temperature,
+            coord_temperature=coord_temperature,
             roi_mask=roi_mask,
         )

@@ -208,27 +208,38 @@ def decode_motif_logits_soft_given_activity(
         return p_hard + (p_soft - p_soft.detach())
 
     p_z1_pred = F.softmax(logits["z1"] / float(tau_z), dim=-1)
-    p_z2_pred = F.softmax(logits["z2"] / float(tau_z), dim=-1)
-
     p_z1_pred_st = _straight_through_onehot(p_z1_pred)
-    p_z2_pred_st = _straight_through_onehot(p_z2_pred)
 
-    p_z1_gt = F.one_hot(z1_t.clamp(0, K1 - 1), num_classes=K1).to(dtype=dtype).detach()
-    p_z2_gt = F.one_hot(z2_t.clamp(0, K2 - 1), num_classes=K2).to(dtype=dtype).detach()
-
+    p_z1_gt = F.one_hot(
+        z1_t.clamp(0, K1 - 1), num_classes=K1
+    ).to(dtype=dtype).detach()
     p_z1 = torch.where(m.unsqueeze(-1), p_z1_pred_st, p_z1_gt)
-    p_z2 = torch.where(m.unsqueeze(-1), p_z2_pred_st, p_z2_gt)
+
+    alpha_pred = F.softmax(logits["alpha_mu"] / float(tau_z), dim=-1)
+    alpha_gt = targets.get("alpha", None)
+    if alpha_gt is None:
+        alpha_gt = F.one_hot(
+            z2_t.clamp(0, K2 - 1), num_classes=K2
+        ).to(dtype=dtype)
+    else:
+        alpha_gt = alpha_gt.to(device=device, dtype=dtype)
+        alpha_gt = alpha_gt / alpha_gt.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+    alpha = torch.where(m.unsqueeze(-1), alpha_pred, alpha_gt.detach())
 
     E0 = model.vq.tree_embeds[0].detach().to(device=device, dtype=dtype)
     E1 = model.vq.tree_embeds[1].detach().to(device=device, dtype=dtype)
 
     z0 = torch.einsum("bnk,kd->bnd", p_z1, E0)
-    z1_res = torch.einsum("bnk,bnr,krd->bnd", p_z1, p_z2, E1)
+    z1_res = torch.einsum("bnk,bnr,krd->bnd", p_z1, alpha, E1)
 
     scale0 = float(model.vq.level_scales[0])
     scale1 = float(model.vq.level_scales[1])
+    margin = 1.0 + max(
+        0.0,
+        float(model.continuous_residual_projector.hull_margin_fraction),
+    )
 
-    z_active = scale0 * z0 + scale1 * z1_res
+    z_active = scale0 * z0 + scale1 * margin * z1_res
 
     blank_token = model.vq.blank_token.detach().to(device=device, dtype=dtype)
     z_blank = blank_token.view(1, 1, -1)
@@ -308,6 +319,7 @@ def decode_codes_to_xgen(
     model,
     codes,
     *,
+    alpha=None,
     grid,
     global_ctx,
     local_ctx,
@@ -318,6 +330,7 @@ def decode_codes_to_xgen(
     dec = model.decode_from_codes(
         codes,
         grid=grid,
+        alpha=alpha,
         global_ctx=global_ctx,
         local_ctx=local_ctx,
         roi_hw=roi_hw,

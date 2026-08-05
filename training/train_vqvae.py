@@ -24,11 +24,14 @@ from ..utils.losses import (
     short_gap_excess_loss_from_logits_batch_targets,
     ctx_loss_soft,
     local_moment_field_loss,
-    variance_floor_loss, encoder_isotropy_loss,
+    encoder_isotropy_loss,
+    variance_floor_loss,
+    soft_code_norm_ceiling_loss,
     spatial_support_violation_loss,
     blank_patch_logit_hinge_loss,
     blank_active_decoder_separation_loss,
 )
+
 from ..utils.metrics import get_vq_codebook_stats
 
 from .eval_vqvae import evaluate_vqvae
@@ -56,14 +59,12 @@ def fit_vqvae(
     pos_decay_epochs: int = 50,        # reach pos_weight by epoch 50
 
     lambda_isi: float = 1e-2,
+    lambda_vq: float = 1.0,
     lambda_ctx: float = 1e-3,
     lambda_ctx_field: float = 1e-4,
     
     ctx_start_epoch: int = 30,         # start ctx after 20
     ctx_warmup_epochs: int = 50,       # ramp duration (or shorter, like 10–15)
-    
-    training_threshold_update_every: int = 30,
-    training_threshold_ema_alpha: float = 0.5,
     
     # ---- hierarchical refinement supervision ----
     refinement_loss_weights: Optional[list[float]] = None,
@@ -85,6 +86,21 @@ def fit_vqvae(
     sp_pixel_start_epoch: int = 40,
     sp_pixel_warmup_epochs: int = 60,
     lambda_enc_var: float = 1.0,
+    
+    lambda_code_norm: float = 0.0,
+    code_norm_rms_ceiling: float = 10.0,
+    code_norm_token_ceiling: float = 14.0,
+
+    # ---- Stage-2 continuous residual relaxation ----
+    lambda_cont_projection: float = 0.0,
+    lambda_cont_parent_margin: float = 0.0,
+    continuous_sample_start_epoch: int = 1,
+    continuous_sample_warmup_epochs: int = 40,
+    continuous_sample_mix_start: float = 0.0,
+    continuous_sample_mix_end: float = 0.25,
+    continuous_gumbel_tau_start: float = 1.0,
+    continuous_gumbel_tau_end: float = 0.50,
+    continuous_posterior_temperature: float = 0.35,
     
     # --- Blank embedding and patch enforcement ---
     lambda_blank: float = 0.05,
@@ -114,6 +130,8 @@ def fit_vqvae(
     isi_gap_bins=None,
     isi_tau: float = 0.25,
     isi_margin: float = 0.25,
+    isi_lower_margin: float = 0.20,
+    isi_lower_weight: float = 0.50,
     
     memory_tok = None,
     memory_pix = None,
@@ -133,16 +151,6 @@ def fit_vqvae(
     no_improve = 0
     eval_report = None
     history = {"train_log": [], "val_metrics": []}
-    
-    if training_threshold_update_every <= 0:
-        raise ValueError(
-            "training_threshold_update_every must be positive"
-        )
-    
-    if not 0.0 < training_threshold_ema_alpha <= 1.0:
-        raise ValueError(
-            "training_threshold_ema_alpha must be in (0, 1]"
-        )
     
     target_std_start = 1.0
     target_std_end = 0.25
@@ -208,11 +216,35 @@ def fit_vqvae(
             "sp_memory_used": 0.0,
             "adj_memory_used": 0.0,
             "adj_pred_mean": 0.0,
-            "adj_allowed_mean": 0.0,
+            "adj_upper_allowed_mean": 0.0,
+            "adj_lower_allowed_mean": 0.0,
             "adj_tgt_mean": 0.0,
             "adj_conf_mean": 0.0,
                         
             "loss_enc_var": 0.0,
+            "loss_code_norm": 0.0,
+            "loss_cont_projection": 0.0,
+            "loss_cont_parent_margin": 0.0,
+            "cont_alpha_entropy": 0.0,
+            "cont_alpha_mean_entropy": 0.0,
+            "cont_alpha_sample_entropy": 0.0,
+            "cont_alpha_final_entropy": 0.0,
+            "cont_alpha_final_usage_entropy": 0.0,
+            "cont_alpha_mean_max": 0.0,
+            "cont_alpha_sample_max": 0.0,
+            "cont_alpha_final_max": 0.0,
+            "cont_adapter_delta_logit_norm": 0.0,
+            "cont_alpha_adapter_enabled": 0.0,
+            "cont_residual_norm": 0.0,
+            "cont_safe_radius": 0.0,
+            "cont_hull_scale": 0.0,
+            "cont_hull_scale_delta": 0.0,
+            "cont_hull_expansion_fraction": 0.0,
+            "cont_geometric_projection_mse": 0.0,
+            "cont_distance_reference_mse": 0.0,
+            "cont_hard_vertex_mse": 0.0,
+            "cont_projection_gain_vs_hard": 0.0,
+            "cont_decode_uses_projection_target": 0.0,
             "loss_blank": 0.0,
             "loss_blank_sep": 0.0,
             
@@ -251,6 +283,28 @@ def fit_vqvae(
             v0=cfg_ctx_drop_start,
             v1=cfg_ctx_drop_end,
         )
+
+        cont_sample_mix_eff = _cosine_ramp(
+            epoch_idx=epoch,
+            start_epoch=continuous_sample_start_epoch,
+            warmup_epochs=continuous_sample_warmup_epochs,
+            v0=continuous_sample_mix_start,
+            v1=continuous_sample_mix_end,
+        )
+        cont_gumbel_tau_eff = _cosine_ramp(
+            epoch_idx=epoch,
+            start_epoch=continuous_sample_start_epoch,
+            warmup_epochs=continuous_sample_warmup_epochs,
+            v0=continuous_gumbel_tau_start,
+            v1=continuous_gumbel_tau_end,
+        )
+
+        if hasattr(model, "continuous_residual_sample_mix"):
+            model.continuous_residual_sample_mix = float(cont_sample_mix_eff)
+            model.continuous_residual_gumbel_temperature = float(cont_gumbel_tau_eff)
+            model.continuous_residual_posterior_temperature = float(
+                continuous_posterior_temperature
+            )
         
         # ---- dynamic refinement supervision ----
         L_active = int(getattr(model.vq, "active_quantizers", model.vq.num_quantizers))
@@ -300,6 +354,47 @@ def fit_vqvae(
                 )                
                 vq_loss = out["vq_loss"]
                 z_e_active = out["z_e_active"]
+                
+                if lambda_code_norm > 0.0:
+                    loss_code_norm, code_norm_parts = soft_code_norm_ceiling_loss(
+                        z_e_active,
+                        rms_ceiling=code_norm_rms_ceiling,
+                        token_ceiling=code_norm_token_ceiling,
+                        huber_beta=0.10,
+                        tail_weight=0.25,
+                        return_parts=True,
+                    )
+                else:
+                    loss_code_norm = z_e_active.new_zeros(())
+                
+                    with torch.no_grad():
+                        code_norms = z_e_active.float().norm(dim=-1)
+                
+                        code_norm_parts = {
+                            "rms": torch.sqrt(
+                                code_norms.square().mean() + 1e-8
+                            ),
+                            "mean": code_norms.mean(),
+                            "std": code_norms.std(unbiased=False),
+                            "p95": torch.quantile(code_norms, 0.95),
+                            "max": code_norms.max(),
+                            "tail_fraction": (
+                                code_norms > float(code_norm_token_ceiling)
+                            ).float().mean(),
+                            "rms_loss": z_e_active.new_zeros(()),
+                            "tail_loss": z_e_active.new_zeros(()),
+                        }
+                
+                
+                loss_cont_projection = out.get(
+                    "loss_cont_projection",
+                    z_e_active.new_zeros(()),
+                )
+                loss_cont_parent_margin = out.get(
+                    "loss_cont_parent_margin",
+                    z_e_active.new_zeros(()),
+                )
+                continuous_aux = out.get("continuous_residual_aux", None)
                 logits_patches = out["pred_patches"]
                 grid = out["grid"]
                 predict_mask = out["predict_mask"]
@@ -518,6 +613,8 @@ def fit_vqvae(
                             gap_bins=isi_gap_bins,
                             tau=isi_tau,
                             margin=isi_margin,
+                            lower_margin=isi_lower_margin,
+                            lower_weight=isi_lower_weight,
                             confidence_bg=adj_conf_bg.float(),
                             return_parts=True,
                             prob_threshold=active_prob_threshold,
@@ -534,13 +631,16 @@ def fit_vqvae(
                     adj_memory_used = 1.0
                 
                 target_std_eff = target_std_end + 0.5 * (target_std_start - target_std_end) * (1 + math.cos(math.pi * t_pos))
-                loss_enc_var = variance_floor_loss(z_e_active, target_std=target_std_eff)
-                # loss_enc_var, enc_iso_parts = encoder_isotropy_loss(
-                #     z_e_active,
-                #     target_std=target_std_eff,
-                #     max_tokens=512,
-                #     return_parts=True,
-                # )
+                # loss_enc_var = variance_floor_loss(z_e_active, target_std=target_std_eff)
+                loss_enc_var, enc_iso_parts = encoder_isotropy_loss(
+                    z_e_active,
+                    target_std=target_std_eff,
+                    mean_weight=1e-2,
+                    cov_weight=5e-2,
+                    cov_margin=0.35,
+                    max_tokens=1024,
+                    return_parts=True,
+                )
                 
                 # --- ctx schedule (0 until ctx_start_epoch, then cosine up to 1) ---
                 t_ctx = (epoch - ctx_start_epoch) / max(1, ctx_warmup_epochs)
@@ -584,7 +684,9 @@ def fit_vqvae(
                         patch_size=model.patch_size,
                         tau=0.25,
                         min_active_spikes=1,
-                        min_shape_spikes=3,
+                        min_shape_spikes=5,
+                        min_trend_spikes=6,
+                        min_trend_frames=3,
                         prob_threshold=active_prob_threshold,
                     )
                 
@@ -730,9 +832,12 @@ def fit_vqvae(
             # --- Total loss      
             loss = (
                 recon_total
-                + vq_loss
+                + lambda_vq * vq_loss
                 + lambda_isi_eff * loss_isi
                 + lambda_enc_var * loss_enc_var
+                + lambda_code_norm * loss_code_norm
+                + lambda_cont_projection * loss_cont_projection
+                + lambda_cont_parent_margin * loss_cont_parent_margin
                 + lambda_ctx_eff * loss_ctx
                 + lambda_ctx_field_eff * loss_ctx_field
                 + loss_sp_cons
@@ -749,6 +854,70 @@ def fit_vqvae(
             
             sums["loss_vq"] += float(vq_loss.detach().cpu())
             sums["loss_enc_var"] += float(loss_enc_var.detach().cpu())
+            sums["loss_code_norm"] += float(loss_code_norm.detach().cpu())
+            sums["loss_cont_projection"] += float(loss_cont_projection.detach().cpu())
+            sums["loss_cont_parent_margin"] += float(loss_cont_parent_margin.detach().cpu())
+            if continuous_aux is not None:
+                sums["cont_alpha_entropy"] += float(
+                    continuous_aux["alpha_entropy"].detach().cpu()
+                )
+                sums["cont_alpha_mean_entropy"] += float(
+                    continuous_aux["alpha_mean_entropy"].detach().cpu()
+                )
+                sums["cont_alpha_sample_entropy"] += float(
+                    continuous_aux["alpha_sample_entropy"].detach().cpu()
+                )
+                sums["cont_alpha_final_entropy"] += float(
+                    continuous_aux["alpha_final_entropy"].detach().cpu()
+                )
+                sums["cont_alpha_final_usage_entropy"] += float(
+                    continuous_aux["alpha_final_usage_entropy"].detach().cpu()
+                )
+                sums["cont_alpha_mean_max"] += float(
+                    continuous_aux["alpha_mean_max"].detach().cpu()
+                )
+                sums["cont_alpha_sample_max"] += float(
+                    continuous_aux["alpha_sample_max"].detach().cpu()
+                )
+                sums["cont_alpha_final_max"] += float(
+                    continuous_aux["alpha_final_max"].detach().cpu()
+                )
+                sums["cont_adapter_delta_logit_norm"] += float(
+                    continuous_aux["adapter_delta_logit_norm"].detach().cpu()
+                )
+                sums["cont_alpha_adapter_enabled"] += float(
+                    continuous_aux["alpha_adapter_enabled"].detach().cpu()
+                )
+                sums["cont_residual_norm"] += float(
+                    continuous_aux["mean_residual_norm"].detach().cpu()
+                )
+                sums["cont_safe_radius"] += float(
+                    continuous_aux["mean_safe_radius"].detach().cpu()
+                )
+                sums["cont_hull_scale"] += float(
+                    continuous_aux["mean_hull_scale"].detach().cpu()
+                )
+                sums["cont_hull_scale_delta"] += float(
+                    continuous_aux["mean_hull_scale_delta"].detach().cpu()
+                )
+                sums["cont_hull_expansion_fraction"] += float(
+                    continuous_aux["hull_expansion_fraction"].detach().cpu()
+                )
+                sums["cont_geometric_projection_mse"] += float(
+                    continuous_aux["geometric_projection_mse"].detach().cpu()
+                )
+                sums["cont_distance_reference_mse"] += float(
+                    continuous_aux["distance_reference_mse"].detach().cpu()
+                )
+                sums["cont_hard_vertex_mse"] += float(
+                    continuous_aux["hard_vertex_mse"].detach().cpu()
+                )
+                sums["cont_projection_gain_vs_hard"] += float(
+                    continuous_aux["projection_gain_vs_hard"].detach().cpu()
+                )
+                sums["cont_decode_uses_projection_target"] += float(
+                    continuous_aux["decode_uses_projection_target"].detach().cpu()
+                )
             
             sums["loss_blank"] += float(loss_blank.detach().cpu())
             sums["loss_blank_sep"] += float(loss_blank_sep.detach().cpu())
@@ -768,8 +937,11 @@ def fit_vqvae(
                 sums["adj_pred_mean"] += float(
                     adj_parts["pred_gap_rates"].mean().detach().cpu()
                 )
-                sums["adj_allowed_mean"] += float(
+                sums["adj_upper_allowed_mean"] += float(
                     adj_parts["allowed_gap_rates"].mean().detach().cpu()
+                )
+                sums["adj_lower_allowed_mean"] += float(
+                    adj_parts["lower_allowed_gap_rates"].mean().detach().cpu()
                 )
                 sums["adj_tgt_mean"] += float(
                     adj_parts["target_gap_rates"].mean().detach().cpu()
@@ -846,6 +1018,32 @@ def fit_vqvae(
             
             "loss_vq": sums["loss_vq"] / max(1, num_batches),
             "loss_enc_var": sums["loss_enc_var"] / max(1, num_batches),
+            "loss_code_norm": sums["loss_code_norm"] / max(1, num_batches),
+            "loss_cont_projection": sums["loss_cont_projection"] / max(1, num_batches),
+            "loss_cont_parent_margin": sums["loss_cont_parent_margin"] / max(1, num_batches),
+            "cont_alpha_entropy": sums["cont_alpha_entropy"] / max(1, num_batches),
+            "cont_alpha_mean_entropy": sums["cont_alpha_mean_entropy"] / max(1, num_batches),
+            "cont_alpha_sample_entropy": sums["cont_alpha_sample_entropy"] / max(1, num_batches),
+            "cont_alpha_final_entropy": sums["cont_alpha_final_entropy"] / max(1, num_batches),
+            "cont_alpha_final_usage_entropy": sums["cont_alpha_final_usage_entropy"] / max(1, num_batches),
+            "cont_alpha_mean_max": sums["cont_alpha_mean_max"] / max(1, num_batches),
+            "cont_alpha_sample_max": sums["cont_alpha_sample_max"] / max(1, num_batches),
+            "cont_alpha_final_max": sums["cont_alpha_final_max"] / max(1, num_batches),
+            "cont_adapter_delta_logit_norm": sums["cont_adapter_delta_logit_norm"] / max(1, num_batches),
+            "cont_alpha_adapter_enabled": sums["cont_alpha_adapter_enabled"] / max(1, num_batches),
+            "cont_residual_norm": sums["cont_residual_norm"] / max(1, num_batches),
+            "cont_safe_radius": sums["cont_safe_radius"] / max(1, num_batches),
+            "cont_hull_scale": sums["cont_hull_scale"] / max(1, num_batches),
+            "cont_hull_scale_delta": sums["cont_hull_scale_delta"] / max(1, num_batches),
+            "cont_hull_expansion_fraction": sums["cont_hull_expansion_fraction"] / max(1, num_batches),
+            "cont_geometric_projection_mse": sums["cont_geometric_projection_mse"] / max(1, num_batches),
+            "cont_distance_reference_mse": sums["cont_distance_reference_mse"] / max(1, num_batches),
+            "cont_hard_vertex_mse": sums["cont_hard_vertex_mse"] / max(1, num_batches),
+            "cont_projection_gain_vs_hard": sums["cont_projection_gain_vs_hard"] / max(1, num_batches),
+            "cont_decode_uses_projection_target": sums["cont_decode_uses_projection_target"] / max(1, num_batches),
+            "continuous_sample_mix": float(cont_sample_mix_eff),
+            "continuous_gumbel_tau": float(cont_gumbel_tau_eff),
+            "continuous_posterior_temperature": float(continuous_posterior_temperature),
             "blank": sums["loss_blank"] / max(1, num_batches),
             "blank_sep": sums["loss_blank_sep"] / max(1, num_batches),
             "loss_isi": sums["loss_isi"] / max(1, num_batches),
@@ -861,7 +1059,8 @@ def fit_vqvae(
             "sp_memory_used": sums["sp_memory_used"] / max(1, num_batches),
             "adj_memory_used": sums["adj_memory_used"] / max(1, num_batches),
             "adj_pred_mean": sums["adj_pred_mean"] / max(1, num_batches),
-            "adj_allowed_mean": sums["adj_allowed_mean"] / max(1, num_batches),
+            "adj_upper_allowed_mean": sums["adj_upper_allowed_mean"] / max(1, num_batches),
+            "adj_lower_allowed_mean": sums["adj_lower_allowed_mean"] / max(1, num_batches),
             "adj_tgt_mean": sums["adj_tgt_mean"] / max(1, num_batches),
             "adj_conf_mean": sums["adj_conf_mean"] / max(1, num_batches),
                         
@@ -878,6 +1077,7 @@ def fit_vqvae(
             "pos_weight_eff": float(pos_weight_eff),
             "lambda_ctx_eff": float(lambda_ctx_eff),
             "lambda_isi": float(lambda_isi),
+            "lambda_vq": float(lambda_vq),
             "cfg_drop_prob": float(cfg_p),
             "training_prob_threshold_used": active_prob_threshold,
             
@@ -915,14 +1115,6 @@ def fit_vqvae(
         train_log.update(cb_stats)
     
         val_metric = None
-        threshold_candidate = None
-        threshold_deployed = False
-
-        threshold_ema_before = float(
-            model.training_threshold_ema.item()
-        )
-        threshold_ema_next = threshold_ema_before
-        threshold_next = active_prob_threshold
 
         if val_loader is not None:
             eval_report = evaluate_vqvae(
@@ -955,46 +1147,7 @@ def fit_vqvae(
                 tolerant=tolerant_thr,
             )
 
-            if tolerant_thr is not None:
-                threshold_candidate = float(tolerant_thr)
-                alpha = float(training_threshold_ema_alpha)
-
-                # Update the EMA after every validation epoch.
-                threshold_ema_next = (
-                    (1.0 - alpha) * threshold_ema_before
-                    + alpha * threshold_candidate
-                )
-
-                model._set_training_threshold_ema(
-                    threshold_ema_next
-                )
-
-                # Deploy the accumulated EMA only every 30 epochs.
-                if epoch % training_threshold_update_every == 0:
-                    threshold_next = threshold_ema_next
-
-                    model._set_training_prob_threshold(
-                        threshold_next
-                    )
-                    threshold_deployed = True
-
             history["val_metrics"].append(eval_report)
-
-        train_log["training_prob_threshold_candidate"] = (
-            threshold_candidate
-        )
-        train_log["training_threshold_ema_before"] = (
-            threshold_ema_before
-        )
-        train_log["training_threshold_ema_next"] = (
-            threshold_ema_next
-        )
-        train_log["training_prob_threshold_next"] = (
-            threshold_next
-        )
-        train_log["training_prob_threshold_deployed"] = (
-            threshold_deployed
-        )
 
         history["train_log"].append(train_log)
 
@@ -1021,6 +1174,7 @@ def fit_vqvae(
             
             f"vq={train_log.get('loss_vq', 0):.5f} "
             f"enc_var={train_log.get('loss_enc_var', 0):.5f} "
+            f"code_norm={train_log.get('loss_code_norm', 0):.5f} "
             f"ctx={train_log.get('loss_ctx', 0):.5f} "
             f"ctx_field={train_log.get('loss_ctx_field', 0):.5f} "
             f"sp_cons={train_log.get('loss_sp_cons', 0):.6e} "
@@ -1028,23 +1182,38 @@ def fit_vqvae(
             f"sp_mem={train_log.get('sp_memory_used', 0):.2f} "
             f"adj_mem={train_log.get('adj_memory_used', 0):.2f} "
             f"adj_pred={train_log.get('adj_pred_mean', 0):.5e} "
-            f"adj_allowed={train_log.get('adj_allowed_mean', 0):.5e} "
+            f"adj_allowed=[{train_log.get('adj_lower_allowed_mean', 0):.5e}, {train_log.get('adj_upper_allowed_mean', 0):.5e}]\n"
             f"adj_conf={train_log.get('adj_conf_mean', 0):.3f}\n"
             f"blank={train_log.get('blank', 0):.5f} "
             f"blank_sep={train_log.get('blank_sep', 0):.5f}\n"            
             f"\n"
             
+            f"cont_proj={train_log.get('loss_cont_projection', 0):.6f} "
+            f"cont_parent={train_log.get('loss_cont_parent_margin', 0):.6f} "
+            f"cont_H_mean={train_log.get('cont_alpha_mean_entropy', 0):.4f} "
+            f"cont_H_sample={train_log.get('cont_alpha_sample_entropy', 0):.4f} "
+            f"cont_H_final={train_log.get('cont_alpha_final_entropy', 0):.4f} "
+            f"cont_H_usage={train_log.get('cont_alpha_final_usage_entropy', 0):.4f}\n"
+            f"cont_max_mean={train_log.get('cont_alpha_mean_max', 0):.4f} "
+            f"cont_max_sample={train_log.get('cont_alpha_sample_max', 0):.4f} "
+            f"cont_max_final={train_log.get('cont_alpha_final_max', 0):.4f} "
+            f"cont_adapter_delta={train_log.get('cont_adapter_delta_logit_norm', 0):.5f} "
+            f"cont_adapter_on={train_log.get('cont_alpha_adapter_enabled', 0):.0f}\n"
+            
+            f"cont_resid={train_log.get('cont_residual_norm', 0):.5f} "
+            f"cont_safe={train_log.get('cont_safe_radius', 0):.5f} "
+            f"geom_mse={train_log.get('cont_geometric_projection_mse', 0):.6f} "
+            f"rbf_mse={train_log.get('cont_distance_reference_mse', 0):.6f} "
+            f"hard_mse={train_log.get('cont_hard_vertex_mse', 0):.6f} "
+            f"gain={train_log.get('cont_projection_gain_vs_hard', 0):.6f} "
+            f"decode_target={train_log.get('cont_decode_uses_projection_target', 0):.0f}\n"
+            f"cont_mix={train_log.get('continuous_sample_mix', 0):.4f} "
+            f"cont_tau={train_log.get('continuous_gumbel_tau', 0):.4f} "
+            f"cont_post_tau={train_log.get('continuous_posterior_temperature', 0):.4f}\n"
+            f"\n"
+            
             f"pred_mean_p={train_log.get('pred_mean_p', 0):.6e}, "
             f"tgt_mean={train_log.get('tgt_mean', 0):.6e}\n"            
-            f"training_threshold="
-            f"{train_log.get('training_prob_threshold_used', 0.5):.4f}"
-            f"->{train_log.get('training_prob_threshold_next', 0.5):.4f} "
-            f"ema="
-            f"{train_log.get('training_threshold_ema_before', 0.5):.4f}"
-            f"->{train_log.get('training_threshold_ema_next', 0.5):.4f} "
-            f"deployed="
-            f"{train_log.get('training_prob_threshold_deployed', False)}\n"
-
             f"\n"
             f"---"
             f"\n\n"
@@ -1178,11 +1347,6 @@ def fit_vqvae(
         "best_val": best_val,
         "best_thr_exact": best_thr_exact_for_best_model,
         "best_thr_tol": best_thr_tol_for_best_model,
-        "final_training_prob_threshold": float(
-            model.training_prob_threshold.item()
-        ),
-        "final_training_threshold_ema": float(
-            model.training_threshold_ema.item()
-        ),
+        "final_training_prob_threshold": float(model.training_prob_threshold.item()),
         "history": history,
     }

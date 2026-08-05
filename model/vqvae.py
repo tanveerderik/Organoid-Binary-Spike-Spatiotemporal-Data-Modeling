@@ -12,7 +12,12 @@ import copy
 import numpy as np
 
 from .base import ConvStem3D, ActivePatchEmbed3D, PatchRenderer3D, CtxEmbed
-from .base import SparseTokenTransformerEncoder, DecoderCrossAttnBlock, HierarchicalVectorQuantizerEMA
+from .base import (
+    SparseTokenTransformerEncoder,
+    DecoderCrossAttnBlock,
+    HierarchicalVectorQuantizerEMA,
+    ContinuousResidualProjector,
+)
 from .spatial_map import SpatialMapPrior
 from ..utils.embed import get_3d_sincos_pos_embed
 
@@ -35,7 +40,7 @@ class TransformerVQVAE(nn.Module):
         usage_loss_weight: float = 1e-3,
         usage_tau: float = 0.5,
         num_quantizers: int = 2,
-        
+                
         decoder_embed_dim=256, decoder_depth=4, decoder_num_heads=6,
         
         
@@ -145,9 +150,23 @@ class TransformerVQVAE(nn.Module):
         )
 
         # --- code space & VQ ---
+        # self.to_code = nn.Sequential(
+        #     nn.Linear(encoder_embed_dim, code_dim, bias=True),
+        #     nn.LayerNorm(code_dim),
+        # )
         self.to_code = nn.Sequential(
-            nn.Linear(encoder_embed_dim, code_dim, bias=True),
-            nn.LayerNorm(code_dim),
+            # Stabilize the unnormalized residual stream produced by the
+            # pre-norm transformer, without normalizing the final code vector.
+            nn.LayerNorm(encoder_embed_dim),
+        
+            # No output LayerNorm: code-space vectors may now use both direction
+            # and magnitude. Bias is unnecessary because the EMA codebook can
+            # represent a nonzero center itself.
+            nn.Linear(
+                encoder_embed_dim,
+                code_dim,
+                bias=False,
+            ),
         )
         
         self.num_quantizers = int(num_quantizers)
@@ -178,6 +197,32 @@ class TransformerVQVAE(nn.Module):
             dead_code_usage_thresh=0.05,
             dead_restart_noise_std=0.01,
         )
+
+        # Stage-2 exact continuous quantization.
+        #
+        # Stage 2A projects the frozen encoder residual onto the convex hull
+        # of the selected z1 parent's frozen z2 children. Stage 2B is optional
+        # and only amortizes that exact geometric projection. The encoder,
+        # to_code, z1 centroids, and z2 residual anchors stay frozen.
+        self.continuous_residual_projector = ContinuousResidualProjector(
+            code_dim=code_dim,
+            num_child_codes=(
+                self.vq.num_codes_per_level[1]
+                if len(self.vq.num_codes_per_level) > 1
+                else 1
+            ),
+            adapter_hidden_dim=code_dim,
+            posterior_temperature=0.35,
+            gumbel_temperature=0.75,
+            sample_mix=0.0,
+            safe_fraction=0.85,
+            parent_margin_fraction=0.10,
+            hull_margin_fraction=0.10,
+        )
+        self.use_continuous_residual = False
+        self.continuous_residual_sample_mix = 0.0
+        self.continuous_residual_posterior_temperature = 0.35
+        self.continuous_residual_gumbel_temperature = 0.75
 
         # --- decoder ---
         self.code_to_dec = nn.Linear(code_dim, decoder_embed_dim, bias=False)
@@ -269,12 +314,6 @@ class TransformerVQVAE(nn.Module):
         # Threshold currently used by threshold-aware training losses.
         self.register_buffer(
             "training_prob_threshold",
-            torch.tensor(0.5, dtype=torch.float32),
-        )
-        
-        # EMA updated after every validation epoch.
-        self.register_buffer(
-            "training_threshold_ema",
             torch.tensor(0.5, dtype=torch.float32),
         )
         
@@ -416,17 +455,6 @@ class TransformerVQVAE(nn.Module):
             )
     
         self.training_prob_threshold.fill_(value)
-    
-    @torch.no_grad()
-    def _set_training_threshold_ema(self, value):
-        value = float(value)
-    
-        if not 0.0 <= value <= 1.0:
-            raise ValueError(
-                f"training_threshold_ema must be in [0, 1], got {value}"
-            )
-    
-        self.training_threshold_ema.fill_(value)
         
     @torch.no_grad()
     def _set_best_thresholds(
@@ -619,6 +647,7 @@ class TransformerVQVAE(nn.Module):
         roi_hw=None,
         pad_hw=None,
         return_all_refinements: bool = False,
+        alpha: Optional[torch.Tensor] = None,
     ):
         """
         Decode hierarchical codes.
@@ -662,7 +691,40 @@ class TransformerVQVAE(nn.Module):
             active_mask_final = active_mask_list[-1]
             
         else:
-            z_q_final, active_mask_final = self._codes_to_quantized_final(codes)
+            if alpha is None:
+                z_q_final, active_mask_final = self._codes_to_quantized_final(codes)
+            else:
+                if codes.dim() != 3 or codes.size(-1) < 2:
+                    raise ValueError(
+                        f"Continuous alpha decoding expects codes (B,N,2), got {tuple(codes.shape)}"
+                    )
+                B, N = codes.shape[:2]
+                K2 = int(self.vq.num_codes_per_level[1])
+                if alpha.shape != (B, N, K2):
+                    raise ValueError(
+                        f"alpha must have shape {(B, N, K2)}, got {tuple(alpha.shape)}"
+                    )
+                device = codes.device
+                dtype = self.vq.tree_embeds[0].dtype
+                active_mask_final = codes[..., 0].ge(0)
+                z_q_final = self.vq.blank_token.to(device=device, dtype=dtype).view(1, 1, -1).expand(B, N, -1).clone()
+                if active_mask_final.any():
+                    z1_idx = codes[..., 0].clamp(0, self.vq.num_codes_per_level[0] - 1)
+                    E0 = self.vq.tree_embeds[0].to(device=device, dtype=dtype)
+                    E1 = self.vq.tree_embeds[1].to(device=device, dtype=dtype)
+                    scale0 = float(self.vq.level_scales[0])
+                    scale1 = float(self.vq.level_scales[1])
+                    margin = 1.0 + max(
+                        0.0,
+                        float(self.continuous_residual_projector.hull_margin_fraction),
+                    )
+                    centers = scale0 * E0[z1_idx]
+                    children = scale1 * margin * E1[z1_idx]
+                    a = alpha.to(device=device, dtype=dtype).clamp_min(0.0)
+                    a = a / a.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+                    residual = torch.einsum("bnk,bnkd->bnd", a, children)
+                    z_active = centers + residual
+                    z_q_final[active_mask_final] = z_active[active_mask_final]
     
         final_dec = self._decode_quantized_latent(
             z_q=z_q_final,
@@ -841,7 +903,70 @@ class TransformerVQVAE(nn.Module):
         
     def load_checkpoint(self, path, map_location=None, optimizer=None, scheduler=None):
         ckpt = torch.load(path, map_location=map_location)
-        self.load_state_dict(ckpt["model"])
+        checkpoint_state = ckpt["model"]
+        model_state = self.state_dict()
+
+        # Stage-1 and earlier Stage-2 checkpoints may contain the previous
+        # K2+1 alpha adapter (with a zero anchor), no context gate, or other
+        # obsolete continuous-projector tensors.  Those parameters never define
+        # the frozen Stage-1 encoder/codebook geometry, so incompatible entries
+        # are safely reinitialized while all core VQVAE weights remain strict.
+        filtered_state = {}
+        ignored_incompatible = []
+        for key, value in checkpoint_state.items():
+            current = model_state.get(key)
+            if current is not None and tuple(current.shape) == tuple(value.shape):
+                filtered_state[key] = value
+                continue
+
+            if key.startswith("continuous_residual_projector."):
+                ignored_incompatible.append(key)
+                continue
+
+            raise RuntimeError(
+                "Checkpoint/model shape mismatch while loading "
+                f"{path}: key={key}, checkpoint_shape={tuple(value.shape)}, "
+                f"model_shape={None if current is None else tuple(current.shape)}"
+            )
+
+        incompatible = self.load_state_dict(filtered_state, strict=False)
+
+        allowed_missing_prefixes = (
+            "continuous_residual_projector.alpha_adapter.",
+            "continuous_residual_projector.hull_scale_adapter.",
+        )
+        disallowed_missing = [
+            key
+            for key in incompatible.missing_keys
+            if not (
+                key.startswith(allowed_missing_prefixes)
+                or (
+                    key.startswith("dec_blocks.")
+                    and key.endswith(".ctx_gate")
+                )
+            )
+        ]
+
+        unexpected = [
+            key
+            for key in incompatible.unexpected_keys
+            if not key.startswith("continuous_residual_projector.")
+        ]
+
+        if disallowed_missing or unexpected:
+            raise RuntimeError(
+                "Checkpoint/model mismatch while loading "
+                f"{path}: missing={disallowed_missing}, unexpected={unexpected}"
+            )
+
+        initialized = list(incompatible.missing_keys) + ignored_incompatible
+        if initialized:
+            print(
+                "Initialized corrected Stage-2 projection/context parameters "
+                "that are absent or incompatible in the checkpoint: "
+                + ", ".join(sorted(set(initialized)))
+            )
+
         if optimizer is not None and "optimizer" in ckpt:
             optimizer.load_state_dict(ckpt["optimizer"])
         if scheduler is not None and "scheduler" in ckpt:
@@ -1006,6 +1131,8 @@ class TransformerVQVAE(nn.Module):
         roi_hw=None,
         pad_hw=None,
         return_all_refinements=False,
+        continuous_residual_sample: Optional[bool] = None,
+        continuous_residual_sample_mix: Optional[float] = None,
     ):
         B, C, T, H, W = x.shape
         
@@ -1064,9 +1191,58 @@ class TransformerVQVAE(nn.Module):
             return_aux=True,
         )
         
-        z_q_ste = z_q_flat.view(B, N, D_code)
+        z_q_hard_ste = z_q_flat.view(B, N, D_code)
         codes = codes_flat.view(B, N, self.vq.num_quantizers)
-        
+
+        # ---------------------------------------------------------
+        # Optional exact continuous quantization around the hard z1 parent.
+        # Stage 1 keeps the original hard hierarchical VQ path. Stage 2
+        # replaces the selected hard child by the Euclidean projection of the
+        # frozen encoder residual onto that parent's child convex hull. Hard
+        # code IDs are retained only for diagnostics and compatibility.
+        # ---------------------------------------------------------
+        continuous_aux = None
+        z_q_decode = z_q_hard_ste
+
+        if (
+            bool(getattr(self, "use_continuous_residual", False))
+            and int(self.vq.active_quantizers) >= 2
+            and z_e_active.numel() > 0
+        ):
+            active_codes = codes_flat[active_flat]
+            z1_codes = active_codes[:, 0].long()
+
+            z_cont_active, continuous_aux = self.continuous_residual_projector(
+                z_e_active=z_e_active,
+                z1_codes=z1_codes,
+                z1_table=self.vq.tree_embeds[0],
+                z2_table=self.vq.tree_embeds[1],
+                child_scale=float(self.vq.level_scales[1]),
+                sample=(
+                    bool(self.training)
+                    if continuous_residual_sample is None
+                    else bool(continuous_residual_sample)
+                ),
+                posterior_temperature=float(
+                    self.continuous_residual_posterior_temperature
+                ),
+                gumbel_temperature=float(
+                    self.continuous_residual_gumbel_temperature
+                ),
+                sample_mix=float(
+                    self.continuous_residual_sample_mix
+                    if continuous_residual_sample_mix is None
+                    else continuous_residual_sample_mix
+                ),
+            )
+
+            z_q_decode_flat = z_q_flat.clone()
+            z_q_decode_flat[active_flat] = z_cont_active.to(
+                device=z_q_decode_flat.device,
+                dtype=z_q_decode_flat.dtype,
+            )
+            z_q_decode = z_q_decode_flat.view(B, N, D_code)
+
         # ----- hard-code cumulative hierarchy refinements for diagnostics -----
         refinements = []
 
@@ -1096,9 +1272,9 @@ class TransformerVQVAE(nn.Module):
                 dec_i["level"] = lvl_idx
                 refinements.append(dec_i)
         
-        # ----- final training decode uses STE path -----
+        # ----- final training decode uses hard STE or continuous residual path -----
         final_dec = self._decode_quantized_latent(
-            z_q=z_q_ste,
+            z_q=z_q_decode,
             active_mask=active_mask,
             grid=grid,
             global_ctx=global_ctx,
@@ -1111,9 +1287,9 @@ class TransformerVQVAE(nn.Module):
         L_active = int(self.vq.active_quantizers)
         final_dec["level"] = L_active
         refinements.append(final_dec)
-        # Replace final hard-code refinement with STE refinement.
-        # This keeps earlier coarse refinements diagnostic/supervised,
-        # but makes the final reconstruction loss send gradients through z_q_ste -> encoder.
+        # Earlier cumulative hard-code refinements remain diagnostic/supervised.
+        # The final refinement uses either the original STE latent or the bounded
+        # continuous residual latent selected above.
         # if len(refinements) > 0:
         #     refinements[-1] = final_dec
         
@@ -1178,6 +1354,20 @@ class TransformerVQVAE(nn.Module):
             "z_dec_base_no_pos": z_dec_base_no_pos,
             "signed_type_offset": signed_type_offset,
             "activity_type_offset": activity_type_offset,
+
+            "z_q_hard_ste": z_q_hard_ste,
+            "z_q_decode": z_q_decode,
+            "continuous_residual_aux": continuous_aux,
+            "loss_cont_projection": (
+                continuous_aux["projection_loss"]
+                if continuous_aux is not None
+                else z_e_full.new_zeros(())
+            ),
+            "loss_cont_parent_margin": (
+                continuous_aux["parent_margin_loss"]
+                if continuous_aux is not None
+                else z_e_full.new_zeros(())
+            ),
         
             "refinements": refinements,
         }

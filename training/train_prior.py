@@ -122,6 +122,94 @@ def _vq_codes_and_pmask(vqvae, x, gct, lct, mask_spec, device):
     return codes, pmask, grid
 
 
+
+@torch.no_grad()
+def _vq_codes_alpha_and_pmask(vqvae, x, gct, lct, mask_spec, device):
+    """Encode codes plus exact convex alpha targets from corrected Stage 2."""
+    try:
+        out = vqvae(
+            x,
+            global_ctx=gct,
+            local_ctx=lct,
+            predict_mask_spec=mask_spec,
+        )
+    except TypeError:
+        out = vqvae(x, global_ctx=gct, local_ctx=lct)
+
+    codes = out["codes"].long()
+    pmask = out.get("predict_mask", None)
+    if pmask is None:
+        B, N = codes.shape[:2]
+        pmask = torch.ones((B, N), device=device, dtype=torch.float32)
+    else:
+        if pmask.dim() == 3:
+            pmask = pmask.squeeze(-1)
+        pmask = pmask.to(device=device, dtype=torch.float32)
+
+    aux = out.get("continuous_residual_aux", None)
+    if aux is None or aux.get("alpha_target", None) is None:
+        raise RuntimeError(
+            "Stage 3 alpha training requires VQVAE exact convex projection. "
+            "Set model.use_continuous_residual=True and "
+            "decode_with_projection_target=True before encoding."
+        )
+
+    K2 = int(vqvae.vq.num_codes_per_level[1])
+    active = codes[..., 0].ne(getattr(vqvae.vq, "blank_code", -1))
+    alpha = torch.zeros((*codes.shape[:2], K2), device=device, dtype=torch.float32)
+    alpha_active = aux["alpha_target"].to(device=device, dtype=torch.float32)
+    if alpha_active.shape[0] != int(active.sum().item()):
+        raise RuntimeError(
+            f"alpha_target count {alpha_active.shape[0]} does not match "
+            f"active token count {int(active.sum().item())}."
+        )
+    alpha[active] = alpha_active
+    return codes, alpha, pmask, out.get("grid", None)
+
+
+def expected_code_distance_loss(logits, target, mask, distance_matrix):
+    """Expected normalized z1 codebook distance from the target code."""
+    mask = mask.bool()
+    if not mask.any():
+        return logits.sum() * 0.0
+    lm = logits[mask]
+    ym = target[mask].long()
+    p = F.softmax(lm, dim=-1)
+    d = distance_matrix.to(device=lm.device, dtype=lm.dtype)[ym]
+    return (p * d).sum(dim=-1).mean()
+
+
+def distance_neighborhood_ce_loss(
+    logits, target, mask, distance_matrix, *, k=5, tau=0.25
+):
+    """Soft CE over the k codebook-nearest alternatives to each target.
+
+    This replaces the old logit-top-k margin. The acceptable top-k set is
+    determined by frozen z1 geometry, not by the model's current ranking.
+    """
+    mask = mask.bool()
+    if not mask.any():
+        return logits.sum() * 0.0
+    lm = logits[mask]
+    ym = target[mask].long()
+    dist = distance_matrix.to(device=lm.device, dtype=lm.dtype)[ym]
+    k = max(1, min(int(k), dist.size(-1)))
+    near_d, near_idx = torch.topk(dist, k=k, largest=False, dim=-1)
+    q_local = F.softmax(-near_d / max(float(tau), 1e-6), dim=-1)
+    
+    # Keep the manually constructed probability target and log-softmax in FP32.
+    lm_fp32 = lm.float()
+    q_local = q_local.to(device=lm.device, dtype=torch.float32)
+    
+    q = torch.zeros_like(lm_fp32)
+    q.scatter_(1, near_idx.long(), q_local)
+    
+    log_p = F.log_softmax(lm_fp32, dim=1)
+    loss = -(q * log_p).sum(dim=1).mean()
+    
+    return loss
+
+
 def topk_margin_ce_loss(logits, target, mask, k=5, margin=1.0):
     """
     Penalize only when target logit is not competitive with top-k logits.
@@ -211,6 +299,9 @@ def train_motif_prior_mgit(
     lambda_topk: Union[float, tuple, list] = (1.0, 1.0),
     topk: Union[int, tuple, list] = (5, 2),
     topk_margin: float = 0.25,
+    lambda_z1_distance: float = 0.05,
+    lambda_z1_neighbor_ce: float = 0.25,
+    z1_neighbor_tau: float = 0.25,
     
     z1_teacher_prob_start: float = 1.0,
     z1_teacher_prob_end: float = 0.0,
@@ -227,6 +318,8 @@ def train_motif_prior_mgit(
     motif_tau_z: float = 0.25,
     isi_tau: float = 0.25,
     isi_margin: float = 0.25,
+    isi_lower_margin: float = 0.20,
+    isi_lower_weight: float = 0.50,
     isi_max_gap: int = 3,
     isi_gap_bins=None,
     memory_adj=None,
@@ -281,21 +374,22 @@ def train_motif_prior_mgit(
         topk_z1 = int(topk)
         topk_z2 = int(topk)
 
-    def _make_motif_io(codes, pmask):
+    def _make_motif_io(codes, alpha, pmask):
         targets = motif_prior.make_targets_from_codes(
             codes=codes,
             predict_mask=pmask,
             blank_code=blank_code,
+            alpha=alpha,
         )
         
-        a_in, z1_in, z2_in, targets = motif_prior.corrupt_inputs_from_targets(
+        a_in, z1_in, z2_in, alpha_in, targets = motif_prior.corrupt_inputs_from_targets(
             targets,
             ensure_at_least_one_mask=ensure_at_least_one_mask,
             full_mask_prob=full_mask_prob,
         )
         targets["z1_teacher_prob"] = z1_teacher_prob
 
-        return a_in, z1_in, z2_in, targets
+        return a_in, z1_in, z2_in, alpha_in, targets
 
     def _run_epoch(loader, train: bool):
         motif_prior.train(train)
@@ -335,8 +429,12 @@ def train_motif_prior_mgit(
             x, gct, lct, task_id, mask_spec = _batch_to_device(batch, device)
 
             with torch.no_grad():
-                codes, pmask, grid = _vq_codes_and_pmask(vqvae, x, gct, lct, mask_spec, device)
-                a_in, z1_in, z2_in, targets = _make_motif_io(codes, pmask)
+                codes, alpha_target, pmask, grid = _vq_codes_alpha_and_pmask(
+                    vqvae, x, gct, lct, mask_spec, device
+                )
+                a_in, z1_in, z2_in, alpha_in, targets = _make_motif_io(
+                    codes, alpha_target, pmask
+                )
                 
                 if not train:
                     targets["z1_teacher_prob"] = 0.0
@@ -350,6 +448,7 @@ def train_motif_prior_mgit(
                         a_in,
                         z1_in,
                         z2_in,
+                        alpha_in=alpha_in,
                         global_ctx=gct,
                         local_ctx=lct,
                         task_id=task_id,
@@ -359,25 +458,27 @@ def train_motif_prior_mgit(
                     
                     loss_ce_raw = loss_ce
 
-                    loss_topk_z1 = topk_margin_ce_loss(
+                    loss_topk_z1 = distance_neighborhood_ce_loss(
                         logits["z1"],
                         targets["z1"],
                         targets["z1_loss_mask"],
+                        motif_prior.z1_distance_matrix,
                         k=topk_z1,
-                        margin=topk_margin,
+                        tau=z1_neighbor_tau,
+                    )
+                    loss_z1_distance = expected_code_distance_loss(
+                        logits["z1"],
+                        targets["z1"],
+                        targets["z1_loss_mask"],
+                        motif_prior.z1_distance_matrix,
                     )
                     
-                    loss_topk_z2 = topk_margin_ce_loss(
-                        logits["z2"],
-                        targets["z2"],
-                        targets["z2_loss_mask"],
-                        k=topk_z2,
-                        margin=topk_margin,
-                    )
-                    
+                    # z2 is continuous alpha now; its stochastic logistic-normal
+                    # loss is already included in loss_ce_raw by motif_prior.
+                    loss_topk_z2 = logits["alpha_mu"].sum() * 0.0
                     loss_topk = (
-                        float(lambda_topk_z1) * loss_topk_z1
-                        + float(lambda_topk_z2) * loss_topk_z2
+                        float(lambda_z1_neighbor_ce) * loss_topk_z1
+                        + float(lambda_z1_distance) * loss_z1_distance
                     )
                     
                     loss_ce = loss_ce_raw + loss_topk
@@ -438,6 +539,10 @@ def train_motif_prior_mgit(
                                 target_b1thw=target_vol,
                                 patch_size=vqvae.patch_size,
                                 tau=ctx_field_tau,
+                                min_active_spikes=1,
+                                min_shape_spikes=5,
+                                min_trend_spikes=6,
+                                min_trend_frames=3,
                                 prob_threshold=float(
                                     float(vqvae.best_thr_tol.item())
                                 ),
@@ -472,6 +577,8 @@ def train_motif_prior_mgit(
                                     float(vqvae.best_thr_tol.item())
                                 ),
                                 margin=isi_margin,
+                                lower_margin=isi_lower_margin,
+                                lower_weight=isi_lower_weight,
                                 confidence_bg=adj_conf_bg.float(),
                                 return_parts=True,
                             )
@@ -551,6 +658,7 @@ def train_motif_prior_mgit(
                         a_in,
                         z1_in,
                         z2_in,
+                        alpha_in=alpha_in,
                         global_ctx=gct,
                         local_ctx=lct,
                         task_id=task_id,
@@ -560,25 +668,27 @@ def train_motif_prior_mgit(
                     
                     loss_ce_raw = loss_ce
                     
-                    loss_topk_z1 = topk_margin_ce_loss(
+                    loss_topk_z1 = distance_neighborhood_ce_loss(
                         logits["z1"],
                         targets["z1"],
                         targets["z1_loss_mask"],
+                        motif_prior.z1_distance_matrix,
                         k=topk_z1,
-                        margin=topk_margin,
+                        tau=z1_neighbor_tau,
+                    )
+                    loss_z1_distance = expected_code_distance_loss(
+                        logits["z1"],
+                        targets["z1"],
+                        targets["z1_loss_mask"],
+                        motif_prior.z1_distance_matrix,
                     )
                     
-                    loss_topk_z2 = topk_margin_ce_loss(
-                        logits["z2"],
-                        targets["z2"],
-                        targets["z2_loss_mask"],
-                        k=topk_z2,
-                        margin=topk_margin,
-                    )
-                    
+                    # z2 is continuous alpha now; its stochastic logistic-normal
+                    # loss is already included in loss_ce_raw by motif_prior.
+                    loss_topk_z2 = logits["alpha_mu"].sum() * 0.0
                     loss_topk = (
-                        float(lambda_topk_z1) * loss_topk_z1
-                        + float(lambda_topk_z2) * loss_topk_z2
+                        float(lambda_z1_neighbor_ce) * loss_topk_z1
+                        + float(lambda_z1_distance) * loss_z1_distance
                     )
                     
                     loss_ce = loss_ce_raw + loss_topk
@@ -639,6 +749,10 @@ def train_motif_prior_mgit(
                                 target_b1thw=target_vol,
                                 patch_size=vqvae.patch_size,
                                 tau=ctx_field_tau,
+                                min_active_spikes=1,
+                                min_shape_spikes=5,
+                                min_trend_spikes=6,
+                                min_trend_frames=3,
                                 prob_threshold=float(
                                     float(vqvae.best_thr_tol.item())
                                 ),
@@ -671,6 +785,8 @@ def train_motif_prior_mgit(
                                     float(vqvae.best_thr_tol.item())
                                 ),
                                 margin=isi_margin,
+                                lower_margin=isi_lower_margin,
+                                lower_weight=isi_lower_weight,
                                 confidence_bg=adj_conf_bg.float(),
                                 return_parts=True,
                             )
@@ -745,11 +861,11 @@ def train_motif_prior_mgit(
                 topk=topk_z1,
             )
             mz2 = _masked_cls_metrics(
-                logits["z2"],
-                targets["z2"],
+                logits["alpha_mu"],
+                targets["alpha"].argmax(dim=-1),
                 z2_mask,
                 motif_prior.K2,
-                topk=topk_z2,
+                topk=max(1, topk_z2),
             )
 
             B = x.size(0)
@@ -1166,6 +1282,8 @@ def train_activity_prior_with_frozen_motif(
     motif_tau_z: float = 0.25,
     isi_tau: float = 0.25,
     isi_margin: float = 0.25,
+    isi_lower_margin: float = 0.20,
+    isi_lower_weight: float = 0.50,
     isi_max_gap: int = 3,
     isi_gap_bins=None,
     memory_adj=None,
@@ -1221,7 +1339,11 @@ def train_activity_prior_with_frozen_motif(
         z1_in[motif_mask] = motif_prior.z1_mask_id
         z2_in[motif_mask] = motif_prior.z2_mask_id
     
-        return z1_in, z2_in
+        alpha_in = motif_targets["alpha"].clone()
+        alpha_in[~active] = 0.0
+        alpha_in[motif_mask] = 0.0
+        
+        return z1_in, z2_in, alpha_in
 
     def _run_epoch(loader, train: bool):
         activity_prior.train(train)
@@ -1238,7 +1360,7 @@ def train_activity_prior_with_frozen_motif(
             x, gct, lct, task_id, mask_spec = _batch_to_device(batch, device)
 
             with torch.no_grad():
-                codes, pmask, grid = _vq_codes_and_pmask(
+                codes, alpha_target, pmask, grid = _vq_codes_alpha_and_pmask(
                     vqvae, x, gct, lct, mask_spec, device
                 )
 
@@ -1254,6 +1376,7 @@ def train_activity_prior_with_frozen_motif(
                     codes=codes,
                     predict_mask=pmask,
                     blank_code=blank_code,
+                    alpha=alpha_target,
                 )
 
                 # Predict only ROI tokens; outside ROI remains teacher-forced.
@@ -1269,7 +1392,7 @@ def train_activity_prior_with_frozen_motif(
                 # must use motif predictions anywhere Stage 3C predicts soft activity.
                 motif_targets["decode_motif_mask"] = roi_mask
                 
-                z1_in, z2_in = _make_roi_mask_inputs(motif_targets)
+                z1_in, z2_in, alpha_in = _make_roi_mask_inputs(motif_targets)
                 
                 a_in = _make_activity_in_from_codes(
                     codes,
@@ -1331,6 +1454,7 @@ def train_activity_prior_with_frozen_motif(
                         local_ctx=lct,
                         task_id=task_id,
                         roi_mask=pmask,
+                        alpha_in=alpha_in,
                     )
 
                     dec = decode_motif_logits_soft_given_activity(
@@ -1387,6 +1511,10 @@ def train_activity_prior_with_frozen_motif(
                             target_b1thw=target_vol,
                             patch_size=vqvae.patch_size,
                             tau=ctx_field_tau,
+                            min_active_spikes=1,
+                            min_shape_spikes=5,
+                            min_trend_spikes=6,
+                            min_trend_frames=3,
                             prob_threshold=float(
                                 float(vqvae.best_thr_tol.item())
                             ),
@@ -1419,6 +1547,8 @@ def train_activity_prior_with_frozen_motif(
                                 float(vqvae.best_thr_tol.item())
                             ),
                             margin=isi_margin,
+                            lower_margin=isi_lower_margin,
+                            lower_weight=isi_lower_weight,
                             confidence_bg=adj_conf_bg.float(),
                             return_parts=True,
                         )

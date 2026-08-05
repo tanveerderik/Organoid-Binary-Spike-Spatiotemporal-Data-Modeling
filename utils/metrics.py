@@ -88,37 +88,104 @@ class PRCurveAccumulator:
         target: torch.Tensor,
         mask_vol: Optional[torch.Tensor],
     ) -> None:
-        target_exact = target > 0.5
         valid = (
-            torch.ones_like(target_exact)
+            torch.ones_like(target, dtype=torch.bool)
             if mask_vol is None
             else mask_vol > 0
         )
-
+    
+        # Targets outside the evaluated region must not provide tolerant credit.
+        target_valid = (target > 0.5) & valid
+    
         if self.radius_t is None:
-            target_match = target_exact
+            # Exact evaluation.
+            radius_t = 0
+            radius_h = 0
+            radius_w = 0
+    
+            target_near = target_valid
+            prob_local_max = prob.masked_fill(~valid, -1.0)
+    
         else:
-            target_match = F.max_pool3d(
-                target_exact.float(),
-                kernel_size=(
-                    2 * self.radius_t + 1,
-                    2 * self.radius_h + 1,
-                    2 * self.radius_w + 1,
-                ),
+            # Tolerant evaluation.
+            radius_t = int(self.radius_t)
+            radius_h = int(self.radius_h)
+            radius_w = int(self.radius_w)
+    
+            kernel_size = (
+                2 * radius_t + 1,
+                2 * radius_h + 1,
+                2 * radius_w + 1,
+            )
+            padding = (
+                radius_t,
+                radius_h,
+                radius_w,
+            )
+    
+            # Used to determine whether each prediction is near a target.
+            target_near = F.max_pool3d(
+                target_valid.float(),
+                kernel_size=kernel_size,
                 stride=1,
-                padding=(
-                    self.radius_t,
-                    self.radius_h,
-                    self.radius_w,
-                ),
+                padding=padding,
             ) > 0
-
+    
+            # Used to determine whether each target has a nearby prediction.
+            #
+            # Pool probabilities once rather than dilating binary predictions
+            # separately at every threshold:
+            #
+            # max(probability neighborhood) >= threshold
+            #
+            # is equivalent to:
+            #
+            # any(binary prediction neighborhood)
+            prob_for_pool = prob.masked_fill(~valid, -1.0)
+    
+            prob_local_max = F.max_pool3d(
+                prob_for_pool,
+                kernel_size=kernel_size,
+                stride=1,
+                padding=padding,
+            )
+    
+        target_total = target_valid.sum().double()
+    
         for i, thr in enumerate(self.thr_grid):
-            pred = prob >= thr
-            self.tp[i].add_((pred & target_match & valid).sum().double())
-            self.fp[i].add_((pred & ~target_match & valid).sum().double())
-            self.fn[i].add_((~pred & target_exact & valid).sum().double())
-
+            pred_valid = (prob >= thr) & valid
+    
+            # Predictions that fall within tolerance of a target.
+            pred_hits = pred_valid & target_near
+    
+            # Targets that have at least one prediction within tolerance.
+            target_hits = target_valid & (prob_local_max >= thr)
+    
+            # With radius_t=0, matching is independent between frames.
+            # Count-capping per frame prevents extra predictions in one frame
+            # from compensating for missed targets in another frame.
+            if radius_t == 0:
+                reduce_dims = (1, 3, 4)  # retain B and T
+            else:
+                # Temporal neighborhoods can cross frames, so cap per sample.
+                reduce_dims = (1, 2, 3, 4)  # retain B
+    
+            pred_hit_count = pred_hits.sum(dim=reduce_dims)
+            target_hit_count = target_hits.sum(dim=reduce_dims)
+    
+            # One covered target can provide credit for at most one prediction,
+            # and one prediction can recover at most one target.
+            matched = torch.minimum(
+                pred_hit_count,
+                target_hit_count,
+            ).sum().double()
+    
+            pred_total = pred_valid.sum().double()
+    
+            self.tp[i].add_(matched)
+            self.fp[i].add_(pred_total - matched)
+            self.fn[i].add_(target_total - matched)
+    
         self.num_updates += 1
 
     @torch.no_grad()

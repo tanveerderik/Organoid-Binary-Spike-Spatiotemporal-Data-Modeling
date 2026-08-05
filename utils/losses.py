@@ -290,6 +290,87 @@ def variance_floor_loss(x, target_std=0.25, eps=1e-4):
     std = torch.sqrt(x.var(dim=0, unbiased=False) + eps)
     return torch.relu(target_std - std).mean()
 
+
+def soft_code_norm_ceiling_loss(
+    x: torch.Tensor,
+    rms_ceiling: float = 10.0,
+    token_ceiling: float = 14.0,
+    huber_beta: float = 0.10,
+    tail_weight: float = 0.25,
+    eps: float = 1e-8,
+    return_parts: bool = False,
+):
+    """
+    Stabilize code-space scale without forcing every token onto one sphere.
+
+    The RMS term controls the aggregate scale of the active-token population.
+    The tail term prevents a small number of tokens from becoming extreme.
+
+    Both are one-sided: vectors below the ceilings receive no penalty.
+    """
+    if x.numel() == 0:
+        zero = x.new_zeros(())
+        if return_parts:
+            return zero, {
+                "rms": zero,
+                "mean": zero,
+                "std": zero,
+                "p95": zero,
+                "max": zero,
+                "tail_fraction": zero,
+                "rms_loss": zero,
+                "tail_loss": zero,
+            }
+        return zero
+
+    norms = x.float().norm(dim=-1)  # (M,)
+
+    rms = torch.sqrt(norms.square().mean() + eps)
+
+    # Dimensionless excesses make the loss less dependent on code_dim.
+    rms_excess = torch.relu(
+        rms / float(rms_ceiling) - 1.0
+    )
+
+    token_excess = torch.relu(
+        norms / float(token_ceiling) - 1.0
+    )
+
+    # Huber growth is quadratic near the boundary but only linear for
+    # extremely large norms. This avoids an enormous loss if a transient
+    # instability produces norms in the hundreds or thousands.
+    loss_rms = F.smooth_l1_loss(
+        rms_excess,
+        torch.zeros_like(rms_excess),
+        beta=float(huber_beta),
+    )
+
+    loss_tail = F.smooth_l1_loss(
+        token_excess,
+        torch.zeros_like(token_excess),
+        beta=float(huber_beta),
+    )
+
+    loss = loss_rms + float(tail_weight) * loss_tail
+
+    if not return_parts:
+        return loss.to(dtype=x.dtype)
+
+    p95 = torch.quantile(norms.detach(), 0.95)
+
+    return loss.to(dtype=x.dtype), {
+        "rms": rms.detach(),
+        "mean": norms.mean().detach(),
+        "std": norms.std(unbiased=False).detach(),
+        "p95": p95,
+        "max": norms.max().detach(),
+        "tail_fraction": (
+            norms > float(token_ceiling)
+        ).float().mean().detach(),
+        "rms_loss": loss_rms.detach(),
+        "tail_loss": loss_tail.detach(),
+    }
+
 def encoder_isotropy_loss(
     x,
     target_std=0.10,
@@ -309,6 +390,12 @@ def encoder_isotropy_loss(
     # Subsample active tokens for speed
     if x.shape[0] > max_tokens:
         idx = torch.randperm(x.shape[0], device=x.device)[:max_tokens]
+        # idx = torch.randint(
+        #     low=0,
+        #     high=x.shape[0],
+        #     size=(max_tokens,),
+        #     device=x.device,
+        # )
         x = x[idx]
 
     x = x.float()
@@ -528,6 +615,8 @@ def short_gap_excess_loss_from_logits_batch_targets(
     gap_bins=None,
     tau=0.25,
     margin=0.25,
+    lower_margin=0.20,
+    lower_weight=0.50,
     prob_threshold=None,
     confidence_bg=None,
     eps=1e-8,
@@ -614,25 +703,37 @@ def short_gap_excess_loss_from_logits_batch_targets(
     pred_rates = torch.stack(rates, dim=1)  # (B,G)
 
     tgt_rates = target_gap_rates_bg[:, :len(gap_bins)]
-    allowed = (1.0 + margin) * tgt_rates
 
-    excess = torch.relu(pred_rates - allowed).pow(2)
-
+    upper_allowed = (1.0 + margin) * tgt_rates
+    lower_allowed = (1.0 - lower_margin) * tgt_rates
+    
+    upper_error = torch.relu(pred_rates - upper_allowed).pow(2)
+    lower_error = torch.relu(lower_allowed - pred_rates).pow(2)
+    
+    error = upper_error + float(lower_weight) * lower_error
+    
     if confidence_bg is not None:
-        conf = confidence_bg[:, :len(gap_bins)].to(device=excess.device, dtype=excess.dtype)
-        excess = excess * conf
+        conf = confidence_bg[:, :len(gap_bins)].to(
+            device=error.device,
+            dtype=error.dtype,
+        )
+        error = error * conf
         denom = conf.sum().clamp_min(1.0)
-        loss = excess.sum() / denom
+        loss = error.sum() / denom
     else:
-        loss = excess.mean()
+        conf = None
+        loss = error.mean()
 
     if return_parts:
         return {
             "loss": loss,
             "pred_gap_rates": pred_rates.detach(),
-            "allowed_gap_rates": allowed.detach(),
+            "allowed_gap_rates": upper_allowed.detach(),
+            "lower_allowed_gap_rates": lower_allowed.detach(),
             "target_gap_rates": tgt_rates.detach(),
-            "confidence": None if confidence_bg is None else conf.detach(),
+            "upper_error": upper_error.detach(),
+            "lower_error": lower_error.detach(),
+            "confidence": None if conf is None else conf.detach(),
             "gap_bins": gap_bins,
         }
 
@@ -655,7 +756,6 @@ def soft_active_site_ratio_from_logits(
       matching the hard version based on active-site COUNT / max_active_site.
 
     Notes:
-    - soft temporal OR is approximated by logsumexp over time in logit space
     - site_active is a soft indicator in [0,1] for whether each spatial site
       was active at least once
     - final ratio is SUM over sites divided by min(H*W, max_active_site)
@@ -747,8 +847,7 @@ def ctx_features_soft_from_logits(
        var_x, var_y, var_t,
        cov_xy, cov_xt, cov_yt,
        active_site_ratio,
-       temporal_trend_score]
-    """
+       temporal_trend]"""
     if logits_b1thw.dim() != 5:
         raise ValueError(f"Expected (B,1,T,H,W), got {tuple(logits_b1thw.shape)}")
 
@@ -797,24 +896,49 @@ def ctx_features_soft_from_logits(
         d4 = (p0 * dx * dy).sum(dim=(1, 2, 3)) / mass
         d5 = (p0 * dx * dt).sum(dim=(1, 2, 3)) / mass
         d6 = (p0 * dy * dt).sum(dim=(1, 2, 3)) / mass
-
+        
+        # 7) Soft active spatial-site ratio.
         d7 = soft_active_site_ratio_from_logits(
-            logits_f,
-            tau_prob=tau,
+            logits_b1thw=logits_f,
+            tau_prob=max(1e-6, float(tau)),
             prob_threshold=prob_threshold,
-        ).float()
-
-        frame_mean = p.mean(dim=(1, 3, 4))  # (B,T)
-        d8 = temporal_trend_score_torch(frame_mean, eps_time=eps_time).float()
-
-        out = torch.stack([d0, d1, d2, d3, d4, d5, d6, d7, d8], dim=1)
-
-        # Fully blank pathological case: keep moments finite.
+            max_active_site=1024.0,
+            clamp_max=True,
+        )
+        
+        # 8) Scale-free temporal activity trend.
+        frame_mean = p0.mean(dim=(2, 3))  # (B,T)
+        
+        d8 = temporal_trend_score_torch(
+            frame_mean_bt=frame_mean,
+            eps_time=eps_time,
+        )
+        
+        out = torch.stack(
+            [
+                d0,
+                d1,
+                d2,
+                d3,
+                d4,
+                d5,
+                d6,
+                d7,
+                d8,
+            ],
+            dim=1,
+        )
+        
+        # Fully blank pathological case: keep shape/trend statistics finite.
         blank = mass_raw <= eps_prob
+        
         if blank.any():
-            out[blank, 1:9] = 0.0
-
+            out[blank, 1:7] = 0.0
+            out[blank, 7] = 0.0
+            out[blank, 8] = 0.0
+        
         return out
+
 
 
 def _patchify_b1thw(
@@ -884,9 +1008,12 @@ def _patch_moments(
     Calculate one statistics vector for each selected patch.
 
     Input:
-        patch_prob_mp: (M,P)
+        patch_prob_mp: (M, P)
 
-    Output Features:
+    Output:
+        features: (M, 9)
+
+    Feature layout:
         0: log density
         1: variance x
         2: variance y
@@ -894,9 +1021,10 @@ def _patch_moments(
         4: covariance xy
         5: covariance xt
         6: covariance yt
+        7: active spatial-site ratio
+        8: temporal trend
 
-    Coordinates are normalized independently inside each patch
-    to [-1,1].
+    Coordinates are normalized independently inside each patch to [-1, 1].
     """
     if patch_prob_mp.dim() != 2:
         raise ValueError(
@@ -913,8 +1041,21 @@ def _patch_moments(
             f"got {patch_prob_mp.size(1)}"
         )
 
-    p = patch_prob_mp.float().clamp_min(0.0)
+    # Keep all moment calculations in FP32.
+    p = patch_prob_mp.float().clamp(
+        min=0.0,
+        max=1.0,
+    )
+
     device = p.device
+
+    # (M, pT, pH, pW)
+    p4 = p.reshape(
+        -1,
+        pT,
+        pH,
+        pW,
+    )
 
     tt = torch.linspace(
         -1.0,
@@ -923,6 +1064,7 @@ def _patch_moments(
         device=device,
         dtype=torch.float32,
     )
+
     yy = torch.linspace(
         -1.0,
         1.0,
@@ -930,6 +1072,7 @@ def _patch_moments(
         device=device,
         dtype=torch.float32,
     )
+
     xx = torch.linspace(
         -1.0,
         1.0,
@@ -945,24 +1088,70 @@ def _patch_moments(
         indexing="ij",
     )
 
-    tf = t3.reshape(1, patch_volume)
-    yf = y3.reshape(1, patch_volume)
-    xf = x3.reshape(1, patch_volume)
+    tf = t3.reshape(
+        1,
+        patch_volume,
+    )
 
-    mass = p.sum(dim=1).clamp_min(eps)
+    yf = y3.reshape(
+        1,
+        patch_volume,
+    )
+
+    xf = x3.reshape(
+        1,
+        patch_volume,
+    )
+
+    mass_raw = p.sum(dim=1)
+    mass = mass_raw.clamp_min(eps)
+
     density = p.mean(dim=1).clamp_min(eps)
 
-    mean_x = (p * xf).sum(dim=1) / mass
-    mean_y = (p * yf).sum(dim=1) / mass
-    mean_t = (p * tf).sum(dim=1) / mass
+    mean_x = (
+        (p * xf).sum(dim=1)
+        / mass
+    )
 
-    ex2 = (p * xf.square()).sum(dim=1) / mass
-    ey2 = (p * yf.square()).sum(dim=1) / mass
-    et2 = (p * tf.square()).sum(dim=1) / mass
+    mean_y = (
+        (p * yf).sum(dim=1)
+        / mass
+    )
 
-    exy = (p * xf * yf).sum(dim=1) / mass
-    ext = (p * xf * tf).sum(dim=1) / mass
-    eyt = (p * yf * tf).sum(dim=1) / mass
+    mean_t = (
+        (p * tf).sum(dim=1)
+        / mass
+    )
+
+    ex2 = (
+        (p * xf.square()).sum(dim=1)
+        / mass
+    )
+
+    ey2 = (
+        (p * yf.square()).sum(dim=1)
+        / mass
+    )
+
+    et2 = (
+        (p * tf.square()).sum(dim=1)
+        / mass
+    )
+
+    exy = (
+        (p * xf * yf).sum(dim=1)
+        / mass
+    )
+
+    ext = (
+        (p * xf * tf).sum(dim=1)
+        / mass
+    )
+
+    eyt = (
+        (p * yf * tf).sum(dim=1)
+        / mass
+    )
 
     var_x = (
         ex2 - mean_x.square()
@@ -976,9 +1165,17 @@ def _patch_moments(
         et2 - mean_t.square()
     ).clamp_min(0.0)
 
-    cov_xy = exy - mean_x * mean_y
-    cov_xt = ext - mean_x * mean_t
-    cov_yt = eyt - mean_y * mean_t
+    cov_xy = (
+        exy - mean_x * mean_y
+    )
+
+    cov_xt = (
+        ext - mean_x * mean_t
+    )
+
+    cov_yt = (
+        eyt - mean_y * mean_t
+    )
 
     log_density = torch.log(
         density
@@ -987,6 +1184,31 @@ def _patch_moments(
         max=0.0,
     )
 
+    # A spatial site is considered softly active when it is active at
+    # least once within the temporal extent of the patch.
+    #
+    # Because patch_prob_mp is already produced by soft_binary_from_logits(),
+    # temporal max is a direct soft approximation to temporal OR.
+    site_active = p4.amax(
+        dim=1,
+    )  # (M, pH, pW)
+
+    active_site_ratio = site_active.mean(
+        dim=(1, 2),
+    ).clamp(
+        min=0.0,
+        max=1.0,
+    )
+
+    # Mean soft activity per frame.
+    frame_mean = p4.mean(
+        dim=(2, 3),
+    )  # (M, pT)
+
+    temporal_trend = temporal_trend_score_torch(
+        frame_mean_bt=frame_mean,
+        eps_time=eps,
+    )
 
     features = (
         log_density,
@@ -996,12 +1218,22 @@ def _patch_moments(
         cov_xy,
         cov_xt,
         cov_yt,
+        active_site_ratio,
+        temporal_trend,
     )
 
-    return torch.stack(
+    out = torch.stack(
         features,
         dim=1,
     )
+
+    # Keep pathological blank-patch outputs finite.
+    blank = mass_raw <= eps
+
+    if blank.any():
+        out[blank, 1:9] = 0.0
+
+    return out
 
 
 def local_moment_field_loss(
@@ -1011,23 +1243,52 @@ def local_moment_field_loss(
     tau: float = 0.25,
     prob_threshold: Optional[float] = None,
     min_active_spikes: int = 1,
-    min_shape_spikes: int = 3,
+    min_shape_spikes: int = 5,
+    min_trend_spikes: int = 6,
+    min_trend_frames: int = 3,
     eps: float = 1e-6,
 ) -> torch.Tensor:
     """
     Match statistics independently inside non-overlapping patches.
 
-    Density is supervised for every target patch containing at least
-    min_active_spikes.
+    Feature validity rules:
 
-    Variances and covariances are supervised only when a target patch
-    contains at least min_shape_spikes. Shape statistics calculated
-    from one or two spikes are not sufficiently informative.
+    Patches with at least min_active_spikes:
+        - log density
+        - active spatial-site ratio
 
-    Blank patches are not included. Existing reconstruction, outside,
-    blank-token, and blank-patch losses already constrain false-positive
-    activity in blank regions.
+    Patches with at least min_shape_spikes:
+        - variance x
+        - variance y
+        - variance t
+        - covariance xy
+        - covariance xt
+        - covariance yt
+
+    Patches with at least min_trend_spikes and min_trend_frames:
+        - temporal trend
+
+    Blank target patches are excluded. Existing reconstruction, outside,
+    blank-token, and blank-patch losses constrain false-positive activity
+    in blank regions.
     """
+    if logits_b1thw.shape != target_b1thw.shape:
+        raise ValueError(
+            f"logits shape {tuple(logits_b1thw.shape)} "
+            f"does not match target shape {tuple(target_b1thw.shape)}"
+        )
+
+    if logits_b1thw.dim() != 5 or logits_b1thw.size(1) != 1:
+        raise ValueError(
+            "Expected logits and target with shape (B,1,T,H,W), "
+            f"got {tuple(logits_b1thw.shape)}"
+        )
+
+    pT, pH, pW = map(
+        int,
+        patch_size,
+    )
+
     logit_patches = _patchify_b1thw(
         logits_b1thw,
         patch_size,
@@ -1040,28 +1301,32 @@ def local_moment_field_loss(
         )
 
         target_counts = target_patches.sum(
-            dim=-1
+            dim=-1,
         )
 
         active_mask = (
-            target_counts >= int(min_active_spikes)
+            target_counts
+            >= int(min_active_spikes)
         )
 
     # Differentiable zero for an entirely blank batch.
     if not bool(active_mask.any()):
         return logits_b1thw.sum() * 0.0
 
-    # Only calculate predicted moments for target-active patches.
+    # Only calculate predicted statistics for target-active patches.
     pred_prob = soft_binary_from_logits(
         logit_patches[active_mask].float(),
-        tau=max(float(tau), eps),
+        tau=max(
+            float(tau),
+            eps,
+        ),
         prob_threshold=prob_threshold,
         eps=eps,
     )
 
     target_prob = target_patches[
         active_mask
-    ]
+    ].float()
 
     pred_features = _patch_moments(
         pred_prob,
@@ -1080,36 +1345,99 @@ def local_moment_field_loss(
             active_mask
         ]
 
+        # Reshape selected target patches to recover temporal support.
+        target_active_4d = target_prob.reshape(
+            -1,
+            pT,
+            pH,
+            pW,
+        )
+
+        # Count frames containing at least one target spike.
+        active_frame_counts = (
+            target_active_4d.sum(
+                dim=(2, 3),
+            ) > 0
+        ).sum(
+            dim=1,
+        )
+
+    if pred_features.shape[1] != 9:
+        raise RuntimeError(
+            "Expected 9 patch-field features, "
+            f"got shape {tuple(pred_features.shape)}"
+        )
+
+    if target_features.shape != pred_features.shape:
+        raise RuntimeError(
+            "Predicted and target patch-feature shapes differ: "
+            f"{tuple(pred_features.shape)} vs "
+            f"{tuple(target_features.shape)}"
+        )
+
     per_feature = F.smooth_l1_loss(
         pred_features,
         target_features,
         reduction="none",
     )
 
-    feature_mask = torch.ones_like(
-        per_feature
+    active_valid = (
+        active_counts
+        >= int(min_active_spikes)
+    ).to(
+        dtype=per_feature.dtype,
+    )
+
+    shape_valid = (
+        active_counts
+        >= int(min_shape_spikes)
+    ).to(
+        dtype=per_feature.dtype,
+    )
+
+    trend_valid = (
+        (
+            active_counts
+            >= int(min_trend_spikes)
+        )
+        & (
+            active_frame_counts
+            >= int(min_trend_frames)
+        )
+    ).to(
+        dtype=per_feature.dtype,
+    )
+
+    feature_mask = torch.zeros_like(
+        per_feature,
     )
 
     # Feature layout:
-    #   density | variance/covariance
+    #   0   : log density
+    #   1:7 : variances and covariances
+    #   7   : active spatial-site ratio
+    #   8   : temporal trend
 
-    shape_valid = (
-        active_counts >= int(min_shape_spikes)
-    ).to(
-        per_feature.dtype
+    # Reliable for every target-active patch.
+    feature_mask[:, 0] = active_valid
+    feature_mask[:, 7] = active_valid
+
+    # Require stronger support for variances and covariances.
+    feature_mask[:, 1:7] = shape_valid.unsqueeze(
+        dim=1,
     )
 
-    feature_mask[
-        :,
-        1:,
-    ] = shape_valid.unsqueeze(1)
+    # Require both enough spikes and enough occupied frames.
+    feature_mask[:, 8] = trend_valid
+
+    denominator = feature_mask.sum().clamp_min(
+        1.0,
+    )
 
     return (
-        (per_feature * feature_mask).sum()
-        / feature_mask.sum().clamp_min(1.0)
-    )
-
-
+        per_feature
+        * feature_mask
+    ).sum() / denominator
 
 def ctx_loss_soft(
     logits_b1thw: torch.Tensor,

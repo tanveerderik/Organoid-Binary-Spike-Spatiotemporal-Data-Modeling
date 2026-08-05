@@ -82,11 +82,28 @@ from .utils.constants import (
 
 # Run any subset sequentially. Examples:
 #   (1,)       -> train context-agnostic VQVAE only
-#   (2,)       -> load stage-1 ckpt, train context-conditioned decoder only
+#   (2,)       -> load stage-1 ckpt, learn exact continuous hull decoding + context
 #   (1, 2, 3)  -> run the whole pipeline sequentially
 #   (0,)     -> run spatial-map pretraining only
-TRAIN_STAGES = (1,2,3)        # 0,1,2,3
-EVAL_STAGES  = (1,2,3)   # 0,1,2,3
+TRAIN_STAGES = (3,)        # 0,1,2,3
+EVAL_STAGES  = (3,)   # 0,1,2,3
+
+# Stage-2 continuous quantization.
+#
+# Stage 2A:
+#   project the frozen encoder residual onto the convex hull of the selected
+#   z1 parent's frozen z2 children; train the decoder on that fixed geometry.
+# Stage 2B:
+#   train the optional alpha adapter to reproduce the same geometric projection.
+#   The decoder is frozen and does not define the adapter target.
+# Stage 2C:
+#   freeze the continuous mapping and decoder backbone; train only zero-gated
+#   decoder cross-attention and context projections.
+STAGE2_PHASES = ("2a", "2c")
+STAGE2_CONTINUOUS_RESIDUAL = True
+STAGE2A_EPOCHS = 150
+STAGE2B_EPOCHS = 50
+STAGE2C_EPOCHS = 50
 
 RUN_EVAL = True
 RUN_VIZ  = True
@@ -105,8 +122,12 @@ CKPT_DIR.mkdir(parents=True, exist_ok=True)
 CKPTS = {
     "stage1_best": CKPT_DIR / "vqvae_stage1_best.pt",
     "stage1_last": CKPT_DIR / "vqvae_stage1_last.pt",
-    "stage2_best": CKPT_DIR / "vqvae_stage2_best.pt",
-    "stage2_last": CKPT_DIR / "vqvae_stage2_last.pt",
+    "stage2a_best": CKPT_DIR / "vqvae_stage2a_convex_best.pt",
+    "stage2a_last": CKPT_DIR / "vqvae_stage2a_convex_last.pt",
+    "stage2b_best": CKPT_DIR / "vqvae_stage2b_projector_best.pt",
+    "stage2b_last": CKPT_DIR / "vqvae_stage2b_projector_last.pt",
+    "stage2_best": CKPT_DIR / "vqvae_stage2_convex_best.pt",
+    "stage2_last": CKPT_DIR / "vqvae_stage2_convex_last.pt",
     
     "motif_prior_best": CKPT_DIR / "motif_prior_best.pt",
     "activity_prior_best": CKPT_DIR / "activity_prior_best.pt",
@@ -115,7 +136,9 @@ CKPTS = {
 
 REPORTS = {
     "stage1": Path("reports/training_report_vqvae_stage1.json"),
-    "stage2": Path("reports/training_report_vqvae_stage2.json"),
+    "stage2a": Path("reports/training_report_vqvae_stage2a_convex.json"),
+    "stage2b": Path("reports/training_report_vqvae_stage2b_projector.json"),
+    "stage2": Path("reports/training_report_vqvae_stage2c_convex.json"),
 
     "prior_motif": Path("reports/training_report_prior_3A_motif.json"),
     "prior_activity": Path("reports/training_report_prior_3B_activity.json"),
@@ -131,7 +154,7 @@ VIZ_ROOTS = {
 patch_size = (6, 15, 14)
 temporal_crop = 6000
 temporal_pool = 120
-batch_size = 4
+batch_size = 16
 grad_accum_steps = 8
 num_workers = 2
 per_assay_quota_stage12 = 30
@@ -143,6 +166,9 @@ cache_write_prob = 1.0
 
 # Model
 num_codes = (32, 8)
+
+
+
 num_assays_for_emb = 1000
 dim_assay_for_emb = 64
 max_viz_samples = 1000
@@ -155,8 +181,8 @@ gap_bins = list(
 )
 
 # Tolerance for spike location in a voxel (for training loss and val metrics)
-recon_tolerance = (2, 2, 2)
-metric_tolerance = (0, 1, 1)
+recon_tolerance = (1, 1, 1)
+metric_tolerance = (1, 1, 1)
 
 # Spatial map usage after stage 0.5.
 # True means the pretrained assay-specific spatial suppressive bias remains active.
@@ -346,11 +372,11 @@ def freeze_for_stage(model: nn.Module, stage: float):
       - Freeze context embedders and spatial map.
       - Decoder cross-attn OFF.
 
-    Stage 2: context-conditioned decoder calibration.
-      - Train decoder and decoder-context branches.
-      - Allow tiny adaptation of the final encoder block and to_code.
-      - Keep the hierarchical EMA codebooks fixed.
-      - Keep the codebook-to-decoder interface fixed.
+    Stage 2A: context-free continuous decoder calibration.
+      - Train the decoder on the exact geometric convex projection.
+      - Keep decoder cross-attention and context branches disabled/frozen.
+      - Keep encoder, to_code, and hierarchical EMA codebooks fixed.
+      - Keep the optional amortized alpha adapter frozen.
       - Keep the pretrained global embedder and spatial map fixed.
 
     Stage 3: prior learning.
@@ -359,6 +385,8 @@ def freeze_for_stage(model: nn.Module, stage: float):
     set_all_trainable(model, False)
 
     if stage == 1:
+        model.use_continuous_residual = False
+        model.continuous_residual_sample_mix = 0.0
         set_decoder_cross_attention(model, enabled=False, layers=())
         for name in ["stem", "patch_embed", "sparse_encoder", "to_code", "vq", "code_to_dec",
                      "dec_blocks", "dec_norm", "patch_renderer"]:
@@ -385,42 +413,47 @@ def freeze_for_stage(model: nn.Module, stage: float):
     elif stage == 2:
         set_decoder_cross_attention(
             model,
-            enabled=True,
-            layers=(0,),
+            enabled=False,
+            layers=(),
         )
     
-        # Main Stage-2 components.
+        # Stage 2A decoder components. Context injection remains off.
         for name in [
             "dec_blocks",
             "dec_norm",
             "patch_renderer",
-            "local_embedder",
-            "local_to_dec_ctx",
-            "global_to_dec_ctx",
         ]:
             set_requires_grad(
                 getattr(model, name, None),
                 True,
             )
     
-        # Slow motif refinement.
-        set_requires_grad(
-            model.sparse_encoder.blocks[-1],
-            True,
-        )
-        set_requires_grad(
-            model.to_code,
-            True,
-        )
-    
-        # Keep this interface anchored initially.
+        model.use_continuous_residual = bool(STAGE2_CONTINUOUS_RESIDUAL)
+        model.continuous_residual_sample_mix = 0.0
+        model.continuous_residual_projector.use_alpha_adapter = False
+        model.continuous_residual_projector.decode_with_projection_target = True
+
+        # Decoder adaptation to continuous points includes the first linear
+        # code-space interface.  The z1/z2 codebook geometry itself stays fixed.
         set_requires_grad(
             getattr(model, "code_to_dec", None),
-            False,
+            True,
         )
-    
+
         set_requires_grad(
             getattr(model, "global_embedder", None),
+            False,
+        )
+        set_requires_grad(
+            getattr(model, "local_embedder", None),
+            False,
+        )
+        set_requires_grad(
+            getattr(model, "local_to_dec_ctx", None),
+            False,
+        )
+        set_requires_grad(
+            getattr(model, "global_to_dec_ctx", None),
             False,
         )
         set_requires_grad(
@@ -431,20 +464,22 @@ def freeze_for_stage(model: nn.Module, stage: float):
         if hasattr(model, "activity_type_offset"):
             model.activity_type_offset.requires_grad = False
     
-        # Stage-2 codebook refinement:
-        # codebook tensors remain excluded from gradient optimization,
-        # but manual EMA updates are enabled.
+        # Freeze the complete Stage-1 codebook geometry.  Continuousness is
+        # introduced between quantization and decoding, not by moving centroids.
         for p in model.vq.tree_embeds:
             p.requires_grad = False
-    
-        model.vq.decay = 0.999
-        model.vq.freeze_codebook_updates = False
-    
-        # Do not perform destructive code replacement during refinement.
+
+        model.vq.freeze_codebook_updates = True
         model.vq.dead_code_restart_every = 0
         model.vq.duplicate_restart_every = 0
 
     elif stage == 3:
+        # Stage 3 uses the corrected exact convex projection to produce alpha
+        # training targets. The VQVAE remains completely frozen.
+        model.use_continuous_residual = True
+        model.continuous_residual_sample_mix = 0.0
+        model.continuous_residual_projector.use_alpha_adapter = False
+        model.continuous_residual_projector.decode_with_projection_target = True
         set_decoder_cross_attention(model, enabled=True, layers=(0,))
         set_all_trainable(model, False)
         model.eval()
@@ -455,6 +490,92 @@ def freeze_for_stage(model: nn.Module, stage: float):
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     n_total = sum(p.numel() for p in model.parameters())
     print(f"Stage {stage}: trainable params = {n_trainable:,} / {n_total:,}")
+
+
+def freeze_for_stage2b(model: nn.Module):
+    """
+    Train only the optional amortized alpha projector against the fixed
+    geometric convex projection.  The decoder and codebook geometry are frozen.
+    """
+    freeze_for_stage(model, 2)
+
+    projector = model.continuous_residual_projector
+    projector.use_alpha_adapter = True
+    projector.decode_with_projection_target = True
+
+    # The exact projection remains the training-time decoder input.  Only the
+    # adapter learns to reproduce it through loss_cont_projection.
+    set_requires_grad(model.code_to_dec, False)
+    set_requires_grad(model.dec_blocks, False)
+    set_requires_grad(model.dec_norm, False)
+    set_requires_grad(model.patch_renderer, False)
+    set_requires_grad(projector.alpha_adapter, True)
+    set_requires_grad(projector.hull_scale_adapter, False)
+
+    set_requires_grad(model.stem, False)
+    set_requires_grad(model.patch_embed, False)
+    set_requires_grad(model.sparse_encoder, False)
+    set_requires_grad(model.to_code, False)
+    for parameter in model.vq.parameters():
+        parameter.requires_grad = False
+
+    model.vq.freeze_codebook_updates = True
+    model.vq.dead_code_restart_every = 0
+    model.vq.duplicate_restart_every = 0
+
+    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    n_total = sum(p.numel() for p in model.parameters())
+    print(f"Stage 2B: trainable params = {n_trainable:,} / {n_total:,}")
+
+
+def freeze_for_stage2c(model: nn.Module):
+    """
+    Freeze encoder, codebooks, alpha projector, and decoder backbone.  Train
+    only the context projections and zero-gated cross-attention at decoder
+    layer 0.
+    """
+    freeze_for_stage(model, 2)
+
+    projector = model.continuous_residual_projector
+    projector.use_alpha_adapter = False
+    projector.decode_with_projection_target = True
+    set_requires_grad(projector.alpha_adapter, False)
+    set_requires_grad(projector.hull_scale_adapter, False)
+
+    set_decoder_cross_attention(model, enabled=True, layers=(0,))
+
+    # Freeze the complete Stage-2A decoder, then reopen only the context branch.
+    set_requires_grad(model.code_to_dec, False)
+    set_requires_grad(model.dec_blocks, False)
+    set_requires_grad(model.dec_norm, False)
+    set_requires_grad(model.patch_renderer, False)
+
+    set_requires_grad(model.local_embedder, True)
+    set_requires_grad(model.local_to_dec_ctx, True)
+    set_requires_grad(model.global_to_dec_ctx, True)
+    set_requires_grad(model.global_embedder, False)
+    set_requires_grad(model.spatial_map_prior, False)
+
+    block0 = model.dec_blocks[0]
+    set_requires_grad(block0.norm2, True)
+    set_requires_grad(block0.norm_ctx, True)
+    set_requires_grad(block0.cross_attn, True)
+    block0.ctx_gate.requires_grad = True
+
+    set_requires_grad(model.stem, False)
+    set_requires_grad(model.patch_embed, False)
+    set_requires_grad(model.sparse_encoder, False)
+    set_requires_grad(model.to_code, False)
+    for parameter in model.vq.parameters():
+        parameter.requires_grad = False
+
+    model.vq.freeze_codebook_updates = True
+    model.vq.dead_code_restart_every = 0
+    model.vq.duplicate_restart_every = 0
+
+    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    n_total = sum(p.numel() for p in model.parameters())
+    print(f"Stage 2C: trainable params = {n_trainable:,} / {n_total:,}")
 
 
 def make_optimizer(model: nn.Module, lr: float, weight_decay: float):
@@ -617,6 +738,8 @@ def common_fit_kwargs(model):
         isi_gap_bins=gap_bins,
         isi_tau=0.25,
         isi_margin=0.25,
+        isi_lower_margin=0.20,
+        isi_lower_weight=0.50,
         lambda_isi=1e-2,
         
         memory_tok=getattr(model, "memory_tok", None),
@@ -649,6 +772,22 @@ def select_ckpt(stage: int, prefer_best: bool = True) -> Path:
     if best.exists():
         return best
 
+    # Earlier Stage-2 phases remain valid fallbacks when later phases have not
+    # run. Prefer the most advanced available phase.
+    if stage == 2:
+        if prefer_best and CKPTS["stage2b_best"].exists():
+            return CKPTS["stage2b_best"]
+        if CKPTS["stage2b_last"].exists():
+            return CKPTS["stage2b_last"]
+        if CKPTS["stage2b_best"].exists():
+            return CKPTS["stage2b_best"]
+        if prefer_best and CKPTS["stage2a_best"].exists():
+            return CKPTS["stage2a_best"]
+        if CKPTS["stage2a_last"].exists():
+            return CKPTS["stage2a_last"]
+        if CKPTS["stage2a_best"].exists():
+            return CKPTS["stage2a_best"]
+
     raise FileNotFoundError(f"No checkpoint found for stage {stage}: {best} or {last}")
     
    
@@ -667,9 +806,9 @@ def run_stage1(model, train_loader, val_loader, blank_logit_threshold):
 
     freeze_for_stage(model, 1)
 
-    # Stage 1 begins at 0.5 for both the deployed value and EMA.
+    # Fixed surrogate boundary for all threshold-aware training losses.
+    # Validation Best-F1 thresholds are recorded but never fed back.
     model._set_training_prob_threshold(0.5)
-    model._set_training_threshold_ema(0.5)
 
     n_epoch = 300
     
@@ -715,14 +854,15 @@ def run_stage1(model, train_loader, val_loader, blank_logit_threshold):
         cfg_ctx_start_epoch=10**9,
         cfg_ctx_warmup_epochs=1,
         blank_logit_margin=blank_logit_threshold,
+        
+        lambda_code_norm=0.10,
+        code_norm_rms_ceiling=10.0,
+        code_norm_token_ceiling=14.0,
 
         # Spike discovery but avoid permanent overactivation.
         pos_weight_start=100.0,
-        pos_weight_end=5.0,
+        pos_weight_end=1.0,
         pos_decay_epochs=100,
-        training_threshold_update_every=30,
-        training_threshold_ema_alpha=0.5,
-
 
         save_start_epoch = 125,
         **common_fit_kwargs(model),
@@ -734,87 +874,21 @@ def run_stage1(model, train_loader, val_loader, blank_logit_threshold):
     return report
 
 
-def run_stage2(model, train_loader, val_loader, blank_logit_threshold):
-    print("\n" + "=" * 80)
-    print("STAGE 2: context-conditioned decoder calibration")
-    print("=" * 80)
+def _stage2_ctx_schedule():
+    return {
+        0: 1,   # log_mean_firing_density
+        7: 1,   # active_site_ratio
+        1: 5,   # var_x
+        2: 5,   # var_y
+        3: 5,   # var_t
+        8: 10,  # temporal_trend
+        4: 5,   # cov_xy
+        5: 5,   # cov_xt
+        6: 5,   # cov_yt
+    }
 
-    map_location = next(model.parameters()).device
-
-    # Get the final threshold state from the last Stage 1 epoch.
-    stage1_endpoint_ckpt = select_ckpt(1, prefer_best=False)
-    model.load_checkpoint(
-        str(stage1_endpoint_ckpt),
-        map_location=map_location,
-    )
-
-    stage1_endpoint_threshold = float(
-        model.training_prob_threshold.item()
-    )
-    stage1_endpoint_ema = float(
-        model.training_threshold_ema.item()
-    )
-
-    # Load the best Stage 1 model weights.
-    stage1_best_ckpt = select_ckpt(1, prefer_best=True)
-    model.load_checkpoint(
-        str(stage1_best_ckpt),
-        map_location=map_location,
-    )
-
-    # Restore the final moving-threshold state.
-    model._set_training_prob_threshold(
-        stage1_endpoint_threshold
-    )
-    model._set_training_threshold_ema(
-        stage1_endpoint_ema
-    )
-
-    print(
-        f"Loaded Stage 1 best weights from: {stage1_best_ckpt}\n"
-        f"Stage 2 starting threshold: "
-        f"{stage1_endpoint_threshold:.4f}\n"
-        f"Stage 2 starting threshold EMA: "
-        f"{stage1_endpoint_ema:.4f}"
-    )
-
-    freeze_for_stage(model, 2)
-
-    n_epoch = 150
-    
-    
-    optimizer = torch.optim.AdamW(
-        [
-            {
-                "params": (
-                    list(model.local_embedder.parameters())
-                    + list(model.local_to_dec_ctx.parameters())
-                    + list(model.global_to_dec_ctx.parameters())
-                ),
-                "lr": 1e-4,
-                "weight_decay": 1e-4,
-            },
-            {
-                "params": (
-                    list(model.dec_blocks.parameters())
-                    + list(model.dec_norm.parameters())
-                    + list(model.patch_renderer.parameters())
-                ),
-                "lr": 1e-5,
-                "weight_decay": 1e-4,
-            },
-            {
-                "params": (
-                    list(model.sparse_encoder.blocks[-1].parameters())
-                    + list(model.to_code.parameters())
-                ),
-                "lr": 1e-6,
-                "weight_decay": 1e-4,
-            },
-        ]
-    )     
-    
-    def stage2_lr_multiplier(epoch):
+def _make_stage2_scheduler(optimizer, n_epoch):
+    def multiplier(epoch):
         progress = min(
             1.0,
             max(0.0, epoch / float(max(1, n_epoch))),
@@ -823,16 +897,289 @@ def run_stage2(model, train_loader, val_loader, blank_logit_threshold):
             1.0 + math.cos(math.pi * progress)
         )
         return 0.10 + 0.90 * cosine
-    
-    
-    scheduler = torch.optim.lr_scheduler.LambdaLR(
+
+    return torch.optim.lr_scheduler.LambdaLR(
         optimizer,
         lr_lambda=[
-            stage2_lr_multiplier,
-            stage2_lr_multiplier,
-            stage2_lr_multiplier,
+            multiplier
+            for _ in optimizer.param_groups
         ],
     )
+
+
+def run_stage2a(model, train_loader, val_loader, blank_logit_threshold):
+    print("\n" + "=" * 80)
+    print("STAGE 2A: exact convex projection decoder calibration")
+    print("=" * 80)
+
+    map_location = next(model.parameters()).device
+    stage1_best_ckpt = select_ckpt(1, prefer_best=True)
+    model.load_checkpoint(
+        str(stage1_best_ckpt),
+        map_location=map_location,
+    )
+    model._set_training_prob_threshold(0.5)
+    freeze_for_stage(model, 2)
+
+    projector = model.continuous_residual_projector
+    projector.use_alpha_adapter = False
+    projector.decode_with_projection_target = True
+
+    print(
+        f"Loaded Stage 1 best weights from: {stage1_best_ckpt}\n"
+        "Stage 2A uses the Euclidean projection of z_e-z1 onto "
+        "conv{z2_1,...,z2_K}. Encoder, to_code, z1, and z2 are frozen; "
+        "the decoder adapts to this fixed continuous geometry."
+    )
+
+    n_epoch = int(STAGE2A_EPOCHS)
+    stage2a_params = [
+        parameter
+        for parameter in model.parameters()
+        if parameter.requires_grad
+    ]
+    if not stage2a_params:
+        raise RuntimeError("Stage 2A has no trainable decoder parameters.")
+
+    optimizer = torch.optim.AdamW(
+        [
+            {
+                "params": stage2a_params,
+                "lr": 1e-5,
+                "weight_decay": 1e-4,
+            },
+        ]
+    )
+    scheduler = _make_stage2_scheduler(optimizer, n_epoch)
+
+    report = fit_vqvae(
+        model,
+        train_loader,
+        val_loader,
+        optimizer,
+        scheduler,
+        epochs=n_epoch,
+        ckpt_best_path=str(CKPTS["stage2a_best"]),
+        ckpt_last_path=str(CKPTS["stage2a_last"]),
+        early_stop_patience=30,
+        val_metric_name="AUPRC_tol_cond",
+        val_metric_goal="max",
+        use_ROI_mask=False,
+        lambda_vq=0.0,
+        lambda_ctx=1e-1,
+        lambda_ctx_field=1e-2,
+        ctx_start_epoch=0,
+        ctx_warmup_epochs=20,
+        ctx_epoch_schedule=_stage2_ctx_schedule(),
+        cfg_ctx_drop_start=0.0,
+        cfg_ctx_drop_end=0.0,
+        cfg_ctx_start_epoch=10**9,
+        cfg_ctx_warmup_epochs=1,
+        pos_weight_start=1.0,
+        pos_weight_end=1.0,
+        pos_decay_epochs=1,
+        blank_logit_margin=blank_logit_threshold,
+        lambda_cont_projection=0.0,
+        lambda_cont_parent_margin=0.0,
+        continuous_sample_start_epoch=10**9,
+        continuous_sample_warmup_epochs=1,
+        continuous_sample_mix_start=0.0,
+        continuous_sample_mix_end=0.0,
+        continuous_gumbel_tau_start=1.0,
+        continuous_gumbel_tau_end=1.0,
+        continuous_posterior_temperature=0.35,
+        save_start_epoch=1,
+        **{
+            **common_fit_kwargs(model),
+            "lambda_isi": 1e-1,
+            "lambda_sp_pixel": 1e-3,
+            "lambda_enc_var": 0.0,
+            "lambda_code_norm": 0.0,
+            "level2_start_epoch": 1,
+            "level2_full_loss_epoch": 1,
+        },
+    )
+
+    save_json_report(report, REPORTS["stage2a"])
+    return report
+
+
+def _select_stage2a_ckpt():
+    for path in (
+        CKPTS["stage2a_best"],
+        CKPTS["stage2a_last"],
+    ):
+        if path.exists():
+            return path
+
+    raise FileNotFoundError(
+        "The exact-convex Stage 2A checkpoint is missing. Run with "
+        "STAGE2_PHASES=('2a', '2c') first. Old decoder-defined Stage-2 "
+        "checkpoints are intentionally not reused for this geometry."
+    )
+
+
+def run_stage2b(model, train_loader, val_loader, blank_logit_threshold):
+    print("\n" + "=" * 80)
+    print("STAGE 2B: amortized convex projector fitting")
+    print("=" * 80)
+
+    map_location = next(model.parameters()).device
+    stage2a_ckpt = _select_stage2a_ckpt()
+    model.load_checkpoint(
+        str(stage2a_ckpt),
+        map_location=map_location,
+    )
+    model._set_training_prob_threshold(0.5)
+    freeze_for_stage2b(model)
+
+    print(
+        f"Loaded Stage 2A best weights from: {stage2a_ckpt}\n"
+        "Only the alpha adapter is trainable. Its target is the fixed exact "
+        "convex projection from Stage 2A; reconstruction loss does not define "
+        "the latent coordinates."
+    )
+
+    n_epoch = int(STAGE2B_EPOCHS)
+    adapter_params = [
+        parameter
+        for parameter in (
+            model.continuous_residual_projector
+            .alpha_adapter
+            .parameters()
+        )
+        if parameter.requires_grad
+    ]
+    if not adapter_params:
+        raise RuntimeError("Stage 2B has no trainable alpha-adapter parameters.")
+
+    optimizer = torch.optim.AdamW(
+        [
+            {
+                "params": adapter_params,
+                "lr": 1e-4,
+                "weight_decay": 1e-4,
+            },
+        ]
+    )
+    scheduler = _make_stage2_scheduler(optimizer, n_epoch)
+
+    report = fit_vqvae(
+        model,
+        train_loader,
+        val_loader,
+        optimizer,
+        scheduler,
+        epochs=n_epoch,
+        ckpt_best_path=str(CKPTS["stage2b_best"]),
+        ckpt_last_path=str(CKPTS["stage2b_last"]),
+        early_stop_patience=15,
+        val_metric_name="cont_adapter_projection_mse",
+        val_metric_goal="min",
+        use_ROI_mask=False,
+        lambda_vq=0.0,
+        lambda_ctx=0.0,
+        lambda_ctx_field=0.0,
+        ctx_start_epoch=10**9,
+        ctx_warmup_epochs=1,
+        ctx_epoch_schedule=_stage2_ctx_schedule(),
+        cfg_ctx_drop_start=0.0,
+        cfg_ctx_drop_end=0.0,
+        cfg_ctx_start_epoch=10**9,
+        cfg_ctx_warmup_epochs=1,
+        pos_weight_start=1.0,
+        pos_weight_end=1.0,
+        pos_decay_epochs=1,
+        blank_logit_margin=blank_logit_threshold,
+        lambda_cont_projection=1.0,
+        lambda_cont_parent_margin=0.0,
+        continuous_sample_start_epoch=10**9,
+        continuous_sample_warmup_epochs=1,
+        continuous_sample_mix_start=0.0,
+        continuous_sample_mix_end=0.0,
+        continuous_gumbel_tau_start=1.0,
+        continuous_gumbel_tau_end=1.0,
+        continuous_posterior_temperature=0.35,
+        save_start_epoch=1,
+        **{
+            **common_fit_kwargs(model),
+            "lambda_isi": 0.0,
+            "lambda_sp_pixel": 0.0,
+            "lambda_enc_var": 0.0,
+            "lambda_code_norm": 0.0,
+            "level2_start_epoch": 1,
+            "level2_full_loss_epoch": 1,
+        },
+    )
+
+    save_json_report(report, REPORTS["stage2b"])
+    return report
+
+
+def run_stage2c(model, train_loader, val_loader, blank_logit_threshold):
+    print("\n" + "=" * 80)
+    print("STAGE 2C: context-conditioned projected-latent calibration")
+    print("=" * 80)
+
+    map_location = next(model.parameters()).device
+    stage2a_ckpt = _select_stage2a_ckpt()
+    model.load_checkpoint(
+        str(stage2a_ckpt),
+        map_location=map_location,
+    )
+    model._set_training_prob_threshold(0.5)
+    freeze_for_stage2c(model)
+    model.continuous_residual_sample_mix = 0.0
+
+    print(
+        f"Loaded Stage 2A best weights from: {stage2a_ckpt}\n"
+        "The exact convex projection remains active. Encoder/codebooks and "
+        "decoder backbone are frozen. Only context projections, cross-attention, "
+        "and its zero-initialized residual gate are trainable."
+    )
+
+    context_params = [
+        parameter
+        for module in (
+            model.local_embedder,
+            model.local_to_dec_ctx,
+            model.global_to_dec_ctx,
+        )
+        for parameter in module.parameters()
+        if parameter.requires_grad
+    ]
+
+    block0 = model.dec_blocks[0]
+    cross_params = [
+        parameter
+        for module in (
+            block0.norm2,
+            block0.norm_ctx,
+            block0.cross_attn,
+        )
+        for parameter in module.parameters()
+        if parameter.requires_grad
+    ]
+    if block0.ctx_gate.requires_grad:
+        cross_params.append(block0.ctx_gate)
+
+    optimizer = torch.optim.AdamW(
+        [
+            {
+                "params": context_params,
+                "lr": 1e-4,
+                "weight_decay": 1e-4,
+            },
+            {
+                "params": cross_params,
+                "lr": 5e-5,
+                "weight_decay": 1e-4,
+            },
+        ]
+    )
+
+    n_epoch = int(STAGE2C_EPOCHS)
+    scheduler = _make_stage2_scheduler(optimizer, n_epoch)
 
     report = fit_vqvae(
         model,
@@ -843,42 +1190,34 @@ def run_stage2(model, train_loader, val_loader, blank_logit_threshold):
         epochs=n_epoch,
         ckpt_best_path=str(CKPTS["stage2_best"]),
         ckpt_last_path=str(CKPTS["stage2_last"]),
-        early_stop_patience=30,
+        early_stop_patience=20,
         val_metric_name="AUPRC_tol_cond",
         val_metric_goal="max",
         use_ROI_mask=False,
-
-        # Stage 2: all context losses active quickly; cross-attn on layer 0 only.
+        lambda_vq=0.0,
         lambda_ctx=1e-1,
         lambda_ctx_field=1e-2,
         ctx_start_epoch=0,
-        ctx_warmup_epochs=20,
-        ctx_epoch_schedule={
-            0: 1,   # log_mean_firing_density
-            7: 1,   # active_site_ratio
-            1: 5,   # var_x
-            2: 5,   # var_y
-            3: 5,   # var_t
-            8: 10,  # temporal_trend
-            4: 5,  # cov_xy
-            5: 5,  # cov_xt
-            6: 5,  # cov_yt
-        },
-        
-        cfg_ctx_drop_start=0.6,
-        cfg_ctx_drop_end=0.25,
-        cfg_ctx_start_epoch=1,
-        cfg_ctx_warmup_epochs=5,
-
-        # Calibration phase. Keep >1 first; test 1.0 only later if recall survives.
-        pos_weight_start=5.0,
+        ctx_warmup_epochs=10,
+        ctx_epoch_schedule=_stage2_ctx_schedule(),
+        cfg_ctx_drop_start=0.0,
+        cfg_ctx_drop_end=0.0,
+        cfg_ctx_start_epoch=10**9,
+        cfg_ctx_warmup_epochs=1,
+        pos_weight_start=1.0,
         pos_weight_end=1.0,
-        pos_decay_epochs=100,
-        training_threshold_update_every=30,
-        training_threshold_ema_alpha=0.5,
+        pos_decay_epochs=1,
         blank_logit_margin=blank_logit_threshold,
-                
-        save_start_epoch = 50,
+        lambda_cont_projection=0.0,
+        lambda_cont_parent_margin=0.0,
+        continuous_sample_start_epoch=10**9,
+        continuous_sample_warmup_epochs=1,
+        continuous_sample_mix_start=0.0,
+        continuous_sample_mix_end=0.0,
+        continuous_gumbel_tau_start=1.0,
+        continuous_gumbel_tau_end=1.0,
+        continuous_posterior_temperature=0.35,
+        save_start_epoch=1,
         **{
             **common_fit_kwargs(model),
             "lambda_isi": 1e-1,
@@ -889,10 +1228,48 @@ def run_stage2(model, train_loader, val_loader, blank_logit_threshold):
         },
     )
 
-    with open(REPORTS["stage2"], "w") as f:
-        json.dump(report, f, indent=4)
-    print(f"Saved report: {REPORTS['stage2']}")
+    save_json_report(report, REPORTS["stage2"])
     return report
+
+
+def run_stage2(model, train_loader, val_loader, blank_logit_threshold):
+    phases = tuple(str(phase).lower() for phase in STAGE2_PHASES)
+    invalid = [
+        phase
+        for phase in phases
+        if phase not in ("2a", "2b", "2c")
+    ]
+    if invalid:
+        raise ValueError(
+            f"Unsupported STAGE2_PHASES entries: {invalid}"
+        )
+
+    reports = {}
+    if "2a" in phases:
+        reports["2a"] = run_stage2a(
+            model,
+            train_loader,
+            val_loader,
+            blank_logit_threshold,
+        )
+
+    if "2b" in phases:
+        reports["2b"] = run_stage2b(
+            model,
+            train_loader,
+            val_loader,
+            blank_logit_threshold,
+        )
+
+    if "2c" in phases:
+        reports["2c"] = run_stage2c(
+            model,
+            train_loader,
+            val_loader,
+            blank_logit_threshold,
+        )
+
+    return reports
 
 
 @torch.no_grad()
@@ -1056,6 +1433,13 @@ def build_prior_from_model(
         n_head=4,
         max_len=token_grid[0] * token_grid[1] * token_grid[2],
         dropout=0.1,
+        z1_codebook=model.vq.tree_embeds[0],
+        z2_codebook=model.vq.tree_embeds[1],
+        z1_scale=float(model.vq.level_scales[0]),
+        z2_scale=float(model.vq.level_scales[1]),
+        hull_margin_fraction=float(
+            model.continuous_residual_projector.hull_margin_fraction
+        ),
     ).to(device)
 
     return HierarchicalCodebookPrior(
@@ -1162,6 +1546,10 @@ def run_stage3_prior(model, train_loader, val_loader, device):
         early_stop_patience=30,
         grad_accum_steps=grad_accum_steps,
         full_mask_prob=0.15,
+        lambda_z1_distance=0.05,
+        lambda_z1_neighbor_ce=0.25,
+        z1_neighbor_tau=0.25,
+        topk=(5, 2),
 
         lambda_ctx=1.0,
         lambda_ctx_field=0.05,
@@ -1618,6 +2006,7 @@ def evaluate_stage3_prior(
         gen = decode_codes_to_xgen(
             model,
             codes,
+            alpha=sampled.get("alpha", None),
             grid=grid,
             global_ctx=gct_rep,
             local_ctx=lct_rep,
@@ -1961,6 +2350,7 @@ def evaluate_stage3_prior_sampled_contexts(
         gen = decode_codes_to_xgen(
             model,
             codes,
+            alpha=sampled.get("alpha", None),
             grid=grid,
             global_ctx=ctx_t["global_ctx"],
             local_ctx=ctx_t["local_ctx"],
@@ -2104,6 +2494,38 @@ def evaluate_and_visualize(model, test_loader, stage: int, assay_indices, assay_
     device = next(model.parameters()).device
     model.load_checkpoint(str(ckpt), map_location=device)
 
+    # Runtime latent mode is not part of the state_dict.
+    model.use_continuous_residual = bool(
+        stage == 2 and STAGE2_CONTINUOUS_RESIDUAL
+    )
+
+    using_alpha_adapter = bool(
+        stage == 2
+        and Path(ckpt) in (
+            CKPTS["stage2b_best"],
+            CKPTS["stage2b_last"],
+        )
+    )
+    using_stage2c_context = bool(
+        stage == 2
+        and Path(ckpt) in (
+            CKPTS["stage2_best"],
+            CKPTS["stage2_last"],
+        )
+    )
+
+    model.continuous_residual_projector.use_alpha_adapter = (
+        using_alpha_adapter
+    )
+    model.continuous_residual_projector.decode_with_projection_target = True
+    model.continuous_residual_sample_mix = 0.0
+    set_decoder_cross_attention(
+        model,
+        enabled=using_stage2c_context,
+        layers=(0,) if using_stage2c_context else (),
+    )
+
+
     if RUN_EVAL:
         print(f"Evaluating VQVAE stage {stage} using {ckpt} ...")
         test_metrics = evaluate_vqvae(
@@ -2137,7 +2559,12 @@ def evaluate_and_visualize(model, test_loader, stage: int, assay_indices, assay_
             )
             
         if RUN_PLOTTER:
-            report_path = REPORTS["stage1"] if stage == 1 else REPORTS["stage2"]
+            if stage == 1:
+                report_path = REPORTS["stage1"]
+            elif using_stage2c_context:
+                report_path = REPORTS["stage2"]
+            else:
+                report_path = REPORTS["stage2a"]
             if report_path.exists():
                 run_plotter(
                     train_report=str(report_path),
@@ -2788,10 +3215,16 @@ def main():
     # Combined Stage 1 → Stage 2 plots/reports
     # ============================================================
     
-    if REPORTS["stage1"].exists() and REPORTS["stage2"].exists():
+    stage2_report_for_plots = (
+        REPORTS["stage2"]
+        if REPORTS["stage2"].exists()
+        else REPORTS["stage2a"]
+    )
+
+    if REPORTS["stage1"].exists() and stage2_report_for_plots.exists():
         plot_base_then_finetune(
             report_base_path=str(REPORTS["stage1"]),
-            report_ft_path=str(REPORTS["stage2"]),
+            report_ft_path=str(stage2_report_for_plots),
             out_dir="../viz_out_vqvae/plots_stage1_stage2_overlays",
             mode="shared",                 # use "union" if you want every metric possible
             truncate_base_at_best=False,    # shows full stage 1 curve
@@ -2804,7 +3237,7 @@ def main():
     
         export_base_finetune_flat_xlsx(
             report_base_path=str(REPORTS["stage1"]),
-            report_ft_path=str(REPORTS["stage2"]),
+            report_ft_path=str(stage2_report_for_plots),
             out_xlsx="reports/training_report_stage1_stage2_flat.xlsx",
             shift_finetune_by="best",
         )
