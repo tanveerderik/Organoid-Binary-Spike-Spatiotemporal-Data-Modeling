@@ -162,25 +162,17 @@ def decode_motif_logits_soft_given_activity(
     roi_hw=None,
     pad_hw=None,
 ):
+    """Decode current z1/convex-alpha outputs with hard-forward z1.
+
+    Generated positions use a straight-through z1 argmax plus continuous alpha.
+    Visible active positions retain exact Stage-2 motifs. All other positions
+    use the VQ-VAE blank latent.
     """
-    Differentiable motif-only Stage-3 helper.
-
-    Motif prior predicts only z1/z2.
-    Activity is externally supplied as either:
-        activity_prob: (B,N) differentiable soft activity
-        activity_ids : (B,N) hard 0/1 activity
-        targets["a"]: fallback teacher-forced activity
-
-    Gradients can flow through activity_prob and z logits.
-    """
-
     z1_t = targets["z1"].long()
     z2_t = targets["z2"].long()
-
     B, N = z1_t.shape
     device = logits["z1"].device
     dtype = logits["z1"].dtype
-
     K1 = int(model.vq.num_codes_per_level[0])
     K2 = int(model.vq.num_codes_per_level[1])
 
@@ -190,125 +182,93 @@ def decode_motif_logits_soft_given_activity(
         p_active = activity_ids.to(device=device, dtype=dtype).clamp(0, 1)
     else:
         p_active = targets["a"].to(device=device, dtype=dtype).clamp(0, 1)
-
     if p_active.shape != (B, N):
         raise ValueError(f"p_active must have shape {(B, N)}, got {tuple(p_active.shape)}")
 
-    mz1 = targets.get("z1_loss_mask", targets["z_loss_mask"]).bool()
-    mz2 = targets.get("z2_loss_mask", targets["z_loss_mask"]).bool()
-    
-    m = targets.get(
-        "decode_motif_mask",
-        mz1 | mz2,
-    ).bool()
+    fallback = (
+        targets.get("z1_loss_mask", targets["z_loss_mask"]).bool()
+        | targets.get("alpha_loss_mask", targets["z_loss_mask"]).bool()
+    )
+    predicted_motif = targets.get("decode_motif_mask", fallback).to(device).bool()
+    default_visible = (
+        targets.get("active", targets["a"].bool()).bool()
+        & ~targets.get("predict_mask", predicted_motif).bool()
+    )
+    visible_motif = targets.get("visible_motif_mask", default_visible).to(device).bool()
+    if predicted_motif.shape != (B, N) or visible_motif.shape != (B, N):
+        raise ValueError("Motif source masks must have shape (B,N).")
+    if bool((predicted_motif & visible_motif).any()):
+        raise ValueError("Predicted and visible motif masks overlap.")
 
-    def _straight_through_onehot(p_soft):
-        idx = p_soft.argmax(dim=-1)
-        p_hard = F.one_hot(idx, num_classes=p_soft.size(-1)).to(dtype=p_soft.dtype)
-        return p_hard + (p_soft - p_soft.detach())
-
-    p_z1_pred = F.softmax(logits["z1"] / float(tau_z), dim=-1)
-    p_z1_pred_st = _straight_through_onehot(p_z1_pred)
-
-    p_z1_gt = F.one_hot(
-        z1_t.clamp(0, K1 - 1), num_classes=K1
-    ).to(dtype=dtype).detach()
-    p_z1 = torch.where(m.unsqueeze(-1), p_z1_pred_st, p_z1_gt)
-
-    alpha_pred = F.softmax(logits["alpha_mu"] / float(tau_z), dim=-1)
     alpha_gt = targets.get("alpha", None)
     if alpha_gt is None:
-        alpha_gt = F.one_hot(
-            z2_t.clamp(0, K2 - 1), num_classes=K2
-        ).to(dtype=dtype)
+        alpha_gt = F.one_hot(z2_t.clamp(0, K2 - 1), num_classes=K2).to(dtype=dtype)
     else:
         alpha_gt = alpha_gt.to(device=device, dtype=dtype)
         alpha_gt = alpha_gt / alpha_gt.sum(dim=-1, keepdim=True).clamp_min(1e-8)
-    alpha = torch.where(m.unsqueeze(-1), alpha_pred, alpha_gt.detach())
 
     E0 = model.vq.tree_embeds[0].detach().to(device=device, dtype=dtype)
     E1 = model.vq.tree_embeds[1].detach().to(device=device, dtype=dtype)
-
-    z0 = torch.einsum("bnk,kd->bnd", p_z1, E0)
-    z1_res = torch.einsum("bnk,bnr,krd->bnd", p_z1, alpha, E1)
-
     scale0 = float(model.vq.level_scales[0])
     scale1 = float(model.vq.level_scales[1])
-    margin = 1.0 + max(
-        0.0,
-        float(model.continuous_residual_projector.hull_margin_fraction),
+    margin = 1.0 + max(0.0, float(model.continuous_residual_projector.hull_margin_fraction))
+    temperature = max(float(tau_z), 1e-6)
+
+    z1_prob = F.softmax(logits["z1"] / temperature, dim=-1)
+    z1_hard = F.one_hot(z1_prob.argmax(dim=-1), num_classes=K1).to(z1_prob.dtype)
+    z1_prob_st = z1_hard + z1_prob - z1_prob.detach()
+    alpha_logits = logits.get("alpha_mu", logits.get("alpha_logits", None))
+    if alpha_logits is None:
+        raise KeyError("Motif logits must contain alpha_mu or alpha_logits.")
+    alpha_pred = F.softmax(alpha_logits / temperature, dim=-1)
+
+    parent_anchor = torch.einsum("bnk,kd->bnd", z1_prob_st, E0)
+    child_by_parent = torch.einsum("bnr,krd->bnkd", alpha_pred, E1)
+    pred_residual = torch.einsum("bnk,bnkd->bnd", z1_prob_st, child_by_parent)
+    z_pred = scale0 * parent_anchor + scale1 * margin * pred_residual
+
+    z1_gt = z1_t.clamp(0, K1 - 1)
+    z_gt = scale0 * E0[z1_gt] + scale1 * margin * torch.einsum(
+        "bnr,bnrd->bnd", alpha_gt.detach(), E1[z1_gt]
     )
-
-    z_active = scale0 * z0 + scale1 * margin * z1_res
-
     blank_token = model.vq.blank_token.detach().to(device=device, dtype=dtype)
-    z_blank = blank_token.view(1, 1, -1)
-
+    z_blank = blank_token.view(1, 1, -1).expand(B, N, -1)
+    z_active = torch.where(visible_motif.unsqueeze(-1), z_gt, z_blank)
+    z_active = torch.where(predicted_motif.unsqueeze(-1), z_pred, z_active)
     z_q = (1.0 - p_active.unsqueeze(-1)) * z_blank + p_active.unsqueeze(-1) * z_active
 
     _, pos_dec = model._get_pos_embed(grid, z_q.device, z_q.dtype)
-
     z_dec_base_no_pos = model.code_to_dec(z_q)
-
-    type_offset = model.activity_type_offset.to(
-        device=z_dec_base_no_pos.device,
-        dtype=z_dec_base_no_pos.dtype,
-    )
-
-    signed_type_offset = (
-        (2.0 * p_active.unsqueeze(-1) - 1.0)
-        * type_offset.view(1, 1, -1)
-    )
-
-    z_dec_no_pos = z_dec_base_no_pos + model.offset_scale * signed_type_offset
-    z_d = z_dec_no_pos + pos_dec
-
+    type_offset = model.activity_type_offset.to(z_dec_base_no_pos)
+    signed_type_offset = (2.0 * p_active.unsqueeze(-1) - 1.0) * type_offset.view(1, 1, -1)
+    z_d = z_dec_base_no_pos + model.offset_scale * signed_type_offset + pos_dec
     ctx_tokens, ctx_key_padding_mask = model._prepare_ctx_tokens(
-        local_ctx=local_ctx,
-        global_ctx=global_ctx,
-        target_dtype=z_d.dtype,
-        target_device=z_d.device,
-        cfg_ctx_drop_p=cfg_ctx_drop_p,
+        local_ctx=local_ctx, global_ctx=global_ctx, target_dtype=z_d.dtype,
+        target_device=z_d.device, cfg_ctx_drop_p=cfg_ctx_drop_p,
         cfg_ctx_force_unc=cfg_ctx_force_unc,
     )
-
     model._ensure_dec_masks(grid, device=z_d.device)
-
     for i, blk in enumerate(model.dec_blocks):
         use_cross = i in model.decoder_cross_attn_layers
         z_d = blk(
-            z_d,
-            ctx_tokens=ctx_tokens if use_cross else None,
+            z_d, ctx_tokens=ctx_tokens if use_cross else None,
             ctx_key_padding_mask=ctx_key_padding_mask if use_cross else None,
         )
-
     z_d = model.dec_norm(z_d)
-
-    logits_vol_raw, pred_patches_raw = model.patch_renderer(
-        z_d,
-        grid,
-        return_patches=True,
-    )
-
+    logits_vol_raw, pred_patches_raw = model.patch_renderer(z_d, grid, return_patches=True)
     pred_patches, spatial_diag = model._apply_output_biases(
-        pred_patches_raw,
-        grid=grid,
-        global_ctx=global_ctx,
-        roi_hw=roi_hw,
-        pad_hw=pad_hw,
+        pred_patches_raw, grid=grid, global_ctx=global_ctx, roi_hw=roi_hw, pad_hw=pad_hw
     )
-
     logits_vol = model.unpatchify(pred_patches, grid)
-
     return {
-        "z_q": z_q,
-        "p_active": p_active,
-        "logits_vol": logits_vol,
-        "logits_vol_raw": logits_vol_raw,
-        "pred_patches": pred_patches,
-        "pred_patches_raw": pred_patches_raw,
-        "spatial_diag": spatial_diag,
+        "z_q": z_q, "p_active": p_active, "z1_prob_st": z1_prob_st,
+        "alpha_pred": alpha_pred, "predicted_motif_mask": predicted_motif,
+        "visible_motif_mask": visible_motif, "logits_vol": logits_vol,
+        "logits_vol_raw": logits_vol_raw, "pred_patches": pred_patches,
+        "pred_patches_raw": pred_patches_raw, "spatial_diag": spatial_diag,
     }
+
+
 
 
 

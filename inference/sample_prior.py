@@ -59,6 +59,7 @@ def iterative_unmask_motif_given_activity(
     task_id,
     roi_mask=None,
     visible_codes=None,
+    visible_alpha=None,
     steps: int = 12,
     temperature: float = 1.0,
     alpha_temperature: float = 1.0,
@@ -100,9 +101,23 @@ def iterative_unmask_motif_given_activity(
         )
         z1[visible_active] = visible_codes[..., 0][visible_active].clamp(0, prior.K1 - 1)
         z2[visible_active] = visible_codes[..., 1][visible_active].clamp(0, prior.K2 - 1)
-        alpha[visible_active] = torch.nn.functional.one_hot(
-            z2[visible_active], num_classes=K2
-        ).float()
+        if visible_alpha is None:
+            alpha[visible_active] = torch.nn.functional.one_hot(
+                z2[visible_active], num_classes=K2
+            ).float()
+        else:
+            visible_alpha = visible_alpha.to(
+                device=device, dtype=alpha.dtype
+            )
+            if visible_alpha.shape != (B, N, K2):
+                raise ValueError(
+                    f"visible_alpha must have shape {(B, N, K2)}, "
+                    f"got {tuple(visible_alpha.shape)}"
+                )
+            normalized_visible_alpha = visible_alpha / visible_alpha.sum(
+                dim=-1, keepdim=True
+            ).clamp_min(1e-8)
+            alpha[visible_active] = normalized_visible_alpha[visible_active]
 
     masked = active & roi
     z1[masked] = prior.z1_mask_id
@@ -191,7 +206,10 @@ def sample_hierarchical_roi(
     roi_mask,
     *,
     visible_codes=None,
+    visible_alpha=None,
     activity_count_temperature=1.0,
+    activity_count_mode="expected",
+    activity_count_stochastic_round=False,
     activity_coord_temperature=1.0,
     motif_steps=12,
     motif_temperature=1.0,
@@ -267,12 +285,14 @@ def sample_hierarchical_roi(
         roi_mask=roi,
     )
 
-    # The current inference path uses the aggregated soft activity grid
-    # followed by a count-controlled top-k selection.
-    activity_roi = prior.activity_prior.sample_hard_activity(
+    # Use the aggregated soft activity grid followed by a count-controlled
+    # unique top-k selection. This avoids coordinate collisions reducing the
+    # final hard activity count below the selected count.
+    activity_roi = prior.activity_prior.sample_hard_activity_gridtopk(
         activity_out,
         count_temperature=activity_count_temperature,
-        coord_temperature=activity_coord_temperature,
+        count_mode=activity_count_mode,
+        count_stochastic_round=activity_count_stochastic_round,
         roi_mask=roi,
     )
 
@@ -291,6 +311,7 @@ def sample_hierarchical_roi(
         task_id=task_id,
         roi_mask=roi,
         visible_codes=visible_codes,
+        visible_alpha=visible_alpha,
         steps=motif_steps,
         temperature=motif_temperature,
         alpha_temperature=motif_alpha_temperature,

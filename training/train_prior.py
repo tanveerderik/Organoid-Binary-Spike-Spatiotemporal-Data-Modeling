@@ -196,19 +196,8 @@ def distance_neighborhood_ce_loss(
     k = max(1, min(int(k), dist.size(-1)))
     near_d, near_idx = torch.topk(dist, k=k, largest=False, dim=-1)
     q_local = F.softmax(-near_d / max(float(tau), 1e-6), dim=-1)
-    
-    # Keep the manually constructed probability target and log-softmax in FP32.
-    lm_fp32 = lm.float()
-    q_local = q_local.to(device=lm.device, dtype=torch.float32)
-    
-    q = torch.zeros_like(lm_fp32)
-    q.scatter_(1, near_idx.long(), q_local)
-    
-    log_p = F.log_softmax(lm_fp32, dim=1)
-    loss = -(q * log_p).sum(dim=1).mean()
-    
-    return loss
-
+    q = torch.zeros_like(lm).scatter(1, near_idx, q_local)
+    return -(q * F.log_softmax(lm, dim=-1)).sum(dim=-1).mean()
 
 def topk_margin_ce_loss(logits, target, mask, k=5, margin=1.0):
     """
@@ -1046,12 +1035,18 @@ def train_activity_prior_detr(
     log_every: int = 50,
     blank_code: int = None,
     lambda_count: float = 1.0,
+    lambda_count_neighbor: float = 0.25,
+    lambda_count_distance: float = 0.05,
     lambda_obj: float = 1.0,
     lambda_coord: float = 1.0,
     lambda_soft_count: float = 0.1,
     lambda_soft_grid: float = 1.0,
     lambda_dup: float = 0.01,
     no_object_weight: float = 0.1,
+    count_neighbor_k: int = 11,
+    count_neighbor_tau: float = 2.0,
+    count_distance_scale: float = 5.0,
+    soft_count_beta: float = 5.0,
 ):
     """
     Stage 3B.
@@ -1123,12 +1118,18 @@ def train_activity_prior_detr(
                         targets,
                         activity_prior,
                         lambda_count=lambda_count,
+                        lambda_count_neighbor=lambda_count_neighbor,
+                        lambda_count_distance=lambda_count_distance,
                         lambda_obj=lambda_obj,
                         lambda_coord=lambda_coord,
                         lambda_soft_count=lambda_soft_count,
                         lambda_soft_grid=lambda_soft_grid,
                         lambda_dup=lambda_dup,
                         no_object_weight=no_object_weight,
+                        count_neighbor_k=count_neighbor_k,
+                        count_neighbor_tau=count_neighbor_tau,
+                        count_distance_scale=count_distance_scale,
+                        soft_count_beta=soft_count_beta,
                     )
 
                 scaler.scale(loss / float(grad_accum_steps)).backward()
@@ -1158,12 +1159,18 @@ def train_activity_prior_detr(
                         targets,
                         activity_prior,
                         lambda_count=lambda_count,
+                        lambda_count_neighbor=lambda_count_neighbor,
+                        lambda_count_distance=lambda_count_distance,
                         lambda_obj=lambda_obj,
                         lambda_coord=lambda_coord,
                         lambda_soft_count=lambda_soft_count,
                         lambda_soft_grid=lambda_soft_grid,
                         lambda_dup=lambda_dup,
                         no_object_weight=no_object_weight,
+                        count_neighbor_k=count_neighbor_k,
+                        count_neighbor_tau=count_neighbor_tau,
+                        count_distance_scale=count_distance_scale,
+                        soft_count_beta=soft_count_beta,
                     )
 
             B = x.size(0)
@@ -1180,13 +1187,19 @@ def train_activity_prior_detr(
                     f"  [3B Activity] it {it:05d}: "
                     f"loss={total['loss'] / den:.4f} "
                     f"count={total['loss_count'] / den:.4f} "
+                    f"count_exact={total['loss_count_exact'] / den:.4f} "
+                    f"count_neighbor={total['loss_count_neighbor'] / den:.4f} "
+                    f"count_dist={total['loss_count_distance'] / den:.4f} "
                     f"obj={total['loss_obj'] / den:.4f} "
                     f"coord={total['loss_coord'] / den:.4f} "
                     f"soft_count={total['loss_soft_count'] / den:.4f} "
                     f"dup={total['loss_dup'] / den:.4f} "
-                    f"predK={total['pred_count_mean'] / den:.2f} "
+                    f"eventK={total['event_soft_count_mean'] / den:.2f} "
+                    f"countE={total['count_expected_mean'] / den:.2f} "
+                    f"modeK={total['count_mode_mean'] / den:.2f} "
                     f"tgtK={total['target_count_mean'] / den:.2f} "
-                    f"count_acc={total['count_acc'] / den:.3f}"
+                    f"maeE={total['count_expected_mae'] / den:.2f} "
+                    f"within5={total['count_within_5'] / den:.3f}"
                 )
 
         den = max(total_samples, 1.0)
@@ -1208,15 +1221,22 @@ def train_activity_prior_detr(
             f"train loss={train_m['loss']:.4f} "
             f"val loss={val_m['loss']:.4f} "
             f"count={val_m['loss_count']:.4f} "
+            f"count_exact={val_m['loss_count_exact']:.4f} "
+            f"count_neighbor={val_m['loss_count_neighbor']:.4f} "
+            f"count_dist={val_m['loss_count_distance']:.4f} "
             f"obj={val_m['loss_obj']:.4f} "
             f"coord={val_m['loss_coord']:.4f} "
             f"soft_count={val_m['loss_soft_count']:.4f} "
             f"dup={val_m['loss_dup']:.4f} "
-            f"predK={val_m['pred_count_mean']:.2f} "
-            f"hardK={val_m['hard_count_mean']:.2f} "
+            f"eventK={val_m['event_soft_count_mean']:.2f} "
+            f"countE={val_m['count_expected_mean']:.2f} "
+            f"modeK={val_m['count_mode_mean']:.2f} "
             f"tgtK={val_m['target_count_mean']:.2f} "
             f"rawK={val_m['target_raw_count_mean']:.2f} "
-            f"count_acc={val_m['count_acc']:.3f}"
+            f"maeE={val_m['count_expected_mae']:.2f} "
+            f"top5={val_m['count_top5_acc']:.3f} "
+            f"within5={val_m['count_within_5']:.3f} "
+            f"H={val_m['count_entropy']:.3f}"
         )
 
         if val_m["loss"] < best_val - float(min_delta):
@@ -1264,12 +1284,18 @@ def train_activity_prior_with_frozen_motif(
     freeze_motif: bool = True,
     lambda_detr: float = 1.0,
     lambda_count: float = 1.0,
+    lambda_count_neighbor: float = 0.25,
+    lambda_count_distance: float = 0.05,
     lambda_obj: float = 1.0,
     lambda_coord: float = 1.0,
     lambda_soft_count: float = 0.1,
     lambda_soft_grid: float = 1.0,
     lambda_dup: float = 0.01,
     no_object_weight: float = 0.1,
+    count_neighbor_k: int = 11,
+    count_neighbor_tau: float = 2.0,
+    count_distance_scale: float = 5.0,
+    soft_count_beta: float = 5.0,
     
     lambda_ctx: float = 1.0,
     lambda_ctx_field: float = 0.05,
@@ -1424,12 +1450,18 @@ def train_activity_prior_with_frozen_motif(
                         activity_targets,
                         activity_prior,
                         lambda_count=lambda_count,
+                        lambda_count_neighbor=lambda_count_neighbor,
+                        lambda_count_distance=lambda_count_distance,
                         lambda_obj=lambda_obj,
                         lambda_coord=lambda_coord,
                         lambda_soft_count=lambda_soft_count,
                         lambda_soft_grid=lambda_soft_grid,
                         lambda_dup=lambda_dup,
                         no_object_weight=no_object_weight,
+                        count_neighbor_k=count_neighbor_k,
+                        count_neighbor_tau=count_neighbor_tau,
+                        count_distance_scale=count_distance_scale,
+                        soft_count_beta=soft_count_beta,
                     )
 
                     activity_prob_roi = activity_prior.soft_activity_flat(activity_out, roi_mask=pmask)
@@ -1682,8 +1714,11 @@ def train_activity_prior_with_frozen_motif(
             f"adj={val_m['loss_adj']:.4f} "
             f"sp={val_m['loss_spatial']:.4f} "
             f"softK={val_m['activity_prob_sum']:.2f} "
+            f"countE={val_m['detr_count_expected_mean']:.2f} "
+            f"modeK={val_m['detr_count_mode_mean']:.2f} "
             f"tgtK={val_m['detr_target_count_mean']:.2f} "
-            f"count_acc={val_m['detr_count_acc']:.3f}"
+            f"maeE={val_m['detr_count_expected_mae']:.2f} "
+            f"within5={val_m['detr_count_within_5']:.3f}"
         )
 
         if val_m["loss"] < best_val - float(min_delta):
@@ -1708,3 +1743,25 @@ def train_activity_prior_with_frozen_motif(
                 break
 
     return history
+
+# Backward-compatible direct imports. The audited Stage 3B/3C implementations
+# live in stage3_activity.py; Stage 3A and the shared encoding helpers remain in
+# this module unchanged.
+_legacy_train_activity_prior_detr = train_activity_prior_detr
+_legacy_train_activity_prior_with_frozen_motif = (
+    train_activity_prior_with_frozen_motif
+)
+
+
+def train_activity_prior_detr(*args, **kwargs):
+    from .stage3_activity import train_activity_prior_detr as implementation
+
+    return implementation(*args, **kwargs)
+
+
+def train_activity_prior_with_frozen_motif(*args, **kwargs):
+    from .stage3_activity import (
+        train_activity_prior_with_frozen_motif as implementation,
+    )
+
+    return implementation(*args, **kwargs)

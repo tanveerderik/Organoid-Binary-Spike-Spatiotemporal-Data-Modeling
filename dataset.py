@@ -738,6 +738,32 @@ class NpzBurstDataset(Dataset):
             out = self.transform(out)
         return out
 
+    def getitem_deterministic(self, i: int, *, seed: int) -> Dict[str, Any]:
+        """Evaluate one virtual index without advancing the training RNG."""
+        previous_rng = self.rng
+        seed_sequence = np.random.SeedSequence([int(seed), int(i)])
+        self.rng = np.random.default_rng(seed_sequence)
+        try:
+            return self.__getitem__(i)
+        finally:
+            self.rng = previous_rng
+
+
+class DeterministicSubset(Dataset):
+    """Subset whose balanced sample choice, crop, task, and mask are repeatable."""
+
+    def __init__(self, dataset: NpzBurstDataset, indices, *, seed: int):
+        self.dataset = dataset
+        self.indices = [int(index) for index in indices]
+        self.seed = int(seed)
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def __getitem__(self, index: int) -> Dict[str, Any]:
+        base_index = self.indices[int(index)]
+        return self.dataset.getitem_deterministic(base_index, seed=self.seed)
+
 
 
 def split_indices(n: int, val_frac: float = 0.1, test_frac: float = 0.1, seed: int = 42) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -831,8 +857,16 @@ def make_loaders_for_assays(
     tr_idx, va_idx, te_idx = split_indices(len(base_ds), val_frac, test_frac, seed)
 
     ds_train = Subset(base_ds, tr_idx)
-    ds_val   = Subset(base_ds, va_idx) if len(va_idx) else None
-    ds_test  = Subset(base_ds, te_idx) if len(te_idx) else None
+    ds_val = (
+        DeterministicSubset(base_ds, va_idx, seed=int(seed) + 100_003)
+        if len(va_idx)
+        else None
+    )
+    ds_test = (
+        DeterministicSubset(base_ds, te_idx, seed=int(seed) + 200_003)
+        if len(te_idx)
+        else None
+    )
 
     # persistent_workers only valid if num_workers>0 and shuffle semantics ok
     persistent_ok = bool(num_workers and num_workers > 0)
@@ -864,5 +898,7 @@ def make_loaders_for_assays(
         "temporal_pool": temporal_pool,
         "spatial_crop": spatial_crop,
         "dataset_kwargs": dict(ds_kwargs),  # for logging/repro
+        "deterministic_validation_sampling": True,
+        "deterministic_test_sampling": True,
     }
     return loader_train, loader_val, loader_test, meta
