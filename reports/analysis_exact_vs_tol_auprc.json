@@ -1,0 +1,16 @@
+{
+  "3level(32,8,4) ~ep134": {
+    "AUPRC_exact": 0.040949262666188445,
+    "AUPRC_tol": 0.04504860895610771,
+    "ratio_exact_over_tol": 0.9090017120414664,
+    "missing": 0,
+    "unexpected": 0
+  },
+  "reference(32,8) ~ep281": {
+    "AUPRC_exact": 0.27082186224254,
+    "AUPRC_tol": 0.3673597070138906,
+    "ratio_exact_over_tol": 0.7372116676701828,
+    "missing": 0,
+    "unexpected": 0
+  }
+}

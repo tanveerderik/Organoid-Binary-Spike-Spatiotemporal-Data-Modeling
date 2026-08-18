@@ -1,0 +1,13 @@
+{
+  "F": 1024,
+  "occupied": 935,
+  "distinct": 935,
+  "tokens": 69568,
+  "dedup_eps": 0.01,
+  "mean_entry_norm": 7.48321533203125,
+  "nn_dist_mean": 3.9628512859344482,
+  "usage_min": 1,
+  "usage_median": 42,
+  "usage_max": 512,
+  "entries_under_20": 334
+}

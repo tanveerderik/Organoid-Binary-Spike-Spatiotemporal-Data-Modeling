@@ -142,20 +142,40 @@ def iterative_unmask_motif_given_activity(
             top_k=z1_top_k,
         )
 
-        mu = logits["alpha_mu"]
-        std = logits["alpha_log_std"].exp()
+        # Second pass: condition alpha on the z1 actually sampled.
+        #
+        # alpha is a distribution over the children of ONE parent. The first
+        # pass conditions it on the soft posterior over all parents, but the
+        # decoder will use E1[z1_samp]. Re-running with alpha_condition_z1 makes
+        # the coefficients belong to the parent they are decoded against.
+        alpha_logits, _, _ = prior(
+            a, z1, z2,
+            alpha_in=alpha,
+            global_ctx=global_ctx,
+            local_ctx=local_ctx,
+            task_id=task_id,
+            roi_mask=roi_mask,
+            targets=None,
+            alpha_condition_z1=z1_samp,
+        )
+        concentration = alpha_logits["alpha_concentration"]
+        alpha_mean = alpha_logits["alpha_mean"]
+
         if alpha_temperature <= 0:
-            alpha_samp = torch.softmax(mu, dim=-1)
+            # Deterministic readout: the Dirichlet mean.
+            alpha_samp = alpha_mean
         else:
-            noise = torch.randn_like(mu)
-            alpha_samp = torch.softmax(
-                mu + float(alpha_temperature) * std * noise,
-                dim=-1,
-            )
-        # Confidence is high when the predicted mean is concentrated and the
-        # learned uncertainty is low. It is used only for MaskGIT commit order.
-        alpha_mean = torch.softmax(mu, dim=-1)
-        conf_alpha = alpha_mean.max(dim=-1).values * torch.exp(-std.mean(dim=-1))
+            # Sample the convex coefficients. Temperature scales concentration:
+            # >1 sharpens toward the mean, <1 broadens. This is the step that
+            # makes generated points actually spread over the hull instead of
+            # collapsing to its interior mean.
+            scaled = (concentration / float(alpha_temperature)).clamp_min(1e-4)
+            alpha_samp = torch.distributions.Dirichlet(scaled).sample()
+
+        # Commit order: prefer confident z1 and a concentrated Dirichlet.
+        conf_alpha = alpha_mean.max(dim=-1).values * (
+            1.0 - 1.0 / (1.0 + concentration.sum(dim=-1))
+        )
         joint_conf = (conf_z1 * conf_alpha).masked_fill(~masked, -1.0)
 
         num_left = masked.sum(dim=1)
@@ -183,7 +203,19 @@ def iterative_unmask_motif_given_activity(
             targets=None,
         )
         z1_final = logits["z1"].argmax(dim=-1)
-        alpha_final = torch.softmax(logits["alpha_mu"], dim=-1)
+        # Same two-pass rule for the deterministic tail: condition alpha on the
+        # z1 that will actually be committed.
+        final_alpha_logits, _, _ = prior(
+            a, z1, z2,
+            alpha_in=alpha,
+            global_ctx=global_ctx,
+            local_ctx=local_ctx,
+            task_id=task_id,
+            roi_mask=roi_mask,
+            targets=None,
+            alpha_condition_z1=z1_final,
+        )
+        alpha_final = final_alpha_logits["alpha_mean"]
         z1[masked] = z1_final[masked]
         alpha[masked] = alpha_final[masked]
         z2[masked] = alpha_final[masked].argmax(dim=-1)

@@ -13,574 +13,8 @@ except Exception:
 
 
 
-class DETRActivityPrior(nn.Module):
-    """
-    DETR-style sparse activity prior with configurable coordinate heads.
-
-    Repository convention:
-        token grid = (Ttok,Htok,Wtok)
-        flat = t * Htok * Wtok + h * Wtok + w
-
-    Outputs:
-        count_logits : (B,Kmax+1)
-        event_logits : (B,Kmax)
-        factorized:
-            t_logits : (B,Kmax,Ttok)
-            h_logits : (B,Kmax,Htok)
-            w_logits : (B,Kmax,Wtok)
-        joint_dense:
-            grid_logits : (B,Kmax,Ntok)
-    """
-
-    def __init__(
-        self,
-        global_dim: int,
-        local_dim: int,
-        num_tasks: int,
-        token_grid: Tuple[int, int, int],
-        Kmax: int = 256,
-        d_model: int = 256,
-        n_layer: int = 4,
-        n_head: int = 8,
-        dropout: float = 0.1,
-        coordinate_mode: str = "factorized",
-    ):
-        super().__init__()
-
-        self.Ttok, self.Htok, self.Wtok = map(int, token_grid)
-        self.Ntok = self.Ttok * self.Htok * self.Wtok
-        self.Kmax = int(Kmax)
-        self.d_model = int(d_model)
-        self.coordinate_mode = str(coordinate_mode).lower()
-        if self.coordinate_mode not in ("factorized", "joint_dense"):
-            raise ValueError(
-                f"Unsupported coordinate_mode={coordinate_mode!r}. "
-                "Use 'factorized' or 'joint_dense'."
-            )
-
-        self.global_proj = nn.Linear(global_dim, d_model)
-        self.local_proj = nn.Linear(local_dim, d_model)
-        self.task_emb = nn.Embedding(num_tasks, d_model)
-        
-        # Activity input IDs:
-        #   0 = visible blank
-        #   1 = visible active
-        #   2 = masked / predict this token
-        self.a_mask_id = 2
-        self.a_emb = nn.Embedding(3, d_model)
-        
-        self.a_pos_emb = nn.Parameter(torch.randn(self.Ntok, d_model) * 0.02)
-        
-        self.a_pool = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, d_model),
-            nn.GELU(),
-            nn.Linear(d_model, d_model),
-        )
-
-        self.event_queries = nn.Parameter(torch.randn(Kmax, d_model) * 0.02)
-
-        layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=n_head,
-            dim_feedforward=4 * d_model,
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.encoder = nn.TransformerEncoder(layer, num_layers=n_layer)
-
-        self.count_head = nn.Linear(d_model, Kmax + 1)
-
-        # Detached count-to-event FiLM. The count head controls event quantity,
-        # while contextualized event queries retain responsibility for ranking
-        # and coordinates. Zero initialization makes this an identity mapping
-        # at construction time.
-        self.count_event_film = nn.Linear(1, 2 * d_model)
-        nn.init.zeros_(self.count_event_film.weight)
-        nn.init.zeros_(self.count_event_film.bias)
-
-        self.event_head = nn.Linear(d_model, 1)
-        if self.coordinate_mode == "factorized":
-            self.t_head = nn.Linear(d_model, self.Ttok)
-            self.h_head = nn.Linear(d_model, self.Htok)
-            self.w_head = nn.Linear(d_model, self.Wtok)
-            self.grid_head = None
-        else:
-            self.t_head = None
-            self.h_head = None
-            self.w_head = None
-            self.grid_head = nn.Linear(d_model, self.Ntok)
-
-    def flatten_coordinates(
-        self,
-        t: torch.Tensor,
-        h: torch.Tensor,
-        w: torch.Tensor,
-    ) -> torch.Tensor:
-        """Convert THW token coordinates to the repository's flat order."""
-        return t.long() * (self.Htok * self.Wtok) + h.long() * self.Wtok + w.long()
-
-    def unflatten_coordinates(
-        self,
-        flat: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Convert repository-order flat token IDs to THW coordinates."""
-        flat = flat.long()
-        t = torch.div(flat, self.Htok * self.Wtok, rounding_mode="floor")
-        remainder = flat % (self.Htok * self.Wtok)
-        h = torch.div(remainder, self.Wtok, rounding_mode="floor")
-        w = remainder % self.Wtok
-        return t, h, w
-
-    def coordinate_metadata(self) -> Dict[str, int | str]:
-        return {
-            "coordinate_mode": self.coordinate_mode,
-            "Ttok": int(self.Ttok),
-            "Htok": int(self.Htok),
-            "Wtok": int(self.Wtok),
-            "Ntok": int(self.Ntok),
-        }
-
-    
-    
-    def _encode_activity_input(
-        self,
-        a_in: Optional[torch.Tensor],
-        device,
-        dtype,
-    ) -> torch.Tensor:
-        """
-        Encodes masked activity input.
-    
-        a_in:
-            (B,N), with IDs:
-                0 = visible blank
-                1 = visible active
-                2 = masked / predict token
-    
-        Returns:
-            a_vec: (B,D)
-        """
-        if a_in is None:
-            return None
-    
-        if a_in.dim() == 3:
-            a_in = a_in.squeeze(-1)
-    
-        a_in = a_in.to(device=device).long()
-    
-        if a_in.shape[1] != self.Ntok:
-            raise ValueError(
-                f"a_in shape {tuple(a_in.shape)} does not match Ntok={self.Ntok}"
-            )
-    
-        a_tok = self.a_emb(a_in)  # (B,N,D)
-    
-        pos = self.a_pos_emb.to(device=device, dtype=a_tok.dtype)
-        a_tok = a_tok + pos.unsqueeze(0)
-    
-        # Preserve token-state/position interactions by applying nonlinear
-        # processing before the permutation-invariant mean pool.
-        a_tok = self.a_pool(a_tok)  # (B,N,D)
-        a_vec = a_tok.mean(dim=1)   # (B,D)
-
-        return a_vec.to(dtype=dtype)
-        
 
 
-    def apply_roi_mask(
-        self,
-        out: Dict[str, torch.Tensor],
-        roi_mask: Optional[torch.Tensor],
-        fill_value: float = -1e4,
-    ) -> Dict[str, torch.Tensor]:
-        if roi_mask is None:
-            return out
-    
-        if roi_mask.dim() == 3:
-            roi_mask = roi_mask.squeeze(-1)
-    
-        B = roi_mask.shape[0]
-        roi = roi_mask.to(device=out["event_logits"].device).bool()
-        if roi.shape != (B, self.Ntok):
-            raise ValueError(
-                f"roi_mask must have shape {(B, self.Ntok)}, got {tuple(roi.shape)}"
-            )
-
-        out = dict(out)
-        if self.coordinate_mode == "joint_dense":
-            # Avoid an all-masked softmax. Empty-ROI samples retain one harmless
-            # fallback logit, and downstream ROI multiplication makes their
-            # activity exactly zero.
-            safe_roi = roi.clone()
-            empty_roi = ~safe_roi.any(dim=1)
-            if bool(empty_roi.any()):
-                safe_roi[empty_roi, 0] = True
-            out["grid_logits"] = out["grid_logits"].masked_fill(
-                ~safe_roi[:, None, :],
-                fill_value,
-            )
-            out["roi_empty"] = empty_roi
-            return out
-
-        roi_grid = roi.view(B, self.Ttok, self.Htok, self.Wtok)
-    
-        valid_t = roi_grid.any(dim=3).any(dim=2)  # (B,T)
-        valid_h = roi_grid.any(dim=3).any(dim=1)  # (B,H)
-        valid_w = roi_grid.any(dim=2).any(dim=1)  # (B,W)
-    
-        out["t_logits"] = out["t_logits"].masked_fill(~valid_t[:, None, :], fill_value)
-        out["h_logits"] = out["h_logits"].masked_fill(~valid_h[:, None, :], fill_value)
-        out["w_logits"] = out["w_logits"].masked_fill(~valid_w[:, None, :], fill_value)
-    
-        return out
-
-    def apply_roi_axis_mask(
-        self,
-        out: Dict[str, torch.Tensor],
-        roi_mask: Optional[torch.Tensor],
-        fill_value: float = -1e4,
-    ) -> Dict[str, torch.Tensor]:
-        """Backward-compatible alias for the generalized ROI mask."""
-        return self.apply_roi_mask(out, roi_mask, fill_value=fill_value)
-    
-    
-
-    @staticmethod
-    def _expected_count_from_logits(count_logits: torch.Tensor) -> torch.Tensor:
-        count_prob = F.softmax(count_logits.float(), dim=-1)
-        count_values = torch.arange(
-            count_prob.shape[-1],
-            device=count_prob.device,
-            dtype=count_prob.dtype,
-        )
-        return (count_prob * count_values.unsqueeze(0)).sum(dim=-1)
-
-    @staticmethod
-    def _shared_count_bias(
-        event_logits_raw: torch.Tensor,
-        target_count: torch.Tensor,
-        *,
-        iterations: int = 24,
-    ) -> torch.Tensor:
-        """Find one shared bias/sample that matches expected event mass."""
-        target = target_count.to(
-            device=event_logits_raw.device,
-            dtype=event_logits_raw.dtype,
-        ).clamp(0.0, float(event_logits_raw.shape[1]))
-        lo = event_logits_raw.new_full((event_logits_raw.shape[0],), -30.0)
-        hi = event_logits_raw.new_full((event_logits_raw.shape[0],), 30.0)
-        for _ in range(int(iterations)):
-            mid = 0.5 * (lo + hi)
-            mass = torch.sigmoid(event_logits_raw + mid.unsqueeze(1)).sum(dim=1)
-            too_small = mass < target
-            lo = torch.where(too_small, mid, lo)
-            hi = torch.where(too_small, hi, mid)
-        return 0.5 * (lo + hi)
-
-    def forward(
-        self,
-        global_ctx: torch.Tensor,  # (B,G)
-        local_ctx: torch.Tensor,   # (B,L)
-        task_id: torch.Tensor,     # (B,)
-        a_in: Optional[torch.Tensor] = None,
-        roi_mask: Optional[torch.Tensor] = None,
-        count_target: Optional[torch.Tensor] = None,
-        count_teacher_prob: float = 0.0,
-    ) -> Dict[str, torch.Tensor]:
-        """Run count and event branches with detached count conditioning."""
-        B = global_ctx.shape[0]
-        g = self.global_proj(global_ctx).unsqueeze(1)
-        l = self.local_proj(local_ctx).unsqueeze(1)
-        task = self.task_emb(task_id.long()).unsqueeze(1)
-
-        a_vec = self._encode_activity_input(
-            a_in=a_in, device=global_ctx.device, dtype=global_ctx.dtype
-        )
-        a_tok = torch.zeros_like(g) if a_vec is None else a_vec.unsqueeze(1)
-        q = self.event_queries.unsqueeze(0).expand(B, -1, -1) + a_tok
-        x = torch.cat([g, l, task, a_tok, q], dim=1)
-        h = self.encoder(x)
-        ctx_h = h[:, :4].mean(dim=1)
-        ev_h = h[:, 4:]
-
-        count_logits = self.count_head(ctx_h)
-        predicted_count = self._expected_count_from_logits(count_logits).to(
-            dtype=ev_h.dtype
-        ).detach()
-        teacher_prob = float(max(0.0, min(1.0, count_teacher_prob)))
-        if count_target is not None and teacher_prob > 0.0:
-            teacher_count = count_target.to(
-                device=ev_h.device, dtype=ev_h.dtype
-            ).detach()
-            conditioned_count = (
-                teacher_prob * teacher_count
-                + (1.0 - teacher_prob) * predicted_count
-            )
-        else:
-            conditioned_count = predicted_count
-
-        count_scalar = (conditioned_count / max(float(self.Kmax), 1.0)).unsqueeze(-1)
-        gamma_beta = self.count_event_film(count_scalar)
-        gamma, beta = gamma_beta.chunk(2, dim=-1)
-        ev_h_counted = ev_h * (1.0 + gamma.unsqueeze(1)) + beta.unsqueeze(1)
-
-        event_logits_raw = self.event_head(ev_h_counted).squeeze(-1)
-        event_bias = self._shared_count_bias(
-            event_logits_raw.detach().float(),
-            conditioned_count.detach().float(),
-        ).to(dtype=event_logits_raw.dtype)
-        event_logits = event_logits_raw + event_bias.unsqueeze(1)
-        out = {
-            "count_logits": count_logits,
-            "count_expected": predicted_count,
-            "count_condition": conditioned_count,
-            "event_logits_raw": event_logits_raw,
-            "event_calibration_bias": event_bias,
-            "event_logits": event_logits,
-        }
-        if self.coordinate_mode == "joint_dense":
-            out["grid_logits"] = self.grid_head(ev_h_counted)
-        else:
-            out["t_logits"] = self.t_head(ev_h_counted)
-            out["h_logits"] = self.h_head(ev_h_counted)
-            out["w_logits"] = self.w_head(ev_h_counted)
-        return self.apply_roi_mask(out, roi_mask)
-
-    def select_counts(
-        self,
-        count_logits: torch.Tensor,
-        *,
-        mode: str = "expected",
-        temperature: float = 1.0,
-        stochastic_round: bool = False,
-    ) -> torch.Tensor:
-        """Convert count logits into one integer count per sample.
-
-        ``expected`` is the stable default. It uses the probability-weighted
-        count and then rounds it. ``categorical`` and ``argmax`` are retained
-        for explicit stochastic or modal sampling experiments.
-        """
-        mode = str(mode).lower()
-        if mode not in ("expected", "categorical", "argmax"):
-            raise ValueError(
-                f"Unsupported count selection mode={mode!r}. "
-                "Use 'expected', 'categorical', or 'argmax'."
-            )
-
-        if mode == "argmax" or float(temperature) <= 0.0:
-            return count_logits.argmax(dim=-1)
-
-        scaled_logits = count_logits / max(float(temperature), 1e-6)
-
-        if mode == "categorical":
-            return torch.distributions.Categorical(logits=scaled_logits).sample()
-
-        count_prob = F.softmax(scaled_logits, dim=-1)
-        count_values = torch.arange(
-            count_prob.shape[-1],
-            device=count_prob.device,
-            dtype=count_prob.dtype,
-        )
-        count_expected = (count_prob * count_values.unsqueeze(0)).sum(dim=-1)
-
-        if stochastic_round:
-            count_floor = count_expected.floor()
-            count_selected = count_floor + torch.bernoulli(
-                count_expected - count_floor
-            )
-        else:
-            count_selected = count_expected.round()
-
-        return count_selected.long()
-
-    def soft_activity_grid(
-        self,
-        out: Dict[str, torch.Tensor],
-        clamp: bool = True,
-        roi_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """
-        Converts event coordinate distributions to a soft activity grid.
-
-        Returns:
-            activity_grid: (B,Ttok,Htok,Wtok)
-        """
-
-        activity = self.soft_activity_flat(out, roi_mask=roi_mask).view(
-            out["event_logits"].shape[0],
-            self.Ttok,
-            self.Htok,
-            self.Wtok,
-        )
-        return activity.clamp(0.0, 1.0) if clamp else activity
-
-    def soft_activity_flat(
-        self,
-        out: Dict[str, torch.Tensor],
-        roi_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """
-        Returns:
-            activity_flat: (B,Ntok), THW-flattened
-        """
-        event_p = torch.sigmoid(out["event_logits"])  # (B,K)
-        if self.coordinate_mode == "joint_dense":
-            grid_p = F.softmax(out["grid_logits"], dim=-1)  # (B,K,N)
-            flat = (event_p.unsqueeze(-1) * grid_p).sum(dim=1)
-        else:
-            pt = F.softmax(out["t_logits"], dim=-1)
-            ph = F.softmax(out["h_logits"], dim=-1)
-            pw = F.softmax(out["w_logits"], dim=-1)
-            activity = (
-                event_p[:, :, None, None, None]
-                * pt[:, :, :, None, None]
-                * ph[:, :, None, :, None]
-                * pw[:, :, None, None, :]
-            ).sum(dim=1)
-            flat = activity.reshape(out["event_logits"].shape[0], self.Ntok)
-        
-        if roi_mask is not None:
-            if roi_mask.dim() == 3:
-                roi_mask = roi_mask.squeeze(-1)
-            roi_mask = roi_mask.to(device=flat.device, dtype=flat.dtype)
-            flat = flat * roi_mask
-        
-        return flat
-
-
-    @torch.no_grad()
-    def sample_hard_activity_gridtopk(
-        self,
-        out: Dict[str, torch.Tensor],
-        count_temperature: float = 1.0,
-        count_mode: str = "expected",
-        count_stochastic_round: bool = False,
-        roi_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        count_logits = out["count_logits"]
-        B = count_logits.shape[0]
-        device = count_logits.device
-
-        counts = self.select_counts(
-            count_logits,
-            mode=count_mode,
-            temperature=count_temperature,
-            stochastic_round=count_stochastic_round,
-        )
-    
-        score = self.soft_activity_flat(out, roi_mask=roi_mask)  # (B,N)
-    
-        if roi_mask is not None:
-            if roi_mask.dim() == 3:
-                roi_mask = roi_mask.squeeze(-1)
-            roi_mask = roi_mask.to(device=device).bool()
-            score = score.masked_fill(~roi_mask, -1.0)
-    
-        activity = torch.zeros(B, self.Ntok, device=device, dtype=torch.long)
-    
-        for b in range(B):
-            if roi_mask is not None:
-                max_valid = int(roi_mask[b].sum().item())
-            else:
-                max_valid = self.Ntok
-    
-            n = int(counts[b].clamp(0, min(self.Kmax, max_valid)).item())
-            if n <= 0:
-                continue
-    
-            idx = torch.topk(score[b], k=n).indices
-            activity[b, idx] = 1
-    
-        return activity
-
-
-    @torch.no_grad()
-    def sample_hard_activity(
-        self,
-        out: Dict[str, torch.Tensor],
-        count_temperature: float = 1.0,
-        count_mode: str = "expected",
-        count_stochastic_round: bool = False,
-        coord_temperature: float = 1.0,
-        roi_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """
-        Inference-only hard activity sampling.
-
-        Returns:
-            activity_flat: (B,Ntok), 0/1, THW-flattened
-        """
-
-        count_logits = out["count_logits"]                   # (B,K+1)
-        B = count_logits.shape[0]
-        device = count_logits.device
-
-        counts = self.select_counts(
-            count_logits,
-            mode=count_mode,
-            temperature=count_temperature,
-            stochastic_round=count_stochastic_round,
-        )                                                     # (B,)
-
-        event_score = torch.sigmoid(out["event_logits"])     # (B,K)
-
-        if self.coordinate_mode == "joint_dense":
-            if coord_temperature <= 0:
-                flat = out["grid_logits"].argmax(dim=-1)
-            else:
-                flat = torch.distributions.Categorical(
-                    logits=out["grid_logits"] / coord_temperature
-                ).sample()
-        else:
-            if coord_temperature <= 0:
-                t = out["t_logits"].argmax(dim=-1)
-                h = out["h_logits"].argmax(dim=-1)
-                w = out["w_logits"].argmax(dim=-1)
-            else:
-                t = torch.distributions.Categorical(
-                    logits=out["t_logits"] / coord_temperature
-                ).sample()
-                h = torch.distributions.Categorical(
-                    logits=out["h_logits"] / coord_temperature
-                ).sample()
-                w = torch.distributions.Categorical(
-                    logits=out["w_logits"] / coord_temperature
-                ).sample()
-            flat = self.flatten_coordinates(t, h, w)
-        
-        if roi_mask is not None:
-            if roi_mask.dim() == 3:
-                roi_mask = roi_mask.squeeze(-1)
-            roi_mask = roi_mask.to(device=device).bool()
-        
-            valid = roi_mask.gather(1, flat.clamp(0, self.Ntok - 1))
-            event_score = event_score.masked_fill(~valid, -1.0)
-
-        activity = torch.zeros(
-            B,
-            self.Ntok,
-            device=device,
-            dtype=torch.long,
-        )
-
-        for b in range(B):
-            n = int(counts[b].clamp(0, self.Kmax).item())
-            if n <= 0:
-                continue
-
-            chosen_queries = torch.topk(event_score[b], k=n).indices
-            chosen_flat = flat[b, chosen_queries]
-                
-            if roi_mask is not None:
-                valid_chosen = roi_mask[b].gather(0, chosen_flat.clamp(0, self.Ntok - 1))
-                chosen_flat = chosen_flat[valid_chosen]
-            
-            activity[b, chosen_flat] = 1
-
-        return activity
 
 
 def infer_activity_coordinate_mode_from_state_dict(
@@ -593,6 +27,26 @@ def infer_activity_coordinate_mode_from_state_dict(
         for key in state_dict
         for prefix in ("t_head.", "h_head.", "w_head.")
     )
+    # SparseRegionActivityPrior factorizes the joint grid softmax as
+    # region x within-region, so it carries no monolithic grid_head.
+    has_region = any(
+        key.startswith(prefix)
+        for key in state_dict
+        for prefix in ("region_head.", "within_head.")
+    )
+    if has_region and has_axis:
+        raise RuntimeError(
+            "Activity state dict contains both region and factorized-axis heads."
+        )
+    # MaskGITActivityPrior has no coordinate head at all -- it emits one Bernoulli
+    # per cell, so there is nothing to factorize. It still reports "joint_dense"
+    # because that is the only parameterization it is compatible with, and the
+    # loader compares this against the constructed module's coordinate_mode.
+    if any(key.startswith("cell_head.") or key.startswith("cell_queries")
+           for key in state_dict):
+        return "joint_dense"
+    if has_region:
+        return "joint_dense"
     if has_grid and has_axis:
         raise RuntimeError(
             "Activity state dict contains both joint and factorized coordinate heads."
@@ -615,10 +69,9 @@ def build_activity_targets_from_codes(
     predict_mask: Optional[torch.Tensor] = None,
 ) -> Dict[str, torch.Tensor]:
     """
-    Builds sparse activity targets for DETR-style matching.
+    Builds activity targets for the Stage 3B activity prior.
 
     Does NOT assign target j to query j.
-    Hungarian matching is handled inside detr_activity_loss().
     """
 
     Ttok, Htok, Wtok = map(int, token_grid)
@@ -643,6 +96,8 @@ def build_activity_targets_from_codes(
             raise ValueError(
                 f"predict_mask shape {tuple(predict_mask.shape)} does not match active {tuple(active.shape)}"
             )
+        active_full = active.clone()
+        visible_active = active_full & ~predict_mask
         active = active & predict_mask
     
     raw_count = active.sum(dim=1)                  # (B,)
@@ -677,7 +132,22 @@ def build_activity_targets_from_codes(
     
     count_target = raw_count.long()
 
-    activity_flat = active.long()                  # (B,N)
+    activity_flat = active.long()                  # (B,N)  ROI-restricted targets
+
+    # Full-clip activity and the visible-active set. Structural statistics such
+    # as adjacency must be measured on the COMPOSED clip -- visible tokens plus
+    # whatever the model predicts inside the ROI -- never inside the ROI alone.
+    # An ROI is an arbitrary window: measuring persistence within it truncates
+    # every run of activity at the window edge, so the "target rate" would track
+    # mask geometry rather than the data (measured: 0.43 unmasked vs 0.25 for a
+    # short noncausal span). The contexts are all full-clip, so the structural
+    # target must be too.
+    if predict_mask is not None:
+        activity_flat_full = active_full.long()
+        visible_active_flat = visible_active.long()
+    else:
+        activity_flat_full = activity_flat
+        visible_active_flat = torch.zeros_like(activity_flat)
 
     active_flat_padded = torch.zeros(
         B, Kmax, device=device, dtype=torch.long
@@ -713,7 +183,9 @@ def build_activity_targets_from_codes(
     return {
         "count_target": count_target,              # (B,)
         "raw_count": raw_count,                    # (B,)
-        "activity_flat": activity_flat,            # (B,N)
+        "activity_flat": activity_flat,
+        "activity_flat_full": activity_flat_full,
+        "visible_active_flat": visible_active_flat,            # (B,N)
         "predict_mask": predict_mask if predict_mask is not None else None,
         # Padded GT active-token set. Matching happens in loss.
         "active_flat_padded": active_flat_padded,  # (B,Kmax)
@@ -724,419 +196,39 @@ def build_activity_targets_from_codes(
     }
 
 
-def detr_activity_loss(
-    out: Dict[str, torch.Tensor],
-    targets: Dict[str, torch.Tensor],
-    activity_prior: DETRActivityPrior,
-    *,
-    lambda_count: float = 1.0,
-    lambda_count_neighbor: float = 0.25,
-    lambda_count_distance: float = 0.05,
-    lambda_obj: float = 1.0,
-    lambda_coord: float = 1.0,
-    lambda_soft_count: float = 0.1,
-    lambda_soft_grid: float = 0.0,
-    lambda_dup: float = 0.10,
-    no_object_weight: float = 0.1,
-    count_neighbor_k: int = 11,
-    count_neighbor_tau: float = 2.0,
-    count_distance_scale: float = 5.0,
-    soft_count_beta: float = 5.0,
-) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+def _soft_coactivation_rate(
+    grid: torch.Tensor,
+    shifts: Tuple[Tuple[int, int, int], ...],
+) -> torch.Tensor:
+    """P(a shifted neighbour is active | this token is active), per sample.
+
+    ``grid`` is (B,T,H,W) with values in [0,1]; hard 0/1 targets are a special
+    case, so predictions and targets go through identical code. Each shift
+    contributes the co-activation mass over the overlapping region, normalised
+    by the activity mass in that same region -- so the result is a conditional
+    rate rather than a raw count, and is comparable between a sparse prediction
+    and a sparse target.
     """
-    DETR-style activity loss.
+    num = grid.new_zeros(grid.shape[0])
+    den = grid.new_zeros(grid.shape[0])
+    for dt, dh, dw in shifts:
+        a = grid[:,
+                 max(dt, 0):grid.shape[1] + min(dt, 0),
+                 max(dh, 0):grid.shape[2] + min(dh, 0),
+                 max(dw, 0):grid.shape[3] + min(dw, 0)]
+        b = grid[:,
+                 max(-dt, 0):grid.shape[1] - max(dt, 0),
+                 max(-dh, 0):grid.shape[2] - max(dh, 0),
+                 max(-dw, 0):grid.shape[3] - max(dw, 0)]
+        # ``b`` is the conditioning set (the token that is active); ``a`` is its
+        # shifted neighbour. Normalising by b gives P(neighbour | active), which
+        # is the quantity measured on the data; normalising by a would give the
+        # reverse conditional.
+        num = num + (a * b).sum(dim=(1, 2, 3))
+        den = den + b.sum(dim=(1, 2, 3))
+    return num / den.clamp_min(1e-6)
 
-    Hungarian matching assigns predicted event queries to GT active tokens.
-    Unmatched queries are trained as no-object.
-    """
 
-    if linear_sum_assignment is None:
-        raise ImportError(
-            "scipy is required for Hungarian matching. Install scipy or replace "
-            "linear_sum_assignment with another assignment solver."
-        )
-
-    count_logits = out["count_logits"]              # (B,K+1)
-    event_logits = out["event_logits"]              # (B,K)
-    coordinate_mode = activity_prior.coordinate_mode
-    if coordinate_mode == "joint_dense":
-        grid_logits = out["grid_logits"]            # (B,K,N)
-        t_logits = h_logits = w_logits = None
-    else:
-        t_logits = out["t_logits"]                  # (B,K,T)
-        h_logits = out["h_logits"]                  # (B,K,H)
-        w_logits = out["w_logits"]                  # (B,K,W)
-        grid_logits = None
-
-    B, Kmax = event_logits.shape
-    device = event_logits.device
-
-    count_target = targets["count_target"].long()   # (B,)
-    active_valid = targets["active_valid"].bool()   # (B,K)
-    t_target_all = targets["t_target"].long()       # (B,K)
-    h_target_all = targets["h_target"].long()       # (B,K)
-    w_target_all = targets["w_target"].long()       # (B,K)
-    flat_target_all = targets["active_flat_padded"].long()  # (B,K)
-
-    # ------------------------------------------------------------
-    # 1. Count classification: exact + ordered-neighbor + expected distance
-    # ------------------------------------------------------------
-    # Keep the ordinal count objective in FP32. Under AMP, count_logits may
-    # be float16/bfloat16 while softmax is promoted to float32; scatter_
-    # requires the destination and source dtypes to match exactly. FP32 also
-    # preserves the small neighbor-target probabilities more accurately.
-    count_logits_loss = count_logits.float()
-
-    loss_count_exact = F.cross_entropy(
-        count_logits_loss,
-        count_target,
-    )
-
-    count_values = torch.arange(
-        count_logits.shape[-1],
-        device=device,
-        dtype=torch.float32,
-    )
-    count_distance = (
-        count_values.unsqueeze(0)
-        - count_target.float().unsqueeze(1)
-    ).abs()
-
-    neighbor_k = max(1, min(int(count_neighbor_k), count_logits.shape[-1]))
-    near_distance, near_index = torch.topk(
-        count_distance,
-        k=neighbor_k,
-        largest=False,
-        dim=-1,
-    )
-    neighbor_target_local = F.softmax(
-        -near_distance / max(float(count_neighbor_tau), 1e-6),
-        dim=-1,
-    )
-    neighbor_target = torch.zeros_like(count_logits_loss).scatter(
-        1,
-        near_index,
-        neighbor_target_local,
-    )
-    count_log_prob = F.log_softmax(count_logits_loss, dim=-1)
-    count_prob = count_log_prob.exp()
-
-    loss_count_neighbor = -(
-        neighbor_target * count_log_prob
-    ).sum(dim=-1).mean()
-
-    loss_count_distance = (
-        count_prob * count_distance
-    ).sum(dim=-1).mean() / max(float(count_distance_scale), 1e-6)
-
-    loss_count = (
-        float(lambda_count) * loss_count_exact
-        + float(lambda_count_neighbor) * loss_count_neighbor
-        + float(lambda_count_distance) * loss_count_distance
-    )
-
-    # ------------------------------------------------------------
-    # 2. Hungarian matching per sample
-    # ------------------------------------------------------------
-    event_target = torch.zeros_like(event_logits)    # (B,K)
-    matched_query = []
-    matched_t = []
-    matched_h = []
-    matched_w = []
-    matched_flat = []
-
-    # Matching is discrete, so do not retain a backward graph for the dense
-    # log-probability tables. These tensors are reused for diagnostics below.
-    with torch.no_grad():
-        if coordinate_mode == "joint_dense":
-            log_grid = F.log_softmax(grid_logits.float(), dim=-1)
-            logpt = logph = logpw = None
-        else:
-            logpt = F.log_softmax(t_logits.float(), dim=-1)
-            logph = F.log_softmax(h_logits.float(), dim=-1)
-            logpw = F.log_softmax(w_logits.float(), dim=-1)
-            log_grid = None
-
-        obj_prob = torch.sigmoid(event_logits.float())  # (B,K)
-
-    for b in range(B):
-        n_gt = int(active_valid[b].sum().item())
-        if n_gt <= 0:
-            continue
-
-        gt_t = t_target_all[b, :n_gt]                # (n_gt,)
-        gt_h = h_target_all[b, :n_gt]                # (n_gt,)
-        gt_w = w_target_all[b, :n_gt]                # (n_gt,)
-        gt_flat = flat_target_all[b, :n_gt]          # (n_gt,)
-
-        # Cost shape: (K queries, n_gt targets)
-        # Lower is better.
-        if coordinate_mode == "joint_dense":
-            cost_coord = -log_grid[b][:, gt_flat]    # (K,n_gt)
-        else:
-            cost_t = -logpt[b][:, gt_t]              # (K,n_gt)
-            cost_h = -logph[b][:, gt_h]              # (K,n_gt)
-            cost_w = -logpw[b][:, gt_w]              # (K,n_gt)
-            cost_coord = cost_t + cost_h + cost_w
-
-        # Prefer high-objectness queries for real active tokens.
-        cost_obj = -obj_prob[b].clamp(1e-6, 1 - 1e-6).log().unsqueeze(1)
-
-        cost = (
-            lambda_obj * cost_obj
-            + lambda_coord * cost_coord
-        )
-
-        row_ind, col_ind = linear_sum_assignment(
-            cost.detach().cpu().float().numpy()
-        )
-
-        row_ind = torch.as_tensor(row_ind, device=device, dtype=torch.long)
-        col_ind = torch.as_tensor(col_ind, device=device, dtype=torch.long)
-
-        event_target[b, row_ind] = 1.0
-
-        matched_query.append(
-            torch.stack([
-                torch.full_like(row_ind, b),
-                row_ind,
-            ], dim=1)
-        )
-        matched_t.append(gt_t[col_ind])
-        matched_h.append(gt_h[col_ind])
-        matched_w.append(gt_w[col_ind])
-        matched_flat.append(gt_flat[col_ind])
-
-    # ------------------------------------------------------------
-    # 3. Object/no-object loss
-    # ------------------------------------------------------------
-    obj_weight = torch.ones_like(event_target)
-    obj_weight[event_target < 0.5] = float(no_object_weight)
-
-    loss_obj = F.binary_cross_entropy_with_logits(
-        event_logits,
-        event_target,
-        weight=obj_weight,
-    )
-
-    # ------------------------------------------------------------
-    # 4. Coordinate CE only on matched queries
-    # ------------------------------------------------------------
-    if len(matched_query) > 0:
-        matched_query = torch.cat(matched_query, dim=0)      # (M,2)
-        matched_t = torch.cat(matched_t, dim=0)              # (M,)
-        matched_h = torch.cat(matched_h, dim=0)              # (M,)
-        matched_w = torch.cat(matched_w, dim=0)              # (M,)
-        matched_flat = torch.cat(matched_flat, dim=0)        # (M,)
-
-        b_idx = matched_query[:, 0]
-        q_idx = matched_query[:, 1]
-
-        if coordinate_mode == "joint_dense":
-            loss_coord = F.cross_entropy(
-                grid_logits[b_idx, q_idx].float(),
-                matched_flat,
-            )
-            loss_t = loss_h = loss_w = loss_coord.detach() * 0.0
-        else:
-            loss_t = F.cross_entropy(t_logits[b_idx, q_idx], matched_t)
-            loss_h = F.cross_entropy(h_logits[b_idx, q_idx], matched_h)
-            loss_w = F.cross_entropy(w_logits[b_idx, q_idx], matched_w)
-            loss_coord = loss_t + loss_h + loss_w
-    else:
-        loss_coord = event_logits.sum() * 0.0
-        loss_t = loss_h = loss_w = loss_coord
-
-    # ------------------------------------------------------------
-    # 5. Soft count regularizer
-    # ------------------------------------------------------------
-    event_p = torch.sigmoid(event_logits)                    # (B,K)
-    soft_count = event_p.sum(dim=1)                          # (B,)
-
-    loss_soft_count = F.smooth_l1_loss(
-        soft_count,
-        count_target.float(),
-        beta=max(float(soft_count_beta), 1e-6),
-    )
-
-    # ------------------------------------------------------------
-    # 6. Optional soft grid BCE
-    # ------------------------------------------------------------
-    soft_activity = activity_prior.soft_activity_flat(
-        out,
-        roi_mask=targets.get("predict_mask", None),
-    )
-
-    if lambda_soft_grid > 0:
-        with torch.cuda.amp.autocast(enabled=False):
-            loss_soft_grid = F.binary_cross_entropy(
-                soft_activity.float().clamp(1e-6, 1.0 - 1e-6),
-                targets["activity_flat"].float(),
-            )
-    else:
-        loss_soft_grid = soft_activity.sum() * 0.0
-
-    # ------------------------------------------------------------
-    # 7. Duplicate occupancy penalty
-    # ------------------------------------------------------------
-    soft_grid_raw = activity_prior.soft_activity_grid(
-        out,
-        clamp=False,
-        roi_mask=targets.get("predict_mask", None),
-    )  # (B,T,H,W)
-    loss_dup = F.relu(soft_grid_raw - 1.0).pow(2).mean()
-
-    loss = (
-        loss_count
-        + lambda_obj * loss_obj
-        + lambda_coord * loss_coord
-        + lambda_soft_count * loss_soft_count
-        + lambda_soft_grid * loss_soft_grid
-        + lambda_dup * loss_dup
-    )
-
-    with torch.no_grad():
-        count_mode = count_logits.argmax(dim=-1)
-        count_expected = (
-            count_prob * count_values.unsqueeze(0)
-        ).sum(dim=-1)
-        count_expected_round = count_expected.round().long()
-        count_acc = (count_mode == count_target).float().mean()
-        count_topk_k = min(5, count_logits.shape[-1])
-        count_topk = count_logits.topk(count_topk_k, dim=-1).indices
-        count_topk_acc = (
-            count_topk == count_target.unsqueeze(-1)
-        ).any(dim=-1).float().mean()
-        count_expected_error = count_expected - count_target.float()
-        count_mode_error = count_mode.float() - count_target.float()
-        count_entropy = -(
-            count_prob * count_log_prob
-        ).sum(dim=-1).mean()
-
-        if coordinate_mode == "joint_dense":
-            grid_log_prob_diag = log_grid
-            grid_prob_diag = grid_log_prob_diag.exp()
-            joint_grid_entropy = -(
-                grid_prob_diag * grid_log_prob_diag
-            ).sum(dim=-1).mean()
-            joint_grid_max_probability = grid_prob_diag.max(dim=-1).values.mean()
-        else:
-            pt_diag = logpt.exp()
-            ph_diag = logph.exp()
-            pw_diag = logpw.exp()
-            joint_grid_entropy = (
-                -(pt_diag * pt_diag.clamp_min(1e-12).log()).sum(dim=-1)
-                -(ph_diag * ph_diag.clamp_min(1e-12).log()).sum(dim=-1)
-                -(pw_diag * pw_diag.clamp_min(1e-12).log()).sum(dim=-1)
-            ).mean()
-            joint_grid_max_probability = (
-                pt_diag.max(dim=-1).values
-                * ph_diag.max(dim=-1).values
-                * pw_diag.max(dim=-1).values
-            ).mean()
-
-        if len(matched_query) > 0:
-            if coordinate_mode == "joint_dense":
-                matched_coord_logits = grid_logits[b_idx, q_idx].float()
-                matched_flat_top1 = (
-                    matched_coord_logits.argmax(dim=-1) == matched_flat
-                ).float().mean()
-                top5_k = min(5, matched_coord_logits.shape[-1])
-                matched_flat_top5 = (
-                    matched_coord_logits.topk(top5_k, dim=-1).indices
-                    == matched_flat.unsqueeze(-1)
-                ).any(dim=-1).float().mean()
-                matched_t_accuracy = matched_h_accuracy = matched_w_accuracy = (
-                    matched_flat_top1.new_zeros(())
-                )
-                factorized_axis_metrics_available = matched_flat_top1.new_zeros(())
-            else:
-                matched_t_logits = t_logits[b_idx, q_idx].float()
-                matched_h_logits = h_logits[b_idx, q_idx].float()
-                matched_w_logits = w_logits[b_idx, q_idx].float()
-                matched_t_accuracy = (
-                    matched_t_logits.argmax(dim=-1) == matched_t
-                ).float().mean()
-                matched_h_accuracy = (
-                    matched_h_logits.argmax(dim=-1) == matched_h
-                ).float().mean()
-                matched_w_accuracy = (
-                    matched_w_logits.argmax(dim=-1) == matched_w
-                ).float().mean()
-                matched_joint_logits = (
-                    F.log_softmax(matched_t_logits, dim=-1)[:, :, None, None]
-                    + F.log_softmax(matched_h_logits, dim=-1)[:, None, :, None]
-                    + F.log_softmax(matched_w_logits, dim=-1)[:, None, None, :]
-                ).reshape(matched_flat.shape[0], activity_prior.Ntok)
-                matched_flat_top1 = (
-                    matched_joint_logits.argmax(dim=-1) == matched_flat
-                ).float().mean()
-                top5_k = min(5, matched_joint_logits.shape[-1])
-                matched_flat_top5 = (
-                    matched_joint_logits.topk(top5_k, dim=-1).indices
-                    == matched_flat.unsqueeze(-1)
-                ).any(dim=-1).float().mean()
-                factorized_axis_metrics_available = matched_flat_top1.new_ones(())
-        else:
-            zero_metric = event_logits.new_zeros((), dtype=torch.float32)
-            matched_flat_top1 = zero_metric
-            matched_flat_top5 = zero_metric
-            matched_t_accuracy = zero_metric
-            matched_h_accuracy = zero_metric
-            matched_w_accuracy = zero_metric
-            factorized_axis_metrics_available = zero_metric
-
-    aux = {
-        "loss": loss.detach(),
-        "loss_count": loss_count.detach(),
-        "loss_count_exact": loss_count_exact.detach(),
-        "loss_count_neighbor": loss_count_neighbor.detach(),
-        "loss_count_distance": loss_count_distance.detach(),
-        "loss_obj": loss_obj.detach(),
-        "loss_coord": loss_coord.detach(),
-        "loss_t": loss_t.detach(),
-        "loss_h": loss_h.detach(),
-        "loss_w": loss_w.detach(),
-        "loss_soft_count": loss_soft_count.detach(),
-        "loss_soft_grid": loss_soft_grid.detach(),
-        "loss_dup": loss_dup.detach(),
-        "pred_count_mean": soft_count.detach().mean(),
-        "event_soft_count_mean": soft_count.detach().mean(),
-        "count_expected_mean": count_expected.detach().mean(),
-        "count_mode_mean": count_mode.float().detach().mean(),
-        "hard_count_mean": count_mode.float().detach().mean(),
-        "target_count_mean": count_target.float().detach().mean(),
-        "target_raw_count_mean": targets["raw_count"].float().detach().mean(),
-        "count_acc": count_acc.detach(),
-        "count_top5_acc": count_topk_acc.detach(),
-        "count_expected_mae": count_expected_error.abs().mean().detach(),
-        "count_expected_rmse": count_expected_error.square().mean().sqrt().detach(),
-        "count_mode_mae": count_mode_error.abs().mean().detach(),
-        "count_within_1": (
-            (count_expected_round - count_target).abs() <= 1
-        ).float().mean().detach(),
-        "count_within_3": (
-            (count_expected_round - count_target).abs() <= 3
-        ).float().mean().detach(),
-        "count_within_5": (
-            (count_expected_round - count_target).abs() <= 5
-        ).float().mean().detach(),
-        "count_entropy": count_entropy.detach(),
-        "matched_flat_top1_acc": matched_flat_top1.detach(),
-        "matched_flat_top5_acc": matched_flat_top5.detach(),
-        "matched_t_acc": matched_t_accuracy.detach(),
-        "matched_h_acc": matched_h_accuracy.detach(),
-        "matched_w_acc": matched_w_accuracy.detach(),
-        "factorized_axis_metrics_available": factorized_axis_metrics_available.detach(),
-        "joint_grid_entropy": joint_grid_entropy.detach(),
-        "joint_grid_max_probability": joint_grid_max_probability.detach(),
-        "count_head_event_gap": (
-            count_expected - soft_count
-        ).abs().mean().detach(),
-        "matched_tokens": event_target.sum().detach(),
-    }
-
-    return loss, aux
 
 
 class MaskGITMotifPrior(nn.Module):
@@ -1263,11 +355,44 @@ class MaskGITMotifPrior(nn.Module):
             nn.GELU(),
             nn.LayerNorm(d_model),
         )
-        # Deterministic convex-hull coefficient predictor.  The historical
-        # name ``alpha_mu_head`` is retained so checkpoints produced by the
-        # current Stage 3A implementation load strictly, but its output is
-        # simply the alpha logits; there is no learned variance head.
+        # Dirichlet concentration head over the K2 convex-hull coefficients.
+        #
+        # alpha is irreducibly stochastic given z1: the optimal point predictor
+        # (the z1-conditional mean) explains only ~0.25% of the residual
+        # variance, so regressing alpha produces a hull interior point that no
+        # real sample occupies. Modelling p(alpha | z1, context) as a Dirichlet
+        # and SAMPLING from it is what makes convex-hull generation meaningful.
+        #
+        # The parameter name is unchanged so existing Stage 3A checkpoints still
+        # load; only the interpretation of the output differs (concentration via
+        # softplus rather than softmax logits).
         self.alpha_mu_head = nn.Linear(d_model, K2)
+        # Floor of 1.0, not ~0.
+        #
+        # The exact simplex projection produces genuine zeros in alpha. With
+        # concentration < 1 the term (conc-1)*log(alpha) turns those clamped
+        # zeros into a large POSITIVE log-likelihood, so the head can drive NLL
+        # toward -inf with a symmetric tiny concentration -- samples land near
+        # random corners and the mean stays uniform. That is a likelihood
+        # exploit, not a fit, and it is what the first Dirichlet run collapsed
+        # to (z2 loss -67, alpha entropy 2.03 == uniform).
+        #
+        # conc >= 1 keeps the density bounded on the simplex while still
+        # allowing sharply peaked fits via large concentration on the children
+        # that matter.
+        # 0.25, not 1.0: a floor of 1.0 caps the representable per-component
+        # spread near 0.11, while the data's intrinsic conditional spread is
+        # ~0.213, so conc>=1 cannot reproduce how dispersed alpha actually is.
+        # 0.25 admits that spread while keeping the sparse-target exploit
+        # bounded (finite, not -inf) -- and loss_alpha_residual counterweights
+        # it by rewarding a correct MEAN, which requires asymmetric conc.
+        self.alpha_concentration_floor = 0.25
+        # Dirichlet NLL is unbounded below: density -> infinity as the
+        # concentration grows, so an uncapped head can drive the loss to -inf by
+        # collapsing onto a spike instead of fitting the conditional spread.
+        # The cap bounds the attainable sharpness well above anything the data
+        # supports (sum up to K2 * cap) while removing the degenerate optimum.
+        self.alpha_concentration_max = 200.0
     
         # Prefix context tokens
         self.task_emb = nn.Embedding(num_tasks, d_model)        
@@ -1437,22 +562,21 @@ class MaskGITMotifPrior(nn.Module):
             z1_info = z1_pred_info  # (B,N,D)
     
         h_z2 = h_z1 + self.z1_to_z2(z1_info)  # (B,N,D)
-        alpha_logits = self.alpha_mu_head(h_z2)  # (B,N,K2)
-        alpha_mean = F.softmax(alpha_logits, dim=-1)
+        alpha_raw = self.alpha_mu_head(h_z2)  # (B,N,K2)
+        alpha_concentration = (
+            float(self.alpha_concentration_floor) + F.softplus(alpha_raw)
+        ).clamp(max=float(self.alpha_concentration_max))
+        # Dirichlet mean, for deterministic readout and diagnostics. Generation
+        # should SAMPLE from the Dirichlet rather than use this.
+        alpha_mean = alpha_concentration / alpha_concentration.sum(
+            dim=-1, keepdim=True
+        )
 
         return {
             "z1": z1_logits,
-            # Compatibility aliases: existing decoder/training code expects
-            # ``z2`` and ``alpha_mu`` to contain K2 alpha logits.
-            "z2": alpha_logits,
-            "alpha_logits": alpha_logits,
-            "alpha_mu": alpha_logits,
+            "z2": alpha_raw,
+            "alpha_concentration": alpha_concentration,
             "alpha_mean": alpha_mean,
-            # Temporary output compatibility for the current sampler.  This
-            # is a constant, non-parameter tensor and therefore does not add
-            # alpha_log_std_head keys to the state dict.  exp(-20) makes the
-            # old logistic-normal sampling path effectively deterministic.
-            "alpha_log_std": torch.full_like(alpha_logits, -20.0),
         }
     
     def _build_motif_sparse_mask(
@@ -1504,7 +628,7 @@ class MaskGITMotifPrior(nn.Module):
         """
         Differentiable motif forward used when refining the activity prior.
     
-        activity_prob comes from DETRActivityPrior.soft_activity_flat(out).
+        activity_prob comes from MaskGITActivityPrior.activity_prob_flat(out).
         This allows voxel/statistical losses after soft decoding to backprop
         into the activity prior.
         """
@@ -1613,6 +737,7 @@ class MaskGITMotifPrior(nn.Module):
         task_id: torch.Tensor,
         roi_mask: Optional[torch.Tensor] = None,
         targets: Optional[Dict[str, torch.Tensor]] = None,
+        alpha_condition_z1: Optional[torch.Tensor] = None,
         loss_weights: Tuple[float, float] = (1.0, 1.0),
     ):
         """
@@ -1677,8 +802,29 @@ class MaskGITMotifPrior(nn.Module):
         else:
             activity_ids = a_in.long().clamp(0, 1)
         
-        z1_teacher = targets["z1"] if targets is not None else None
-        z1_teacher_prob = targets.get("z1_teacher_prob", 0.0) if targets is not None else 0.0
+        # Which z1 the ALPHA branch is conditioned on.
+        #
+        # alpha lives on the simplex over the children of ONE parent, so it must
+        # be conditioned on a committed parent, not on the soft posterior over
+        # all K1. Conditioning on the posterior average is what made the head
+        # hedge toward uniform: it could not know which parent it would be
+        # scored against, and at generation the sampled z1 frequently differed
+        # from the posterior mode it was conditioned on.
+        #
+        #   training  -> the true z1 (permanent teacher forcing), since
+        #                p(alpha | z1=k) is by definition the conditional where
+        #                k is the actual parent.
+        #   inference -> the SAMPLED z1, supplied as alpha_condition_z1 on a
+        #                second pass, so alpha matches the parent used to decode.
+        if alpha_condition_z1 is not None:
+            z1_teacher = alpha_condition_z1
+            z1_teacher_prob = 1.0
+        elif targets is not None:
+            z1_teacher = targets["z1"]
+            z1_teacher_prob = float(targets.get("z1_teacher_prob", 1.0))
+        else:
+            z1_teacher = None
+            z1_teacher_prob = 0.0
         
         logits = self._compute_motif_logits(
             h,
@@ -1713,24 +859,43 @@ class MaskGITMotifPrior(nn.Module):
         if alpha_target is None:
             raise KeyError("Stage 3 motif targets must include exact convex alpha.")
         alpha_target = alpha_target.to(
-            device=logits["alpha_mu"].device,
-            dtype=logits["alpha_mu"].dtype,
+            device=logits["alpha_concentration"].device,
+            dtype=logits["alpha_concentration"].dtype,
         )
 
         if alpha_loss_mask.any():
             eps = 1e-8
-            a_t = alpha_target[alpha_loss_mask].float().clamp_min(eps)
+            # Light smoothing toward the uniform simplex point. The projection
+            # yields exact zeros, and log(0) clamped to log(1e-8) = -18.4
+            # dominates the Dirichlet likelihood; smoothing bounds it without
+            # materially changing the target.
+            alpha_smoothing = 1e-2
+            a_t = alpha_target[alpha_loss_mask].float().clamp_min(0.0)
             a_t = a_t / a_t.sum(dim=-1, keepdim=True).clamp_min(eps)
+            a_t = (
+                (1.0 - alpha_smoothing) * a_t
+                + alpha_smoothing / float(a_t.shape[-1])
+            )
 
-            alpha_logits = logits["alpha_mu"][alpha_loss_mask].float()
-            alpha_log_prob = F.log_softmax(alpha_logits, dim=-1)
-            alpha_mean = alpha_log_prob.exp()
+            concentration = logits["alpha_concentration"][alpha_loss_mask].float()
+            alpha_mean = concentration / concentration.sum(dim=-1, keepdim=True)
 
-            # Deterministic distribution matching used by the completed 3A:
-            # KL(alpha_target || alpha_pred).
-            loss_alpha_kl = (
-                a_t * (a_t.log() - alpha_log_prob)
-            ).sum(dim=-1).mean()
+            # Dirichlet negative log-likelihood of the exact convex target.
+            #
+            # This replaces KL(alpha_target || softmax(logits)), which drove the
+            # head toward the conditional MEAN. For a broad conditional the mean
+            # is a poor sample: it sits in the hull interior where no real
+            # residual lives. NLL fits the whole distribution, so generation can
+            # sample coefficients that actually occur.
+            concentration_sum = concentration.sum(dim=-1)
+            log_normaliser = (
+                torch.lgamma(concentration_sum)
+                - torch.lgamma(concentration).sum(dim=-1)
+            )
+            log_likelihood = log_normaliser + (
+                (concentration - 1.0) * a_t.log()
+            ).sum(dim=-1)
+            loss_alpha_kl = -log_likelihood.mean()
 
             parent = z1_t[alpha_loss_mask].clamp(0, self.K1 - 1)
             children = (
@@ -1746,19 +911,27 @@ class MaskGITMotifPrior(nn.Module):
                 loss_alpha_residual / residual_den
             )
 
+            # Diagnostic: K2*floor is the minimum attainable sum. If this sits
+            # at the floor the head is not using its sharpness budget; if it is
+            # far above, the fit is sharper than the data (measured intrinsic
+            # per-component spread is ~0.213).
+            alpha_concentration_sum = concentration.sum(dim=-1).mean()
             alpha_mae = (alpha_mean - a_t).abs().mean()
             alpha_target_entropy = -(a_t * a_t.log()).sum(dim=-1).mean()
+            # Entropy of the Dirichlet MEAN vector, kept comparable to the
+            # previous softmax-based diagnostic and to alpha_target_entropy.
             alpha_pred_entropy = -(
-                alpha_mean * alpha_log_prob
+                alpha_mean * alpha_mean.clamp_min(1e-12).log()
             ).sum(dim=-1).mean()
 
             loss_alpha = loss_alpha_kl + loss_alpha_residual
         else:
-            zero = logits["alpha_mu"].sum() * 0.0
+            zero = logits["alpha_concentration"].sum() * 0.0
             loss_alpha_kl = zero
             loss_alpha_residual = zero
             loss_alpha_residual_nmse = zero
             alpha_mae = zero
+            alpha_concentration_sum = zero
             alpha_target_entropy = zero
             alpha_pred_entropy = zero
             loss_alpha = zero
@@ -1775,6 +948,7 @@ class MaskGITMotifPrior(nn.Module):
             "loss_alpha_residual": loss_alpha_residual.detach(),
             "loss_alpha_residual_nmse": loss_alpha_residual_nmse.detach(),
             "alpha_mae": alpha_mae.detach(),
+            "alpha_concentration_sum": alpha_concentration_sum.detach(),
             "alpha_target_entropy": alpha_target_entropy.detach(),
             "alpha_pred_entropy": alpha_pred_entropy.detach(),
             "z1_loss_tokens": z1_loss_mask.sum().detach(),
@@ -1922,7 +1096,7 @@ class MaskGITMotifPrior(nn.Module):
 class HierarchicalCodebookPrior(nn.Module):
     """
     Wrapper around:
-        1. DETRActivityPrior
+        1. MaskGITActivityPrior
         2. MaskGITMotifPrior
 
     This class only routes calls.
@@ -1931,7 +1105,7 @@ class HierarchicalCodebookPrior(nn.Module):
 
     def __init__(
         self,
-        activity_prior: DETRActivityPrior,
+        activity_prior: "MaskGITActivityPrior",
         motif_prior: MaskGITMotifPrior,
     ):
         super().__init__()
@@ -2054,3 +1228,807 @@ class HierarchicalCodebookPrior(nn.Module):
             count_stochastic_round=count_stochastic_round,
             roi_mask=roi_mask,
         )
+
+# ======================================================================
+# Dense (mask-modelling) activity prior
+# ======================================================================
+class MaskGITActivityPrior(nn.Module):
+    """Masked-token prior over the binary activity field, decoded iteratively.
+
+    One Bernoulli per token of the (Ttok,Htok,Wtok) grid, conditioned on
+    ``global_ctx`` / ``local_ctx`` / task id and on whatever activity is already
+    known. Sampling is MaskGIT-style: predict every unknown cell, commit the most
+    confident fraction, re-predict the rest conditioned on what was committed.
+    A single round of independent draws would be mean-field -- correct marginals,
+    no clustering -- so the conditioning between rounds is what carries joint
+    structure.
+
+    This replaced a DETR-style set-prediction prior. Hungarian matching assigns
+    each query one target cell per clip and the assignment changes clip to clip,
+    so queries converge to blurs and the scored quantity -- their objectness-
+    weighted sum -- is never measured by the objective. That model underfit its
+    own training data (0.4032 assay-mean F1 against 0.6390 for the empirical
+    train marginal, with a 0.003 train/test gap) and, lacking a tractable
+    permutation-invariant density, could be neither scored by NLL nor sampled
+    coherently.
+
+    The trunk is retained from that design and is the part that worked: a
+    SparseTokenTransformerEncoder over visible-active tokens plus always-present
+    context / ROI-occupancy / CLS tokens. Only the readout differs.
+    """
+
+    def __init__(
+        self,
+        global_dim: int,
+        local_dim: int,
+        num_tasks: int,
+        token_grid: Tuple[int, int, int],
+        Kmax: int = 256,
+        d_model: int = 256,
+        n_layer: int = 4,
+        n_head: int = 8,
+        dropout: float = 0.1,
+        region_grid: Optional[Tuple[int, int, int]] = None,
+        n_decoder_layer: int = 4,
+        region_extent: int = 4,
+        n_maskgit_layer: int = 3,
+    ):
+        super().__init__()
+
+        self.Ttok, self.Htok, self.Wtok = map(int, token_grid)
+        self.Ntok = self.Ttok * self.Htok * self.Wtok
+        self.Kmax = int(Kmax)
+        self.d_model = int(d_model)
+        # Retained because the checkpoint loader compares it against the value
+        # inferred from the state dict; a per-cell field admits no other value.
+        self.coordinate_mode = "joint_dense"
+
+        self.global_proj = nn.Linear(global_dim, d_model)
+        self.local_proj = nn.Linear(local_dim, d_model)
+        self.task_emb = nn.Embedding(num_tasks, d_model)
+
+        # Activity input IDs: 0 = visible blank, 1 = visible active, 2 = masked.
+        self.a_mask_id = 2
+        self.a_emb = nn.Embedding(3, d_model)
+        self.a_pos_emb = nn.Parameter(torch.randn(self.Ntok, d_model) * 0.02)
+
+        self.count_head = nn.Linear(d_model, Kmax + 1)
+
+        # Region partition, used only to summarise ROI occupancy into the memory.
+        # Derived from the token grid so a patch-size change does not require
+        # re-tuning a hard-coded partition.
+        if region_grid is None:
+            region_grid = tuple(
+                self._auto_region_count(span, int(region_extent))
+                for span in (self.Ttok, self.Htok, self.Wtok)
+            )
+        self.Rt, self.Rh, self.Rw = map(int, region_grid)
+        for name, span, div in (("Ttok", self.Ttok, self.Rt),
+                                ("Htok", self.Htok, self.Rh),
+                                ("Wtok", self.Wtok, self.Rw)):
+            if div < 1 or span % div != 0:
+                valid = [d for d in range(1, span + 1) if span % d == 0]
+                raise ValueError(
+                    f"region_grid gives {div} regions along {name}, but {div} "
+                    f"does not divide {name}={span}. The partition must tile the "
+                    f"token grid exactly. Valid region counts for this axis: "
+                    f"{valid}. Pass region_grid=None to derive one automatically."
+                )
+        self.n_regions = self.Rt * self.Rh * self.Rw
+        self.region_size = self.Ntok // self.n_regions
+
+        flat = torch.arange(self.Ntok)
+        fdiv = lambda a, b: torch.div(a, b, rounding_mode="floor")
+        t_idx = fdiv(flat, self.Htok * self.Wtok)
+        h_idx = fdiv(flat, self.Wtok) % self.Htok
+        w_idx = flat % self.Wtok
+        st, sh, sw = self.Ttok // self.Rt, self.Htok // self.Rh, self.Wtok // self.Rw
+        self.register_buffer(
+            "region_of_token",
+            (fdiv(t_idx, st) * (self.Rh * self.Rw)
+             + fdiv(h_idx, sh) * self.Rw + fdiv(w_idx, sw)).long(),
+            persistent=False,
+        )
+        self.register_buffer(
+            "within_of_token",
+            ((t_idx % st) * (sh * sw) + (h_idx % sh) * sw + (w_idx % sw)).long(),
+            persistent=False,
+        )
+
+        self.memory_encoder = SparseTokenTransformerEncoder(
+            dim=d_model, depth=n_layer, num_heads=n_head,
+            mlp_ratio=4.0, drop=dropout, attn_drop=dropout,
+        )
+        self.count_cls = nn.Parameter(torch.randn(d_model) * 0.02)
+        self.roi_region_embed = nn.Parameter(torch.randn(self.n_regions, d_model) * 0.02)
+        self.roi_occupancy_proj = nn.Linear(1, d_model)
+        self.extra_type_embed = nn.Parameter(torch.randn(5, d_model) * 0.02)
+
+        # One query per token: query i always reads out cell i, so there is
+        # nothing to match and no permutation to resolve.
+        self.cell_queries = nn.Parameter(torch.randn(self.Ntok, d_model) * 0.02)
+        layer = nn.TransformerDecoderLayer(
+            d_model=d_model, nhead=int(n_head), dim_feedforward=int(4 * d_model),
+            dropout=float(dropout), batch_first=True, norm_first=True,
+        )
+        self.maskgit_decoder = nn.TransformerDecoder(layer, num_layers=int(n_maskgit_layer))
+        self.maskgit_norm = nn.LayerNorm(d_model)
+        self.cell_head = nn.Linear(d_model, 1)
+        nn.init.zeros_(self.cell_head.bias)
+        self.n_maskgit_layer = int(n_maskgit_layer)
+
+        # Post-hoc calibration temperature, fitted on validation. Ranking metrics
+        # are invariant to it; NLL is not, and NLL is what matters for a prior.
+        self.register_buffer("logit_temperature", torch.ones(()))
+
+    @staticmethod
+    def _auto_region_count(span: int, target_extent: int) -> int:
+        """Region count for one axis: divisor of ``span`` whose region extent is
+        closest to ``target_extent``, preferring fewer regions on a tie."""
+        divisors = [d for d in range(1, int(span) + 1) if int(span) % d == 0]
+        return min(divisors, key=lambda r: (abs(span / r - target_extent), r))
+
+    def _region_occupancy(
+        self,
+        roi_mask: Optional[torch.Tensor],
+        B: int,
+        device,
+        dtype,
+    ) -> torch.Tensor:
+        """Fraction of each region that is inside the ROI. (B, n_regions)"""
+        if roi_mask is None:
+            # No ROI supplied means every token is a candidate.
+            return torch.ones((B, self.n_regions), device=device, dtype=dtype)
+        if roi_mask.dim() == 3:
+            roi_mask = roi_mask.squeeze(-1)
+        roi = roi_mask.to(device=device, dtype=dtype)
+        occupancy = torch.zeros((B, self.n_regions), device=device, dtype=dtype)
+        occupancy.index_add_(1, self.region_of_token.to(device), roi)
+        return occupancy / float(self.region_size)
+
+    def _build_memory(
+        self,
+        g: torch.Tensor,        # (B,D)
+        l: torch.Tensor,        # (B,D)
+        task: torch.Tensor,     # (B,D)
+        a_in: Optional[torch.Tensor],
+        roi_mask: Optional[torch.Tensor],
+    ):
+        B = g.shape[0]
+        device = g.device
+        dtype = g.dtype
+        D = self.d_model
+
+        if a_in is not None:
+            if a_in.dim() == 3:
+                a_in = a_in.squeeze(-1)
+            a_in = a_in.to(device=device).long()
+            if a_in.shape[1] != self.Ntok:
+                raise ValueError(
+                    f"a_in shape {tuple(a_in.shape)} does not match Ntok={self.Ntok}"
+                )
+            grid_tokens = self.a_emb(a_in) + self.a_pos_emb.unsqueeze(0)
+            grid_tokens = grid_tokens.to(dtype=dtype)
+            # Only visible-active tokens carry information beyond the ROI.
+            grid_active = a_in.eq(1)
+        else:
+            grid_tokens = torch.zeros((B, self.Ntok, D), device=device, dtype=dtype)
+            grid_active = torch.zeros((B, self.Ntok), device=device, dtype=torch.bool)
+
+        occupancy = self._region_occupancy(roi_mask, B, device, dtype)
+        roi_tokens = (
+            self.roi_occupancy_proj(occupancy.unsqueeze(-1))
+            + self.roi_region_embed.unsqueeze(0)
+            + self.extra_type_embed[4].view(1, 1, D)
+        )
+
+        cls_token = (
+            self.count_cls.view(1, 1, D).expand(B, 1, D)
+            + self.extra_type_embed[3].view(1, 1, D)
+        )
+        ctx_tokens = torch.stack(
+            [
+                g + self.extra_type_embed[0],
+                l + self.extra_type_embed[1],
+                task + self.extra_type_embed[2],
+            ],
+            dim=1,
+        )
+
+        extras = torch.cat([ctx_tokens, cls_token, roi_tokens], dim=1)
+        n_extra = extras.shape[1]
+
+        tokens = torch.cat([grid_tokens, extras], dim=1)
+        active = torch.cat(
+            [
+                grid_active,
+                torch.ones((B, n_extra), device=device, dtype=torch.bool),
+            ],
+            dim=1,
+        )
+
+        full_out, padded, key_pad_mask, lengths = self.memory_encoder(
+            tokens, active_mask=active, pos_embed=None
+        )
+        # Extras sit at fixed indices and are always active, so they can be read
+        # back from the scattered output without tracking per-sample gather order.
+        cls_out = full_out[:, self.Ntok + 3]
+        return padded, key_pad_mask, cls_out, lengths
+
+    @staticmethod
+    def _expected_count_from_logits(count_logits: torch.Tensor) -> torch.Tensor:
+        count_prob = F.softmax(count_logits.float(), dim=-1)
+        count_values = torch.arange(
+            count_prob.shape[-1],
+            device=count_prob.device,
+            dtype=count_prob.dtype,
+        )
+        return (count_prob * count_values.unsqueeze(0)).sum(dim=-1)
+
+    @staticmethod
+    def _shared_count_bias(
+        event_logits_raw: torch.Tensor,
+        target_count: torch.Tensor,
+        *,
+        iterations: int = 32,
+        initial_half_width: float = 30.0,
+        max_expansions: int = 8,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Find one shared bias per sample that matches expected event mass.
+
+        Returns
+        -------
+        bias : (B,)
+            Shared additive logit offset.
+        residual : (B,)
+            ``achieved_mass - target``, i.e. how far the solve missed. This is
+            the diagnostic that was previously absent: a fixed bracket silently
+            returns its own boundary whenever the required offset falls outside
+            it, so the soft event mass disagrees with the count head with no
+            indication that anything went wrong.
+
+        The bracket is expanded geometrically until it contains the root. Mass
+        is monotonically increasing in the offset, so bracketing is sufficient
+        for bisection to converge. Expansion is capped; if the cap is reached
+        without bracketing, ``residual`` reports the shortfall rather than the
+        result being silently wrong.
+        """
+        target = target_count.to(
+            device=event_logits_raw.device,
+            dtype=event_logits_raw.dtype,
+        ).clamp(0.0, float(event_logits_raw.shape[1]))
+
+        def _mass(bias: torch.Tensor) -> torch.Tensor:
+            return torch.sigmoid(
+                event_logits_raw + bias.unsqueeze(1)
+            ).sum(dim=1)
+
+        half_width = float(initial_half_width)
+        lo = event_logits_raw.new_full((event_logits_raw.shape[0],), -half_width)
+        hi = event_logits_raw.new_full((event_logits_raw.shape[0],), half_width)
+
+        # Expand until mass(lo) <= target <= mass(hi) for every sample. Each
+        # pass evaluates both endpoints once and performs a single host sync,
+        # and the number of passes is bounded so this cannot stall the loop.
+        for _ in range(int(max_expansions)):
+            lo_high = _mass(lo) > target
+            hi_low = _mass(hi) < target
+            if not bool((lo_high | hi_low).any()):
+                break
+            half_width *= 2.0
+            lo = torch.where(lo_high, torch.full_like(lo, -half_width), lo)
+            hi = torch.where(hi_low, torch.full_like(hi, half_width), hi)
+
+        for _ in range(int(iterations)):
+            mid = 0.5 * (lo + hi)
+            too_small = _mass(mid) < target
+            lo = torch.where(too_small, mid, lo)
+            hi = torch.where(too_small, hi, mid)
+
+        bias = 0.5 * (lo + hi)
+        residual = _mass(bias) - target
+        return bias, residual
+
+    def select_counts(
+        self,
+        count_logits: torch.Tensor,
+        *,
+        mode: str = "expected",
+        temperature: float = 1.0,
+        stochastic_round: bool = False,
+    ) -> torch.Tensor:
+        """Convert count logits into one integer count per sample.
+
+        ``expected`` is the stable default. It uses the probability-weighted
+        count and then rounds it. ``categorical`` and ``argmax`` are retained
+        for explicit stochastic or modal sampling experiments.
+        """
+        mode = str(mode).lower()
+        if mode not in ("expected", "categorical", "argmax"):
+            raise ValueError(
+                f"Unsupported count selection mode={mode!r}. "
+                "Use 'expected', 'categorical', or 'argmax'."
+            )
+
+        if mode == "argmax" or float(temperature) <= 0.0:
+            return count_logits.argmax(dim=-1)
+
+        scaled_logits = count_logits / max(float(temperature), 1e-6)
+
+        if mode == "categorical":
+            return torch.distributions.Categorical(logits=scaled_logits).sample()
+
+        count_prob = F.softmax(scaled_logits, dim=-1)
+        count_values = torch.arange(
+            count_prob.shape[-1],
+            device=count_prob.device,
+            dtype=count_prob.dtype,
+        )
+        count_expected = (count_prob * count_values.unsqueeze(0)).sum(dim=-1)
+
+        if stochastic_round:
+            count_floor = count_expected.floor()
+            count_selected = count_floor + torch.bernoulli(
+                count_expected - count_floor
+            )
+        else:
+            count_selected = count_expected.round()
+
+        return count_selected.long()
+
+    def coordinate_metadata(self) -> Dict[str, int | str]:
+        # Standalone: this class no longer inherits from a prior that supplies a
+        # base implementation, so the grid fields the checkpoint loader compares
+        # against are produced here directly.
+        return {
+            "coordinate_mode": self.coordinate_mode,
+            "Ttok": int(self.Ttok),
+            "Htok": int(self.Htok),
+            "Wtok": int(self.Wtok),
+            "Ntok": int(self.Ntok),
+            "architecture": "maskgit",
+            "readout": "per_cell_bernoulli",
+            "n_maskgit_layer": int(self.n_maskgit_layer),
+            "n_regions": int(self.n_regions),
+            "region_size": int(self.region_size),
+            "region_grid": f"{self.Rt}x{self.Rh}x{self.Rw}",
+        }
+
+    def forward(
+        self,
+        global_ctx: torch.Tensor,
+        local_ctx: torch.Tensor,
+        task_id: torch.Tensor,
+        a_in: Optional[torch.Tensor] = None,
+        roi_mask: Optional[torch.Tensor] = None,
+        count_target: Optional[torch.Tensor] = None,
+        count_teacher_prob: float = 0.0,
+        apply_temperature: bool = False,
+    ) -> Dict[str, torch.Tensor]:
+        B = global_ctx.shape[0]
+        g = self.global_proj(global_ctx)
+        l = self.local_proj(local_ctx)
+        task = self.task_emb(task_id.long())
+
+        memory, memory_pad, cls_out, _ = self._build_memory(g, l, task, a_in, roi_mask)
+
+        h = self.maskgit_norm(
+            self.maskgit_decoder(
+                self.cell_queries.unsqueeze(0).expand(B, -1, -1),
+                memory,
+                memory_key_padding_mask=memory_pad,
+            )
+        )
+        cell_logits = self.cell_head(h).squeeze(-1)            # (B,Ntok)
+        if apply_temperature:
+            cell_logits = cell_logits / self.logit_temperature.clamp_min(1e-3)
+
+        out = {
+            "cell_logits": cell_logits,
+            "count_logits": self.count_head(cls_out),
+        }
+        if roi_mask is not None:
+            roi = roi_mask.squeeze(-1) if roi_mask.dim() == 3 else roi_mask
+            out["roi_flat"] = roi.to(torch.bool)
+        return out
+
+    def activity_prob_flat(
+        self,
+        out: Dict[str, torch.Tensor],
+        roi_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """(B,Ntok) probabilities, zeroed outside ROI."""
+        p = torch.sigmoid(out["cell_logits"])
+        if roi_mask is not None:
+            roi = roi_mask.squeeze(-1) if roi_mask.dim() == 3 else roi_mask
+            p = p * roi.to(device=p.device, dtype=p.dtype)
+        return p
+
+    def activity_prob_grid(
+        self,
+        out: Dict[str, torch.Tensor],
+        roi_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        p = self.activity_prob_flat(out, roi_mask=roi_mask)
+        return p.view(-1, self.Ttok, self.Htok, self.Wtok)
+
+    @torch.no_grad()
+    def sample_hard_activity_topk(
+        self,
+        out: Dict[str, torch.Tensor],
+        roi_mask: Optional[torch.Tensor] = None,
+        count_mode: str = "expected",
+        count_temperature: float = 1.0,
+        count_stochastic_round: bool = False,
+    ) -> torch.Tensor:
+        """Deterministic MAP-style readout: the top-K cells. Best point estimate,
+        and the correct thing to score with F1 -- but it returns the SAME map for
+        the same conditioning every time, so it is not a sample. Use
+        ``maskgit_sample`` when you need draws from the prior."""
+        counts = self.select_counts(
+            out["count_logits"], mode=count_mode,
+            temperature=count_temperature, stochastic_round=count_stochastic_round,
+        )
+        score = self.activity_prob_flat(out, roi_mask=roi_mask)
+        device = score.device
+        B = score.shape[0]
+        if roi_mask is not None:
+            roi = (roi_mask.squeeze(-1) if roi_mask.dim() == 3 else roi_mask).bool()
+            score = score.masked_fill(~roi, -1.0)
+        else:
+            roi = torch.ones_like(score, dtype=torch.bool)
+
+        activity = torch.zeros(B, self.Ntok, device=device, dtype=torch.long)
+        for b in range(B):
+            nv = int(roi[b].sum().item())
+            n = int(counts[b].clamp(0, min(self.Kmax, max(nv, 0))).item())
+            if n <= 0:
+                continue
+            activity[b, torch.topk(score[b], k=n).indices] = 1
+        return activity
+
+    def soft_activity_flat(self, out, roi_mask=None):
+        return self.activity_prob_flat(out, roi_mask=roi_mask)
+
+    def soft_activity_grid(self, out, clamp: bool = True, roi_mask=None):
+        g = self.activity_prob_grid(out, roi_mask=roi_mask)
+        return g.clamp(0.0, 1.0) if clamp else g
+
+    def sample_hard_activity_gridtopk(
+        self, out, count_temperature: float = 1.0, count_mode: str = "expected",
+        count_stochastic_round: bool = False, roi_mask=None,
+    ):
+        return self.sample_hard_activity_topk(
+            out, roi_mask=roi_mask, count_mode=count_mode,
+            count_temperature=count_temperature,
+            count_stochastic_round=count_stochastic_round,
+        )
+
+    @torch.no_grad()
+    def maskgit_sample(
+        self,
+        global_ctx: torch.Tensor,
+        local_ctx: torch.Tensor,
+        task_id: torch.Tensor,
+        a_in: Optional[torch.Tensor] = None,
+        roi_mask: Optional[torch.Tensor] = None,
+        n_steps: int = 10,
+        temperature: float = 1.0,
+        gumbel_scale: float = 1.0,
+        enforce_count: bool = False,
+        counts: Optional[torch.Tensor] = None,
+        generator: Optional[torch.Generator] = None,
+        return_trace: bool = False,
+    ):
+        """Iterative confidence-based decoding. Returns (B,Ntok) long 0/1.
+
+        Each round predicts every still-unknown cell, samples it, commits only the
+        most confident fraction, and re-predicts the rest conditioned on what was
+        just committed. That conditioning is the entire point: a single round of
+        independent Bernoulli draws is mean-field and yields speckle with correct
+        marginals and no clustering or bursts. Cells decided late see the cells
+        decided early, so the joint structure is carried by the model rather than
+        assumed away.
+
+        The unknown set is passed as ``roi_mask`` each round and shrinks as cells
+        commit, which keeps the invariant the model was trained under:
+        ``a_in == 2`` exactly where ``roi_mask`` is true.
+
+        ``gumbel_scale`` anneals to zero across rounds. Early rounds are noisy so
+        draws differ; late rounds are near-greedy so the sample stays coherent.
+        With ``gumbel_scale=0`` and ``temperature -> 0`` this degenerates to
+        deterministic decoding, which is a useful ablation but is not a sample.
+        """
+        device = global_ctx.device
+        B = global_ctx.shape[0]
+
+        if roi_mask is None:
+            unknown = torch.ones(B, self.Ntok, dtype=torch.bool, device=device)
+        else:
+            r = roi_mask.squeeze(-1) if roi_mask.dim() == 3 else roi_mask
+            unknown = r.to(device=device).bool().clone()
+
+        if a_in is None:
+            state = torch.full((B, self.Ntok), int(self.a_mask_id),
+                               dtype=torch.long, device=device)
+        else:
+            state = a_in.to(device=device).long().clone()
+        state[unknown] = int(self.a_mask_id)
+
+        total = unknown.sum(dim=1)                    # cells to decide, per sample
+        decided = torch.zeros(B, self.Ntok, dtype=torch.long, device=device)
+        trace = []
+
+        steps = max(1, int(n_steps))
+        for step in range(1, steps + 1):
+            if not bool(unknown.any()):
+                break
+
+            out = self.forward(
+                global_ctx=global_ctx, local_ctx=local_ctx, task_id=task_id,
+                a_in=state, roi_mask=unknown.to(global_ctx.dtype),
+            )
+            logits = out["cell_logits"].float()
+            p = torch.sigmoid(logits / max(float(temperature), 1e-6))
+
+            u = torch.rand(p.shape, device=device, generator=generator)
+            draw = (u < p).long()
+            conf = torch.where(draw.bool(), p, 1.0 - p)
+
+            # Anneal the noise: 1 -> 0 across rounds.
+            scale = float(gumbel_scale) * (1.0 - (step - 1) / steps)
+            if scale > 0:
+                gu = torch.rand(p.shape, device=device, generator=generator).clamp_(1e-9, 1 - 1e-9)
+                conf = conf + scale * (-torch.log(-torch.log(gu)))
+            conf = conf.masked_fill(~unknown, -float("inf"))
+
+            # Cosine schedule on how many cells may REMAIN unknown after this round.
+            keep_frac = float(math.cos(0.5 * math.pi * step / steps))
+            remain = torch.ceil(total.float() * keep_frac).long()
+            if step == steps:
+                remain = torch.zeros_like(remain)
+
+            for b in range(B):
+                n_unk = int(unknown[b].sum().item())
+                n_commit = max(0, n_unk - int(remain[b].item()))
+                if n_commit <= 0:
+                    continue
+                idx = torch.topk(conf[b], k=n_commit).indices
+                decided[b, idx] = draw[b, idx]
+                state[b, idx] = draw[b, idx]        # 1 = active, 0 = visible blank
+                unknown[b, idx] = False
+
+            if return_trace:
+                trace.append(int(unknown.sum().item()))
+
+        if enforce_count:
+            # Re-balance to the count head's K without discarding the sample: keep
+            # the K cells the final pass ranked highest, filling from the sampled
+            # actives first so the draw is respected where it can be.
+            # An explicit `counts` overrides the head. Needed for evaluation:
+            # scoring joint structure against real data requires the same number
+            # of active cells on both sides, otherwise every rate-derived
+            # statistic is confounded by count error.
+            if counts is None:
+                counts = self.select_counts(out["count_logits"], mode="expected")
+            counts = counts.to(device=device)
+            final_p = torch.sigmoid(out["cell_logits"].float())
+            roi_all = (roi_mask.squeeze(-1) if roi_mask is not None and roi_mask.dim() == 3
+                       else roi_mask)
+            for b in range(B):
+                valid = (roi_all[b].bool() if roi_all is not None
+                         else torch.ones(self.Ntok, dtype=torch.bool, device=device))
+                k = int(counts[b].clamp(0, int(valid.sum().item())).item())
+                score = final_p[b].masked_fill(~valid, -1.0)
+                score = score + decided[b].float()    # sampled actives rank first
+                decided[b] = torch.zeros_like(decided[b])
+                if k > 0:
+                    decided[b, torch.topk(score, k=k).indices] = 1
+
+        return (decided, trace) if return_trace else decided
+
+
+def maskgit_activity_loss(
+    activity_prior: "MaskGITActivityPrior",
+    out: Dict[str, torch.Tensor],
+    targets: Dict[str, torch.Tensor],
+    *,
+    lambda_bce: float = 1.0,
+    pos_weight: float = 1.0,
+    lambda_count: float = 1.0,
+    lambda_count_neighbor: float = 0.25,
+    lambda_count_distance: float = 0.05,
+    count_neighbor_k: int = 11,
+    count_neighbor_tau: float = 2.0,
+    count_distance_scale: float = 5.0,
+    lambda_adj_t: float = 0.0,
+    lambda_adj_s: float = 0.0,
+    lambda_spatial: float = 0.0,
+    allowed_support: Optional[torch.Tensor] = None,
+) -> Dict[str, torch.Tensor]:
+    """Loss for the per-cell Bernoulli readout.
+
+    Two things are worth stating explicitly:
+
+    1. ``pos_weight`` defaults to 1.0, not to the class-balancing ratio. Weighting
+       up the ~5% positives speeds early training and improves F1/AUPRC, both of
+       which are rank-based and blind to it -- but it inflates every probability
+       and wrecks NLL. Measured: a run at pos_weight up to 30 reached the best
+       AUPRC in the ladder (0.7523) while its NLL, 0.2246, was WORSE than the
+       per-assay marginal's 0.1315. For a prior that gets sampled, calibration is
+       the property that matters, so the default is the honest one.
+
+    2. The auxiliary terms are meaningful here in a way they are not for the set
+       model. In set prediction they act on ``soft_activity``, which is already
+       marginalized over queries, so they are invariant to how the queries split
+       the mass and can be satisfied by any decomposition -- which is why the
+       adjacency arm moved gapMAE to a best-of-any 0.1634 and left exact F1 flat
+       at 0.3943. On a per-cell field there is no decomposition: the loss acts
+       directly on the predicted map.
+
+    The count term is exact CE plus ordinal neighbour and distance terms.
+    Oracle counts are worth only +0.025 exact F1 on this data, so the extra
+    neighbour and distance terms are not where the remaining error lives.
+    """
+    cell_logits = out["cell_logits"]
+    device, dtype = cell_logits.device, cell_logits.dtype
+    B = cell_logits.shape[0]
+
+    pm = targets.get("predict_mask", None)
+    if pm is not None:
+        roi = (pm.squeeze(-1) if pm.dim() == 3 else pm).to(device).bool()
+    else:
+        roi = torch.ones_like(cell_logits, dtype=torch.bool)
+
+    # ---------------- 1. per-cell BCE, ROI only ----------------
+    y = targets["activity_flat"].to(device=device, dtype=dtype)
+    pw = torch.as_tensor(float(pos_weight), device=device, dtype=dtype)
+    with torch.cuda.amp.autocast(enabled=False):
+        el = F.binary_cross_entropy_with_logits(
+            cell_logits.float(), y.float(), pos_weight=pw.float(), reduction="none"
+        )
+    denom = roi.float().sum().clamp_min(1.0)
+    loss_bce = (el * roi.float()).sum() / denom
+
+    # ---------------- 2. count: exact + ordered-neighbour + expected distance ----
+    # Originally this was exact CE alone, justified by oracle counts being worth
+    # only +0.025 exact F1. That reasoning was about PLACEMENT and does not carry
+    # to generation: the sampler lights exactly K cells, so count error moves the
+    # sampled rate directly and corrupts every rate-derived statistic. Measured
+    # with exact CE alone, loss_count plateaued near 3.1 and sampling produced a
+    # rate of 0.0197 against 0.0835 real. The ordinal terms are what make a
+    # 257-way head converge -- plain CE treats "off by one" and "off by two
+    # hundred" as equally wrong.
+    count_logits_loss = out["count_logits"].float()
+    n_bins = count_logits_loss.shape[-1]
+    count_target = targets["count_target"].to(device).long().clamp(0, n_bins - 1)
+
+    loss_count_exact = F.cross_entropy(count_logits_loss, count_target)
+
+    count_values = torch.arange(n_bins, device=device, dtype=torch.float32)
+    count_distance = (count_values.unsqueeze(0) - count_target.float().unsqueeze(1)).abs()
+
+    nk = max(1, min(int(count_neighbor_k), n_bins))
+    near_distance, near_index = torch.topk(count_distance, k=nk, largest=False, dim=-1)
+    neighbor_target = torch.zeros_like(count_logits_loss).scatter(
+        1, near_index,
+        F.softmax(-near_distance / max(float(count_neighbor_tau), 1e-6), dim=-1),
+    )
+    count_log_prob = F.log_softmax(count_logits_loss, dim=-1)
+    loss_count_neighbor = -(neighbor_target * count_log_prob).sum(dim=-1).mean()
+    loss_count_distance = (
+        count_log_prob.exp() * count_distance
+    ).sum(dim=-1).mean() / max(float(count_distance_scale), 1e-6)
+
+    loss_count = (
+        loss_count_exact
+        + float(lambda_count_neighbor) * loss_count_neighbor
+        + float(lambda_count_distance) * loss_count_distance
+    )
+
+    # ---------------- 3. composed clip for the aux terms ----------------
+    # The predicted field is zero outside the ROI and visible_active is zero
+    # inside it, so the two are disjoint and their sum is a complete clip. Both
+    # sides of every aux comparison are then measured on the full grid, with no
+    # ROI truncation on either -- scoring a rate on a truncated support against a
+    # bank accumulated over whole clips compares different quantities.
+    loss_adj_t = cell_logits.sum() * 0.0
+    loss_adj_s = cell_logits.sum() * 0.0
+    loss_spatial = cell_logits.sum() * 0.0
+
+    need_grid = (lambda_adj_t > 0 or lambda_adj_s > 0 or lambda_spatial > 0)
+    if need_grid:
+        p = torch.sigmoid(cell_logits) * roi.to(dtype)
+        soft_g = p.view(B, activity_prior.Ttok, activity_prior.Htok, activity_prior.Wtok)
+        vis = targets.get("visible_active_flat", None)
+        if vis is not None:
+            soft_g = (soft_g + vis.to(device=device, dtype=dtype).view_as(soft_g)).clamp(0.0, 1.0)
+        tgt_g = targets["activity_flat_full"].to(device=device, dtype=dtype).view_as(soft_g)
+
+    if lambda_adj_t > 0 or lambda_adj_s > 0:
+        from .spatial_map import (
+            TOKEN_ADJ_SHIFTS, TOKEN_ADJ_TEMPORAL_IDX, TOKEN_ADJ_SPATIAL_IDX,
+        )
+        s_shifts = tuple(TOKEN_ADJ_SHIFTS[i] for i in TOKEN_ADJ_SPATIAL_IDX)
+        bank_t = targets.get("adj_target_t", None)
+        bank_s = targets.get("adj_target_s", None)
+
+        if lambda_adj_t > 0:
+            if bank_t is not None and bank_t.dim() == 2:
+                # Per band, matched lag for lag. Persistence decays across lags
+                # (0.595 -> 0.429 on this data); a single pooled scalar discards
+                # that curve, and because the per-lag denominators differ a mean
+                # of rates is not even the pooled rate the loss would compute.
+                ref = bank_t.to(device=device, dtype=dtype)
+                per_band = []
+                for gi in range(ref.shape[1]):
+                    gap = gi + 1
+                    if soft_g.shape[1] <= gap:
+                        continue
+                    per_band.append(
+                        (_soft_coactivation_rate(soft_g, ((gap, 0, 0),)) - ref[:, gi]).abs()
+                    )
+                if per_band:
+                    loss_adj_t = torch.stack(per_band, dim=0).mean()
+            else:
+                t_shifts = tuple(
+                    TOKEN_ADJ_SHIFTS[i] for i in TOKEN_ADJ_TEMPORAL_IDX
+                    if soft_g.shape[1] > TOKEN_ADJ_SHIFTS[i][0]
+                )
+                if t_shifts:
+                    loss_adj_t = (
+                        _soft_coactivation_rate(soft_g, t_shifts)
+                        - _soft_coactivation_rate(tgt_g, t_shifts)
+                    ).abs().mean()
+
+        if lambda_adj_s > 0 and s_shifts:
+            ref_s = (
+                bank_s.to(device=device, dtype=dtype)
+                if bank_s is not None
+                else _soft_coactivation_rate(tgt_g, s_shifts)
+            )
+            if ref_s.dim() == 2:
+                ref_s = ref_s.mean(dim=1)
+            loss_adj_s = (_soft_coactivation_rate(soft_g, s_shifts) - ref_s).abs().mean()
+
+    # ---------------- 4. spatial support consistency ----------------
+    if lambda_spatial > 0:
+        from ..utils.losses import spatial_support_violation_loss
+        # Soft "any active in this electrode column": 1 - prod_t (1 - p).
+        pred_support = 1.0 - (1.0 - soft_g.clamp(0.0, 1.0 - 1e-6)).prod(dim=1)
+        allowed = allowed_support
+        if allowed is None:
+            allowed = F.max_pool2d(
+                tgt_g.any(dim=1).float()[:, None], kernel_size=3, stride=1, padding=1
+            )[:, 0]
+        loss_spatial = spatial_support_violation_loss(
+            pred_support, allowed.to(device=device, dtype=pred_support.dtype)
+        )
+
+    total = (
+        float(lambda_bce) * loss_bce
+        + float(lambda_count) * loss_count
+        + float(lambda_adj_t) * loss_adj_t
+        + float(lambda_adj_s) * loss_adj_s
+        + float(lambda_spatial) * loss_spatial
+    )
+    # count_expected_mean is consumed by the Stage 3C logger, and is the
+    # quantity the sampler uses for K, so it is worth watching directly: a
+    # drift here moves the generated rate and with it every rate-derived
+    # statistic in the generation composite.
+    with torch.no_grad():
+        count_expected_mean = activity_prior._expected_count_from_logits(
+            out["count_logits"]
+        ).float().mean()
+        target_count_mean = count_target.float().mean()
+
+    return {
+        "loss": total,
+        "loss_bce": loss_bce.detach(),
+        "loss_count": loss_count.detach(),
+        "loss_adj_t": loss_adj_t.detach(),
+        "loss_adj_s": loss_adj_s.detach(),
+        "loss_spatial": loss_spatial.detach(),
+        "count_expected_mean": count_expected_mean,
+        "count_target_mean": target_count_mean,
+    }

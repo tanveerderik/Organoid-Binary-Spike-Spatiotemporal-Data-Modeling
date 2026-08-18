@@ -1,0 +1,26 @@
+{
+  "L2": {
+    "val_loss_BCE": 0.06444176865067888,
+    "val_loss_BCE_full": 0.06444176865067888,
+    "val_loss_BCE_cond": 0.06444176865067888,
+    "val_loss_BCE_full_cond": 0.06444176865067888,
+    "AUPRC_cond": 0.27082186224254,
+    "AUPRC_tol_cond": 0.3673597070138906,
+    "val_loss_BCE_uncond": 0.06444176865067888,
+    "val_loss_BCE_full_uncond": 0.06444176865067888,
+    "AUPRC_uncond": 0.27082186224254,
+    "AUPRC_tol_uncond": 0.3673597070138906
+  },
+  "L1": {
+    "val_loss_BCE": 0.0894136997137932,
+    "val_loss_BCE_full": 0.0894136997137932,
+    "val_loss_BCE_cond": 0.0894136997137932,
+    "val_loss_BCE_full_cond": 0.0894136997137932,
+    "AUPRC_cond": 0.15556512947306125,
+    "AUPRC_tol_cond": 0.2595955436779246,
+    "val_loss_BCE_uncond": 0.0894136997137932,
+    "val_loss_BCE_full_uncond": 0.0894136997137932,
+    "AUPRC_uncond": 0.15556512947306125,
+    "AUPRC_tol_uncond": 0.2595955436779246
+  }
+}

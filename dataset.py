@@ -8,6 +8,7 @@ Created on Thu Oct 23 12:34:36 2025
 
 #%%
 import os
+import re
 import numpy as np
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 import torch
@@ -766,7 +767,234 @@ class DeterministicSubset(Dataset):
 
 
 
+def _recording_order_key(path: str) -> Tuple[int, int, str]:
+    """Recording-time sort key for one burst file.
+
+    Layout is ``.../<assay>_ecephys/<segment_id>/binary_unit_burst_<NN>.npz``
+    where ``segment_id`` is a zero-padded, monotonically increasing index into
+    the recording and ``NN`` orders bursts inside a segment. Sorting by
+    ``(segment, burst)`` therefore recovers acquisition order.
+
+    Falls back to the lexicographic path when the pattern does not match, so an
+    unexpected layout degrades to a stable arbitrary order rather than raising.
+    """
+    directory, filename = os.path.split(os.path.abspath(path))
+    segment_name = os.path.basename(directory)
+
+    try:
+        segment = int(segment_name)
+    except (TypeError, ValueError):
+        segment = -1
+
+    burst_match = re.search(r"binary_unit_burst_(\d+)", filename)
+    burst = int(burst_match.group(1)) if burst_match else -1
+
+    return (segment, burst, path)
+
+
+def split_files_temporally(
+    assay_dict: Dict[int, Dict[str, Any]],
+    val_frac: float = 0.2,
+    test_frac: float = 0.3,
+    *,
+    min_files_for_split: int = 3,
+    verbose: bool = True,
+) -> Tuple[Dict[int, Dict[str, Any]], Dict[int, Dict[str, Any]], Dict[int, Dict[str, Any]], Dict[str, Any]]:
+    """Split each assay's burst files by recording time.
+
+    Earliest segments become train, the middle block validation, the latest
+    block test. The split is performed on FILES, before any balanced sampling,
+    so a given recording segment can appear in exactly one split.
+
+    This replaces splitting over virtual dataset indices. Under
+    ``balance_mode="equal"`` every virtual index re-draws a random file from the
+    assay pool, so an index-level split places the same physical recording in
+    train, validation and test simultaneously.
+
+    Every assay is represented in all three splits whenever it has enough files.
+    That is required: the Stage-0 spatial and adjacency memory banks are keyed by
+    assay, so an assay missing from train has no bank entry at evaluation time.
+
+    Returns
+    -------
+    train_dict, val_dict, test_dict, info
+    """
+    if not 0.0 <= val_frac < 1.0 or not 0.0 <= test_frac < 1.0:
+        raise ValueError(f"Invalid fractions: val={val_frac}, test={test_frac}")
+    if val_frac + test_frac >= 1.0:
+        raise ValueError(
+            f"val_frac + test_frac must be < 1, got {val_frac + test_frac}"
+        )
+
+    train_dict: Dict[int, Dict[str, Any]] = {}
+    val_dict: Dict[int, Dict[str, Any]] = {}
+    test_dict: Dict[int, Dict[str, Any]] = {}
+    per_assay = {}
+    undersized = []
+
+    for assay_index, info in assay_dict.items():
+        files = sorted(
+            list(info.get("files", [])),
+            key=_recording_order_key,
+        )
+        n_files = len(files)
+
+        if n_files == 0:
+            continue
+
+        if n_files < int(min_files_for_split):
+            # Too few files to carve out held-out segments. Keep the assay in
+            # train so its codebook entry and memory bank still exist, and make
+            # the omission explicit rather than silently producing an assay that
+            # cannot be evaluated.
+            undersized.append((info.get("assay_name", assay_index), n_files))
+            train_files, val_files, test_files = files, [], []
+        else:
+            n_test = max(1, int(round(n_files * float(test_frac))))
+            n_val = max(1, int(round(n_files * float(val_frac))))
+
+            # Guarantee a non-empty train block.
+            while n_files - n_val - n_test < 1 and (n_val + n_test) > 2:
+                if n_test >= n_val:
+                    n_test -= 1
+                else:
+                    n_val -= 1
+
+            n_train = n_files - n_val - n_test
+            train_files = files[:n_train]
+            val_files = files[n_train:n_train + n_val]
+            test_files = files[n_train + n_val:]
+
+        for target, split_files in (
+            (train_dict, train_files),
+            (val_dict, val_files),
+            (test_dict, test_files),
+        ):
+            if split_files:
+                target[assay_index] = {
+                    "assay_name": info.get("assay_name", f"assay_{assay_index}"),
+                    "files": list(split_files),
+                }
+
+        per_assay[int(assay_index)] = {
+            "assay_name": info.get("assay_name", f"assay_{assay_index}"),
+            "n_files": int(n_files),
+            "n_train": len(train_files),
+            "n_val": len(val_files),
+            "n_test": len(test_files),
+        }
+
+    _assert_temporal_split_valid(train_dict, val_dict, test_dict, per_assay)
+
+    split_info = {
+        "mode": "temporal_within_assay",
+        "val_frac": float(val_frac),
+        "test_frac": float(test_frac),
+        "per_assay": per_assay,
+        "n_files": {
+            "train": sum(v["n_train"] for v in per_assay.values()),
+            "val": sum(v["n_val"] for v in per_assay.values()),
+            "test": sum(v["n_test"] for v in per_assay.values()),
+        },
+        "assays_without_heldout": [name for name, _ in undersized],
+    }
+
+    if verbose:
+        print(
+            "[split] temporal within-assay file split: "
+            f"train={split_info['n_files']['train']} "
+            f"val={split_info['n_files']['val']} "
+            f"test={split_info['n_files']['test']} "
+            f"across {len(per_assay)} assays"
+        )
+        if undersized:
+            print(
+                f"[split] WARNING: {len(undersized)} assay(s) had < "
+                f"{min_files_for_split} files and are train-only "
+                f"(no held-out data): {undersized}"
+            )
+
+    return train_dict, val_dict, test_dict, split_info
+
+
+def _assert_temporal_split_valid(train_dict, val_dict, test_dict, per_assay) -> None:
+    """Fail loudly if the split is not actually held out."""
+    def _files(d):
+        return {f for info in d.values() for f in info.get("files", [])}
+
+    train_files, val_files, test_files = _files(train_dict), _files(val_dict), _files(test_dict)
+
+    for a_name, a_set, b_name, b_set in (
+        ("train", train_files, "val", val_files),
+        ("train", train_files, "test", test_files),
+        ("val", val_files, "test", test_files),
+    ):
+        overlap = a_set & b_set
+        if overlap:
+            raise RuntimeError(
+                f"{a_name}/{b_name} file overlap of {len(overlap)} file(s); "
+                f"example: {sorted(overlap)[0]}"
+            )
+
+    # Every assay with held-out data must be present in train, so its assay code
+    # and Stage-0 memory-bank entry exist at evaluation time.
+    for assay_index in set(val_dict) | set(test_dict):
+        if assay_index not in train_dict:
+            raise RuntimeError(
+                f"Assay {assay_index} appears in val/test but not train; its "
+                "memory-bank entry would not exist at evaluation time."
+            )
+
+    # Strict temporal ordering per assay.
+    for assay_index, info in train_dict.items():
+        train_keys = [_recording_order_key(f) for f in info["files"]]
+        for later_dict, label in ((val_dict, "val"), (test_dict, "test")):
+            if assay_index not in later_dict:
+                continue
+            later_keys = [_recording_order_key(f) for f in later_dict[assay_index]["files"]]
+            if max(train_keys) >= min(later_keys):
+                raise RuntimeError(
+                    f"Assay {assay_index}: train is not strictly earlier than "
+                    f"{label} in recording order."
+                )
+
+    for assay_index, info in val_dict.items():
+        if assay_index not in test_dict:
+            continue
+        val_keys = [_recording_order_key(f) for f in info["files"]]
+        test_keys = [_recording_order_key(f) for f in test_dict[assay_index]["files"]]
+        if max(val_keys) >= min(test_keys):
+            raise RuntimeError(
+                f"Assay {assay_index}: val is not strictly earlier than test."
+            )
+
+
+def _dataset_worker_init(worker_id: int) -> None:
+    """Give each DataLoader worker an independent sampling stream.
+
+    ``NpzBurstDataset.rng`` is created once in ``__init__`` and inherited by
+    every forked worker, so without this all workers replay the same file
+    choices and the same random crops.
+    """
+    info = torch.utils.data.get_worker_info()
+    if info is None:
+        return
+
+    dataset = info.dataset
+    base = getattr(dataset, "dataset", dataset)  # unwrap Subset/DeterministicSubset
+    if hasattr(base, "rng"):
+        base.rng = np.random.default_rng(
+            np.random.SeedSequence([int(info.seed) % (2**32), int(worker_id)])
+        )
+
+
 def split_indices(n: int, val_frac: float = 0.1, test_frac: float = 0.1, seed: int = 42) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """DEPRECATED for this pipeline: splits virtual indices, not files.
+
+    Under ``balance_mode="equal"`` a virtual index re-draws a random file from
+    the assay pool on every access, so splitting indices does not hold anything
+    out. Retained only for external callers. Use ``split_files_temporally``.
+    """
     assert 0.0 <= val_frac < 1 and 0.0 <= test_frac < 1 and val_frac + test_frac < 1
     rng = np.random.default_rng(seed)
     idxs = np.arange(n)
@@ -797,7 +1025,9 @@ def make_loaders_for_assays(
 
     # ---- balancing knobs (passed to dataset) ----
     balance_mode: str = "equal",                # "none" | "equal" | "weighted"
-    per_assay_quota: Optional[int] = 500,       # used when balance_mode == "equal"
+    # Scalar applies to train and scales val/test by val_frac/test_frac.
+    # A 3-tuple sets (train, val, test) quotas explicitly.
+    per_assay_quota: Optional[Any] = 500,       # used when balance_mode == "equal"
     total_quota: Optional[int] = None,          # used when balance_mode == "weighted"
     n_assays: Optional[int] = 1000,
     dim_assays: Optional[int] = 32,
@@ -825,46 +1055,87 @@ def make_loaders_for_assays(
     if collate_fn is None:
         collate_fn = burst_collate
 
-    # Construct the base dataset (length reflects chosen balance_mode)
-    base_ds = NpzBurstDataset(
-        assay_indices=assay_indices,
-        assay_dict=assay_dict,
-        axis_order=axis_order,
-
-        # balancing
-        balance_mode=balance_mode,
-        per_assay_quota=per_assay_quota,
-        total_quota=total_quota,
-
-        # shaping
-        temporal_crop=temporal_crop,
-        temporal_pool=temporal_pool,
-        spatial_crop=spatial_crop,
-        
-        cache_dir=cache_dir,
-        cache_mode=cache_mode,
-        cache_max_gb=cache_max_gb,
-        cache_write_prob=cache_write_prob,
-        
-        n_assays=n_assays,
-        global_ctx_dim=dim_assays,
-
-        seed=seed,
-        **ds_kwargs,   # <— forward extras (task_probs, patch_size, etc.)
+    # ------------------------------------------------------------------
+    # Split FILES by recording time, then build one dataset per split.
+    #
+    # The previous implementation built a single dataset over all files and
+    # split its virtual indices. Because _pick_index re-draws a random file per
+    # access under balance_mode="equal", that placed the same recording in every
+    # split. Splitting files first makes the held-out sets genuinely held out.
+    # ------------------------------------------------------------------
+    train_assays, val_assays, test_assays, split_info = split_files_temporally(
+        assay_dict={a: assay_dict[a] for a in assay_indices if a in assay_dict},
+        val_frac=val_frac,
+        test_frac=test_frac,
     )
 
-    # Split indices over the *dataset length* (not number of files)
-    tr_idx, va_idx, te_idx = split_indices(len(base_ds), val_frac, test_frac, seed)
+    if isinstance(per_assay_quota, (tuple, list)):
+        if len(per_assay_quota) != 3:
+            raise ValueError(
+                "per_assay_quota must be a scalar or a (train, val, test) "
+                f"3-tuple, got {per_assay_quota!r}"
+            )
+        quota_train, quota_val, quota_test = (int(q) for q in per_assay_quota)
+    elif per_assay_quota is None:
+        quota_train = quota_val = quota_test = None
+    else:
+        quota_train = int(per_assay_quota)
+        quota_val = max(1, int(round(quota_train * float(val_frac))))
+        quota_test = max(1, int(round(quota_train * float(test_frac))))
 
-    ds_train = Subset(base_ds, tr_idx)
+    def _build(assays_for_split, quota, split_seed):
+        if not assays_for_split:
+            return None
+        return NpzBurstDataset(
+            assay_indices=sorted(assays_for_split.keys()),
+            assay_dict=assays_for_split,
+            axis_order=axis_order,
+
+            # balancing
+            balance_mode=balance_mode,
+            per_assay_quota=quota,
+            total_quota=total_quota,
+
+            # shaping
+            temporal_crop=temporal_crop,
+            temporal_pool=temporal_pool,
+            spatial_crop=spatial_crop,
+
+            cache_dir=cache_dir,
+            cache_mode=cache_mode,
+            cache_max_gb=cache_max_gb,
+            cache_write_prob=cache_write_prob,
+
+            # n_assays and the internal codebook seed are identical across the
+            # three datasets, so an assay index maps to the same global context
+            # vector in every split. Do not vary these per split.
+            n_assays=n_assays,
+            global_ctx_dim=dim_assays,
+
+            seed=split_seed,
+            **ds_kwargs,
+        )
+
+    base_ds = _build(train_assays, quota_train, seed)
+    if base_ds is None:
+        raise RuntimeError("Temporal split produced an empty training set.")
+
+    val_ds_raw = _build(val_assays, quota_val, int(seed) + 100_003)
+    test_ds_raw = _build(test_assays, quota_test, int(seed) + 200_003)
+
+    ds_train = base_ds
     ds_val = (
-        DeterministicSubset(base_ds, va_idx, seed=int(seed) + 100_003)
-        if len(va_idx)
+        DeterministicSubset(
+            val_ds_raw, range(len(val_ds_raw)), seed=int(seed) + 100_003
+        )
+        if val_ds_raw is not None and len(val_ds_raw)
         else None
     )
     ds_test = (
-        DeterministicSubset(base_ds, te_idx, seed=int(seed) + 200_003)
-        if len(te_idx)
+        DeterministicSubset(
+            test_ds_raw, range(len(test_ds_raw)), seed=int(seed) + 200_003
+        )
+        if test_ds_raw is not None and len(test_ds_raw)
         else None
     )
 
@@ -879,6 +1150,9 @@ def make_loaders_for_assays(
         collate_fn=collate_fn,
         persistent_workers=persistent_ok,
         drop_last=drop_last,
+        # Without this every worker inherits the same NpzBurstDataset.rng and
+        # replays identical file choices and crops.
+        worker_init_fn=_dataset_worker_init,
     )
     if num_workers and num_workers > 0:
         dl_kwargs["prefetch_factor"] = 1
@@ -889,10 +1163,19 @@ def make_loaders_for_assays(
         
 
     meta = {
-        "num_items_total": len(base_ds),
-        "splits": {"train": len(tr_idx), "val": len(va_idx), "test": len(te_idx)},
+        "num_items_total": len(base_ds) + (len(ds_val) if ds_val else 0) + (len(ds_test) if ds_test else 0),
+        "splits": {
+            "train": len(ds_train),
+            "val": len(ds_val) if ds_val is not None else 0,
+            "test": len(ds_test) if ds_test is not None else 0,
+        },
+        "split_strategy": split_info,
         "balance_mode": balance_mode,
-        "per_assay_quota": per_assay_quota,
+        "per_assay_quota": {
+            "train": quota_train,
+            "val": quota_val,
+            "test": quota_test,
+        },
         "total_quota": total_quota,
         "temporal_crop": temporal_crop,
         "temporal_pool": temporal_pool,

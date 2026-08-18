@@ -25,6 +25,26 @@ def evaluate_vqvae(
     metric_tolerance: tuple[int, int, int] = (2, 2, 2),
     # If True: compute both conditioned (FiLM on) and unconditioned (FiLM off) metrics.
     eval_cfg_modes: bool = True,
+    # If True, decode every cumulative hierarchy level so per-level reconstruction
+    # curves exist. Costs one extra decoder pass per level below the last.
+    eval_per_level_refinements: bool = True,
+    # If True, score every hierarchy level with the SAME loss settings as the
+    # final level. The per-level training weights differ (intermediate levels
+    # use alpha_exact=0.20/beta_hit=0.70, the final uses 0.90/0.08), so mixing
+    # them makes ref1 and ref2 different objectives and the level-to-level
+    # comparison meaningless. Set False to reproduce the train-matched weights.
+    comparable_per_level_losses: bool = True,
+    # Hide a subset of latent tokens from the decoder, matching Stage 2C
+    # training.  Context can only matter where the codes are missing, so
+    # measuring conditional-vs-unconditional under full autoencoding will
+    # always report "no effect" regardless of what the branch learned.
+    mask_latents: bool = False,
+    latent_recon_drop_p: float = 0.5,
+    # Extra pass with local_ctx permuted across the batch.  Distinguishes
+    # "the decoder uses context" from "the decoder uses THIS sample's
+    # context": if shuffled matches conditional, the branch has only learned
+    # a constant bias.
+    eval_ctx_shuffle: bool = False,
 ):
     """
     Deterministic evaluation.
@@ -35,6 +55,14 @@ def evaluate_vqvae(
     PR metrics are calculated once from TP/FP/FN accumulated over the complete
     loader. Conditional keys end in ``_cond``; optional unconditional keys end
     in ``_uncond``.
+
+    Per-level reconstruction keys ``val_loss_recon_ref{L}_*`` are indexed by the
+    decode's own hierarchy level and, by default, scored with identical loss
+    settings so that levels are directly comparable. Levels below the last are cumulative decodes
+    from HARD codes only; the last level is the model's actual decode path,
+    which uses the continuous convex residual when that is enabled. They are
+    therefore comparable as "how much does level L add", but ref{L_max} is not a
+    pure hard-code decode. A level that was not decoded reports NaN.
     """
     model.eval()
 
@@ -91,6 +119,9 @@ def evaluate_vqvae(
     sb_sum_sq = 0.0
     sb_count = 0
 
+    total_bce_s = 0.0
+    total_bce_full_s = 0.0
+
     cont_adapter_projection_sum = 0.0
     cont_geometric_projection_sum = 0.0
     cont_distance_reference_sum = 0.0
@@ -100,15 +131,19 @@ def evaluate_vqvae(
     max_ref_levels = int(getattr(model.vq, "num_quantizers", 1))
     refinement_sums_c = {}
     refinement_sums_u = {}
-    
+    refinement_counts_c = {}
+    refinement_counts_u = {}
+
     for ridx in range(1, max_ref_levels + 1):
         refinement_sums_c[f"ref{ridx}"] = 0.0
         refinement_sums_c[f"ref{ridx}_exact"] = 0.0
         refinement_sums_c[f"ref{ridx}_tol"] = 0.0
-    
+        refinement_counts_c[ridx] = 0
+
         refinement_sums_u[f"ref{ridx}"] = 0.0
         refinement_sums_u[f"ref{ridx}_exact"] = 0.0
         refinement_sums_u[f"ref{ridx}_tol"] = 0.0
+        refinement_counts_u[ridx] = 0
 
     def _metrics_from_out(
         out,
@@ -144,17 +179,22 @@ def evaluate_vqvae(
         # ---- full mask always ----
         full_mask_vol = torch.ones_like(tgt_vol, dtype=torch.float32, device=logits_vol.device)
 
+        # Key by the decode's own reported level. The previous code appended to
+        # a list and later enumerated it from 1, so when only the final decode
+        # was present it was reported as "ref1" and "ref2" stayed at its 0.0
+        # initial value for the whole run.
         refinements = out.get("refinements", None)
-        refinement_losses = []
-        refinement_exact = []
-        refinement_tol = []
-        
+        refinement_losses = {}
+        refinement_exact = {}
+        refinement_tol = {}
+
         if refinements is not None:
             for ref in refinements:
+                ref_level = int(ref["level"])
                 ref_logits = ref.get("logits_vol_raw", ref["logits_vol"])[..., :Tp, :Hp, :Wp]
                   
                 # use train-matched settings by level
-                if ref["level"] < len(refinements):
+                if ref_level < max_ref_levels and not comparable_per_level_losses:
                     ref_parts = tolerant_spike_loss(
                         logits=ref_logits.float(),
                         target=tgt_vol.float(),
@@ -185,9 +225,9 @@ def evaluate_vqvae(
                         return_parts=True,
                     )
         
-                refinement_losses.append(float(ref_parts["total"].item()))
-                refinement_exact.append(float(ref_parts["weighted_exact"].item()))
-                refinement_tol.append(float(ref_parts["weighted_tol"].item()))
+                refinement_losses[ref_level] = float(ref_parts["total"].item())
+                refinement_exact[ref_level] = float(ref_parts["weighted_exact"].item())
+                refinement_tol[ref_level] = float(ref_parts["weighted_tol"].item())
     
 
 
@@ -246,8 +286,11 @@ def evaluate_vqvae(
             bce_active = bce_full
     
         # Update the one validation-population PR curve once per batch.
-        exact_accumulator.update(prob_vol, tgt_vol, pmask_vol)
-        tolerant_accumulator.update(prob_vol, tgt_vol, pmask_vol)
+        # The shuffled-context pass reports BCE only and passes None here.
+        if exact_accumulator is not None:
+            exact_accumulator.update(prob_vol, tgt_vol, pmask_vol)
+        if tolerant_accumulator is not None:
+            tolerant_accumulator.update(prob_vol, tgt_vol, pmask_vol)
 
         B = x.shape[0]
         eval_voxels = int((pmask_vol > 0).sum().item())
@@ -267,7 +310,7 @@ def evaluate_vqvae(
             refinement_tol,
         )
 
-    for batch in loader:
+    for batch_index, batch in enumerate(loader):
         x = batch["x"].to(device, non_blocking=True)
 
         gct = batch.get("global_ctx", None)
@@ -286,6 +329,21 @@ def evaluate_vqvae(
         if isinstance(lct, torch.Tensor):
             lct = lct.to(device, non_blocking=True)
 
+        # ---- shared latent hole ----
+        # Built once per batch and reused by every pass, so the conditional,
+        # unconditional and shuffled decoders differ only in their context.
+        latent_hidden_mask = None
+        if mask_latents and mask_spec is not None:
+            hole_generator = torch.Generator(device=device)
+            hole_generator.manual_seed(1234 + batch_index)
+            latent_hidden_mask = model.build_latent_hidden_mask(
+                mask_spec,
+                model.token_grid,
+                device=device,
+                recon_drop_p=float(latent_recon_drop_p),
+                generator=hole_generator,
+            )
+
         # ---- forward passes (deterministic) ----
         with autocast_ctx():
             out_c = model(
@@ -296,6 +354,8 @@ def evaluate_vqvae(
                 cfg_ctx_force_unc=False,   # conditioned
                 roi_hw=roi_hw,
                 pad_hw=pad_hw,
+                return_all_refinements=bool(eval_per_level_refinements),
+                latent_hidden_mask=latent_hidden_mask,
             )
             
             sp_bias = out_c.get("assay_spatial_full_pix2d_support", None)
@@ -334,6 +394,22 @@ def evaluate_vqvae(
                     cfg_ctx_force_unc=True,  # unconditional
                     roi_hw=roi_hw,
                     pad_hw=pad_hw,
+                    return_all_refinements=bool(eval_per_level_refinements),
+                    latent_hidden_mask=latent_hidden_mask,
+                )
+
+            out_s = None
+            if eval_ctx_shuffle and isinstance(lct, torch.Tensor) and lct.size(0) > 1:
+                out_s = model(
+                    x,
+                    global_ctx=gct,
+                    local_ctx=torch.roll(lct, shifts=1, dims=0),
+                    predict_mask_spec=mask_spec,
+                    cfg_ctx_force_unc=False,
+                    roi_hw=roi_hw,
+                    pad_hw=pad_hw,
+                    return_all_refinements=False,
+                    latent_hidden_mask=latent_hidden_mask,
                 )
 
         # ---- metrics: conditional ----
@@ -345,11 +421,12 @@ def evaluate_vqvae(
                 tolerant_c,
             )
             
-        for ridx, val in enumerate(ref_losses_c, start=1):
+        for ridx, val in ref_losses_c.items():
             refinement_sums_c[f"ref{ridx}"] += val
-        for ridx, val in enumerate(ref_exact_c, start=1):
+            refinement_counts_c[ridx] = refinement_counts_c.get(ridx, 0) + 1
+        for ridx, val in ref_exact_c.items():
             refinement_sums_c[f"ref{ridx}_exact"] += val
-        for ridx, val in enumerate(ref_tol_c, start=1):
+        for ridx, val in ref_tol_c.items():
             refinement_sums_c[f"ref{ridx}_tol"] += val
             
         total_bce_c += bce_c
@@ -359,6 +436,17 @@ def evaluate_vqvae(
         total_eval_voxels += vox_c
         total_full_voxels += full_vox_c
         eval_passes += samples_c
+
+        # ---- metrics: shuffled context ----
+        if out_s is not None:
+            bce_s, bce_full_s, _, _, _, _, _, _, _, _ = _metrics_from_out(
+                out_s,
+                x,
+                None,
+                None,
+            )
+            total_bce_s += bce_s
+            total_bce_full_s += bce_full_s
 
         # ---- metrics: unconditional ----
         if eval_cfg_modes and out_u is not None:
@@ -373,11 +461,12 @@ def evaluate_vqvae(
             total_bce_full_u += bce_full_u
             sum_vq_u += vq_u
             
-            for ridx, val in enumerate(ref_losses_u, start=1):
+            for ridx, val in ref_losses_u.items():
                 refinement_sums_u[f"ref{ridx}"] += val
-            for ridx, val in enumerate(ref_exact_u, start=1):
+                refinement_counts_u[ridx] = refinement_counts_u.get(ridx, 0) + 1
+            for ridx, val in ref_exact_u.items():
                 refinement_sums_u[f"ref{ridx}_exact"] += val
-            for ridx, val in enumerate(ref_tol_u, start=1):
+            for ridx, val in ref_tol_u.items():
                 refinement_sums_u[f"ref{ridx}_tol"] += val
 
 
@@ -434,12 +523,30 @@ def evaluate_vqvae(
         "cont_hard_vertex_mse": (
             cont_hard_vertex_sum / max(1, cont_metric_batches)
         ),
+        "latent_masking_enabled": bool(mask_latents),
     }
+
+    if eval_ctx_shuffle:
+        report["val_loss_BCE_shuf"] = total_bce_s / max(1, len(loader))
+        report["val_loss_BCE_full_shuf"] = total_bce_full_s / max(1, len(loader))
+        # The number that matters.  If the decoder actually uses THIS sample's
+        # context, mismatching it must hurt: ctx_specificity_bce > 0.
+        report["ctx_specificity_bce"] = (
+            report["val_loss_BCE_shuf"] - report["val_loss_BCE_cond"]
+        )
     
     for ridx in range(1, max_ref_levels + 1):
-        report[f"val_loss_recon_ref{ridx}_cond"] = refinement_sums_c[f"ref{ridx}"] / max(1, len(loader))
-        report[f"val_loss_recon_ref{ridx}_exact_cond"] = refinement_sums_c[f"ref{ridx}_exact"] / max(1, len(loader))
-        report[f"val_loss_recon_ref{ridx}_tol_cond"] = refinement_sums_c[f"ref{ridx}_tol"] / max(1, len(loader))
+        den = refinement_counts_c.get(ridx, 0)
+        if den <= 0:
+            # Never decoded this level. Emit NaN so a missing level can never be
+            # plotted or tabulated as a real zero.
+            report[f"val_loss_recon_ref{ridx}_cond"] = float("nan")
+            report[f"val_loss_recon_ref{ridx}_exact_cond"] = float("nan")
+            report[f"val_loss_recon_ref{ridx}_tol_cond"] = float("nan")
+            continue
+        report[f"val_loss_recon_ref{ridx}_cond"] = refinement_sums_c[f"ref{ridx}"] / den
+        report[f"val_loss_recon_ref{ridx}_exact_cond"] = refinement_sums_c[f"ref{ridx}_exact"] / den
+        report[f"val_loss_recon_ref{ridx}_tol_cond"] = refinement_sums_c[f"ref{ridx}_tol"] / den
 
     if sb_count > 0:
         sb_mean = sb_sum / sb_count
@@ -469,9 +576,15 @@ def evaluate_vqvae(
         })
         
         for ridx in range(1, max_ref_levels + 1):
-            report[f"val_loss_recon_ref{ridx}_uncond"] = refinement_sums_u[f"ref{ridx}"] / max(1, len(loader))
-            report[f"val_loss_recon_ref{ridx}_exact_uncond"] = refinement_sums_u[f"ref{ridx}_exact"] / max(1, len(loader))
-            report[f"val_loss_recon_ref{ridx}_tol_uncond"] = refinement_sums_u[f"ref{ridx}_tol"] / max(1, len(loader))
+            den = refinement_counts_u.get(ridx, 0)
+            if den <= 0:
+                report[f"val_loss_recon_ref{ridx}_uncond"] = float("nan")
+                report[f"val_loss_recon_ref{ridx}_exact_uncond"] = float("nan")
+                report[f"val_loss_recon_ref{ridx}_tol_uncond"] = float("nan")
+                continue
+            report[f"val_loss_recon_ref{ridx}_uncond"] = refinement_sums_u[f"ref{ridx}"] / den
+            report[f"val_loss_recon_ref{ridx}_exact_uncond"] = refinement_sums_u[f"ref{ridx}_exact"] / den
+            report[f"val_loss_recon_ref{ridx}_tol_uncond"] = refinement_sums_u[f"ref{ridx}_tol"] / den
 
 
     return report

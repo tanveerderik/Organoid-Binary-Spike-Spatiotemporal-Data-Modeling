@@ -1,0 +1,13 @@
+{
+    "source": "ckpts/vqvae_stage1_balanced_best.pt",
+    "children_old": 8,
+    "children_new": 64,
+    "parents": 32,
+    "residuals": 79307,
+    "mean_occupancy": 1.0,
+    "capture_kmeans_seed": 0.7052393464665292,
+    "capture_after_refinement": 0.9851100492973716,
+    "refine_iters": 12,
+    "under_populated_parents": 0,
+    "realised_capture": 0.9849116987919327
+}

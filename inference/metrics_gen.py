@@ -8,6 +8,7 @@ Created on Fri May 29 15:29:07 2026
 
 from typing import Optional, Sequence
 
+import numpy as np
 import torch
 
 from ..utils.constants import normalize_gap_bins, gap_bin_label
@@ -528,3 +529,97 @@ def evaluate_generation_global_metrics(
         results.append(row)
 
     return results
+
+# ---------------------------------------------------------------------------
+# Independent-rate generation surrogate
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def generate_rate_surrogate(
+    *,
+    null_baselines,
+    assay_idx,
+    local_ctx: torch.Tensor,
+    shape,
+    device=None,
+    generator: Optional[torch.Generator] = None,
+    match_density_to_context: bool = True,
+    eps: float = 1e-8,
+):
+    """Independent-Bernoulli surrogate matched to assay rate and requested density.
+
+    Each voxel fires independently with probability proportional to that
+    electrode's empirical firing rate in the assay (measured on TRAINING data
+    only), rescaled so the expected density equals the density requested through
+    local context feature 0. It has no temporal structure, no motifs, and no
+    spatiotemporal covariance beyond what a per-electrode rate implies.
+
+    This is the reference the generative claim rests on. The model must beat it
+    on the statistics that first-order rates cannot express -- local moment
+    fields, short-gap adjacency, and spatiotemporal covariance -- otherwise
+    matching marginal spike counts demonstrates nothing beyond knowing the
+    assay's average firing rate.
+
+    Returns the same keys as ``decode_codes_to_xgen`` so it drops directly into
+    the existing generation metric suite.
+    """
+    rate_bank = null_baselines.get("firing_rate_map", None)
+    if not rate_bank:
+        raise RuntimeError(
+            "null_baselines has no firing_rate_map; rebuild with build_null_baselines."
+        )
+
+    batch_size, _, frames, height, width = map(int, shape)
+    if device is None:
+        device = local_ctx.device
+
+    assay_idx = np.asarray(assay_idx).reshape(-1).astype(np.int64)
+    if assay_idx.shape[0] != batch_size:
+        raise ValueError(
+            f"assay_idx length {assay_idx.shape[0]} != batch size {batch_size}"
+        )
+
+    fallback = np.mean(list(rate_bank.values()), axis=0)
+    rate = np.stack(
+        [np.asarray(rate_bank.get(int(a), fallback), dtype=np.float32) for a in assay_idx],
+        axis=0,
+    )
+    rate_t = torch.from_numpy(rate).to(device=device, dtype=torch.float32)
+
+    if rate_t.shape[1:] != (height, width):
+        raise RuntimeError(
+            f"rate map spatial size {tuple(rate_t.shape[1:])} does not match "
+            f"target {(height, width)}; rebuild ckpts/null_baselines.pkl"
+        )
+
+    probability = rate_t.clone()
+
+    if match_density_to_context:
+        # ctx[0] is log(mean firing density), so the requested per-voxel rate is
+        # its exponential. Scale the assay rate map to hit exactly that mean.
+        requested = local_ctx[:, 0].to(device=device, dtype=torch.float32).exp()
+        current = probability.mean(dim=(1, 2)).clamp_min(eps)
+        probability = probability * (requested / current).view(-1, 1, 1)
+
+    probability = probability.clamp(0.0, 1.0)
+    probability = probability.view(batch_size, 1, 1, height, width).expand(
+        batch_size, 1, frames, height, width
+    )
+
+    draw = torch.rand(
+        (batch_size, 1, frames, height, width),
+        device=device,
+        generator=generator,
+    )
+    x_gen = (draw < probability).float()
+
+    clamped = probability.clamp(eps, 1.0 - eps)
+    logits = torch.log(clamped) - torch.log1p(-clamped)
+
+    return {
+        "x_gen": x_gen,
+        "prob": probability.contiguous(),
+        "logits": logits.contiguous(),
+        "threshold": 0.5,
+        "surrogate": "independent_bernoulli_assay_rate",
+    }

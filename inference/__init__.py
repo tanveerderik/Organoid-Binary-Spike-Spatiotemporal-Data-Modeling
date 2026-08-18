@@ -12,7 +12,10 @@ from .sample_prior import (
 )
 from .sample_context import ContextBankSampler
 
-from .metrics_gen import evaluate_generation_global_metrics
+from .metrics_gen import (
+    evaluate_generation_global_metrics,
+    generate_rate_surrogate,
+)
 
 from .decode import (
     decode_motif_logits_soft_given_activity,
@@ -29,4 +32,5 @@ __all__ = [
     "save_generated_batch_outputs",
     "save_generation_metrics_json",
     "evaluate_generation_global_metrics",
+    "generate_rate_surrogate",
 ]

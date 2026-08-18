@@ -217,10 +217,12 @@ def decode_motif_logits_soft_given_activity(
     z1_prob = F.softmax(logits["z1"] / temperature, dim=-1)
     z1_hard = F.one_hot(z1_prob.argmax(dim=-1), num_classes=K1).to(z1_prob.dtype)
     z1_prob_st = z1_hard + z1_prob - z1_prob.detach()
-    alpha_logits = logits.get("alpha_mu", logits.get("alpha_logits", None))
-    if alpha_logits is None:
-        raise KeyError("Motif logits must contain alpha_mu or alpha_logits.")
-    alpha_pred = F.softmax(alpha_logits / temperature, dim=-1)
+    # Dirichlet mean of the convex coefficients. Temperature no longer applies:
+    # the head outputs a concentration, not logits, and soft decoding wants the
+    # distribution's mean rather than a temperature-sharpened point.
+    alpha_pred = logits.get("alpha_mean", None)
+    if alpha_pred is None:
+        raise KeyError("Motif logits must contain alpha_mean (Dirichlet head).")
 
     parent_anchor = torch.einsum("bnk,kd->bnd", z1_prob_st, E0)
     child_by_parent = torch.einsum("bnr,krd->bnkd", alpha_pred, E1)

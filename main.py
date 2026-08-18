@@ -38,20 +38,23 @@ except RuntimeError:
     pass
 
 from .dataset import make_loaders_for_assays, burst_collate
-from .model import TransformerVQVAE, DETRActivityPrior, MaskGITMotifPrior, HierarchicalCodebookPrior
+from .model import TransformerVQVAE, MaskGITActivityPrior, MaskGITMotifPrior, HierarchicalCodebookPrior
 from .model.prior import (
     build_activity_targets_from_codes,
-    detr_activity_loss,
+    maskgit_activity_loss,
     infer_activity_coordinate_mode_from_state_dict,
 )
 from .model.spatial_map import GlobalContextSpatialBank, GlobalContextAdjacencyBank
 from .training import (
     fit_vqvae, evaluate_vqvae, fit_spatial_prior_pretrain, build_context_prior,
+    build_null_baselines, load_null_baselines, predict_count_from_density,
+    build_motif_null_baselines, load_motif_null_baselines, motif_null_predictions,
     train_motif_prior_mgit,
-    train_activity_prior_detr,
+    train_maskgit_activity_prior,
     train_activity_prior_with_frozen_motif,
     configure_stage3c_event_calibration,
 )
+from .training.stage3_activity import token_frequency_for_batch
 from .training.train_prior import (
     _batch_to_device,
     _make_activity_in_from_codes,
@@ -63,6 +66,7 @@ from .training.train_prior import (
 from .inference import (
     ContextBankSampler,
     decode_codes_to_xgen,
+    generate_rate_surrogate,
     evaluate_generation_global_metrics,
     save_generated_batch_outputs,
     save_generation_metrics_json,
@@ -84,6 +88,7 @@ from .visualization.reports_data import (
     export_viz_quant_tables,
 )
 
+from .utils.losses import local_moment_field_loss
 from .utils.constants import (
     ACTIVITY_CTX_NAMES,
     DEFAULT_GAP_BINS,
@@ -100,8 +105,8 @@ from .utils.constants import (
 #   (2,)       -> load stage-1 ckpt, learn exact continuous hull decoding + context
 #   (1, 2, 3)  -> run the whole pipeline sequentially
 #   (0,)     -> run spatial-map pretraining only
-TRAIN_STAGES = ()        # 0,1,2,3
-EVAL_STAGES  = (3,)   # 0,1,2,3
+TRAIN_STAGES = (3,)        # 0,1,2,3
+EVAL_STAGES  = ()   # 0,1,2,3
 
 # Stage-2 continuous quantization.
 #
@@ -111,25 +116,135 @@ EVAL_STAGES  = (3,)   # 0,1,2,3
 # Stage 2B:
 #   train the optional alpha adapter to reproduce the same geometric projection.
 #   The decoder is frozen and does not define the adapter target.
-# Stage 2C:
+# Stage 2B:
 #   freeze the continuous mapping and decoder backbone; train only zero-gated
 #   decoder cross-attention and context projections.
-STAGE2_PHASES = ("2a", "2c")
+# Stage-1 training substages. Any subset of ("1a", "1b") is valid; execution
+# order is always 1A -> 1B.
+# Stage 1A:
+#   joint context-agnostic training of encoder/to_code/VQ/decoder. The discrete
+#   hierarchy (z1 parents and z2 children) is learned here. This is the stage the
+#   z1-level results characterise: codebook perplexity, eta^2(code->activity),
+#   motif syntax, and the causal code->context response.
+# Stage 1B:
+#   refit ONLY the z2 children against the frozen encoder and z1, at a new
+#   children-per-parent count. Residuals depend solely on the encoder and z1, so
+#   this is well posed and leaves every z1-level Stage 1A result intact. Used to
+#   widen the child hull without paying for a full Stage 1A retrain.
+STAGE1_PHASES = ("1a",)
+
+# Stage 1B configuration. STAGE1B_CHILDREN must equal num_codes[1] of the model
+# being built; the source checkpoint may carry a different (smaller) count and
+# its level-2 tensors are resized on load.
+STAGE1B_SOURCE = Path("ckpts") / "vqvae_stage1_balanced_best.pt"
+STAGE1B_CHILDREN = 64
+STAGE1B_FIT_BATCHES = 250
+# Block-coordinate refinement of the children against the CONVEX PROJECTION
+# objective. k-means fits nearest-neighbour centroids, but the children are
+# used as hull vertices, and the optimal vertices are not the centroids.
+STAGE1B_REFINE_ITERS = 12
+
+STAGE2_PHASES = ("2a", "2b")
 
 # Independently evaluate any saved Stage-2 substages. Evaluation order is
-# always 2A -> 2B -> 2C, regardless of tuple order.
-STAGE2_EVAL_PHASES = ("2a", "2c")
+# always 2A -> 2B, regardless of tuple order.
+STAGE2_EVAL_PHASES = ("2a", "2b")
 
-STAGE2_CONTINUOUS_RESIDUAL = True
+# DEPRECATED with the discrete three-level ladder. The continuous convex-hull
+# residual (1B hull fit + 2A alpha decode) is out of the pipeline: the decoder
+# needed it near-exact -- a wrong-but-plausible residual scored 0.062 against
+# 0.130 for none -- and its conditional mean was only ~4% predictable, so it
+# could not be sampled. Default flipped True -> False so a stage-2 run cannot
+# silently route the ladder through the hull projector, which would read
+# tree_embeds[1] as a children table and replace z2/z3 with a projection.
+# Machinery retained but inert; see the guard in freeze_for_stage(2).
+STAGE2_CONTINUOUS_RESIDUAL = False
 STAGE2A_EPOCHS = 150
 STAGE2B_EPOCHS = 50
-STAGE2C_EPOCHS = 50
+
+# ---- Stage 2B context conditioning ----
+# Number of decoder cross-attention tokens generated per context source.
+# One token per source collapses cross-attention into a few scalar FiLM gates
+# (see TransformerVQVAE._prepare_ctx_tokens).
+STAGE2B_CTX_SLOTS = 8
+
+# Per-channel LayerScale init on the cross-attention residual.  Must be
+# nonzero: an exactly-zero gate is a saddle that zeroes the gradient of every
+# parameter behind it, which is what stalled the first Stage 2B run.
+STAGE2B_CTX_GATE_INIT = 0.1
+
+# Hide a subset of latent tokens from the decoder during Stage 2B.
+#
+# OFF, and it should stay off while counterfactual conditioning is on.
+# Masking and counterfactual conditioning solve the same problem by different
+# routes -- masking makes the context INFORMATIVE, counterfactual requests
+# make it CONTROLLING -- and stacking them is actively harmful: hiding ~49%
+# of active latents leaves the decode systematically under-dense relative to
+# the requested log_mean_firing_density, so ctx_loss_soft is dominated by a
+# large, content-independent "raise every logit" gradient.  The first run of
+# this stage learned exactly that: BCE effect +0.30 with context specificity
+# 0.00000, and reconstruction AUPRC_tol halved from 0.133 to 0.069.
+STAGE2B_MASK_LATENTS = False
+
+# Hole size for plain "recon" samples, which carry no mask_spec hole.
+STAGE2B_LATENT_RECON_DROP_P = 0.5
+
+# Cross-attention is applied in these decoder blocks during Stage 2B.
+STAGE2B_CROSS_ATTN_LAYERS = (0, 1)
+
+# ---- counterfactual context conditioning ----
+# Weight on the controllability loss: decode the same latents a second time
+# under a perturbed context request and require the output's measured
+# statistics to follow the request.  This is the only term that puts the
+# context in tension with the codes, and therefore the only one that trains
+# the local context head.
+# The decoder backbone is frozen, so reconstruction quality is a CEILING the
+# context branch can only damage, never improve.  Any weight that lets the
+# context terms visibly pull AUPRC down is too high.
+STAGE2B_LAMBDA_CTX_CF = 0.25
+STAGE2B_CTX_CF_SIGMA_START = 0.25
+STAGE2B_CTX_CF_SIGMA_END = 0.40
+
+# Fraction of counterfactual requests that swap the whole (global, local)
+# pair to another assay rather than resampling a local within the current
+# assay.  Paired swaps give the large, still-plausible displacements;
+# within-assay draws test fine-grained steering.  Both are modes
+# sample_context.py supports.
+STAGE2B_CTX_CF_PAIR_P = 0.5
+STAGE2A_CTX_START_EPOCH = 0
+STAGE2A_CTX_WARMUP_EPOCHS = 20
+
+STAGE2B_CTX_START_EPOCH = 0
+STAGE2B_CTX_WARMUP_EPOCHS = 10
+STAGE2B_CFG_CTX_START_EPOCH = 5
+STAGE2B_CFG_CTX_WARMUP_EPOCHS = 10
+
+STAGE2B_CTX_CF_START_EPOCH = 0
+STAGE2B_CTX_CF_WARMUP_EPOCHS = 10
+
+# Checkpointing starts only after every warm-up has finished. Until then the
+# objective is still changing shape, so an early score is not comparable to a
+# converged one and must not be allowed to set the selection bar. Derived from
+# the schedules above rather than hard-coded, so the two cannot drift apart.
+STAGE2A_SAVE_START_EPOCH = STAGE2A_CTX_START_EPOCH + STAGE2A_CTX_WARMUP_EPOCHS
+STAGE2B_SAVE_START_EPOCH = max(
+    STAGE2B_CTX_START_EPOCH + STAGE2B_CTX_WARMUP_EPOCHS,
+    STAGE2B_CTX_CF_START_EPOCH + STAGE2B_CTX_CF_WARMUP_EPOCHS,
+    STAGE2B_CFG_CTX_START_EPOCH + STAGE2B_CFG_CTX_WARMUP_EPOCHS,
+)
 
 # Stage-3 training substages. Any subset of ("3a", "3b", "3c") is valid;
 # execution order remains 3A -> 3B -> 3C. Missing prerequisites are loaded
 # from their best checkpoints.
-STAGE3_PHASES = ("3b", "3c")
-STAGE3A_EPOCHS = 200
+STAGE3_PHASES = ("3a",)
+# Warm-start 3A from ckpts/motif_prior_warmstart.pt when present. The z1 trunk
+# from the previous run reached 0.288 top-1; retraining from scratch would spend
+# ~400 epochs re-earning it. strict=False because the alpha head is now a
+# Dirichlet concentration head (same shape, new interpretation).
+STAGE3A_WARM_START = True
+# Literal path: CKPT_DIR is defined further down in this config block.
+STAGE3A_WARM_START_PATH = Path("ckpts") / "motif_prior_warmstart.pt"
+STAGE3A_EPOCHS = 600
 STAGE3B_EPOCHS = 200
 STAGE3C_EPOCHS = 100
 
@@ -137,22 +252,92 @@ STAGE3C_EPOCHS = 100
 # original axis-head ablation or "joint_dense" for one categorical THW head.
 STAGE3_COORDINATE_MODE = "joint_dense"
 
+# Stage 3B activity-prior architecture.
+#   "sparse_region" : SparseRegionActivityPrior. Visible-active tokens enter a
+#                     sparse-memory encoder (no mean pool), Kmax queries
+#                     cross-attend to that memory with region anchors, and the
+#                     coordinate head factorizes as p(region) * p(token|region).
+# Activity placement is scored exactly. In token space a +/-1-token tolerance is
+# not a near miss: one token is 6 frames x 15 rows x 14 cols, the dilated target
+# covers ~49% of the grid, and a uniform ROI draw scores ~0.49 for free.
+STAGE3_HARD_TOLERANCE = (0, 0, 0)
+
+STAGE3B_REGION_GRID = None        # None = derive from the token grid (region extent ~4
+                                  # tokens/axis). (8,8,16) -> (2,2,4) = 16 regions of 64,
+                                  # identical to the hand-picked value. Pin a tuple only to
+                                  # override; it must tile the token grid exactly.
+STAGE3B_DECODER_LAYERS = 4
+# Ablation: False replaces the region/within factorization with a flat Ntok-way
+# grid head, isolating the region head from the sparse-memory encoder.
+STAGE3B_REGION_FACTORIZATION = True
+# Per-assay adjacency target for the 3B structural loss, keyed by global_ctx --
+# the same statistic Stage 0 supervised the global embedder on.
+STAGE3B_USE_TOKEN_ADJ_BANK = False
+STAGE3B_TOKEN_ADJ_VARIANT = "token"
+
+# Depth of the per-cell readout decoder.
+STAGE3B_MASKGIT_LAYERS = 3
+STAGE3B_MASKGIT_HYPERPARAMETERS = {
+    "lr": 3e-4,
+    "epochs": 120,
+    "lambda_bce": 1.0,
+    # 1.0, not the class-balancing ratio. Up-weighting the ~5% positives helps
+    # F1/AUPRC (both rank-based, blind to it) and destroys calibration, which is
+    # the property a sampled prior actually needs.
+    "pos_weight": 1.0,
+    "lambda_count": 1.0,
+    "lambda_adj_t": 0.10,
+    "lambda_adj_s": 0.10,
+    # loss_spatial lands near 8.0 against ~1.6 for BCE, so its weight is scaled
+    # to make the contribution comparable rather than dominant.
+    "lambda_spatial": 0.02,
+    # Fraction of samples given a scattered random-ratio token mask instead of
+    # the structured recon/causal/noncausal/spatial mask. Rounds 2+ of MaskGIT
+    # decoding produce exactly this distribution and the shipped specs never do.
+    "random_mask_prob": 0.5,
+    "random_mask_ratio": (0.15, 1.0),
+    # NLL, not F1: F1 is maximized by emitting the mode.
+    "select_on": "nll",
+    "save_start_epoch": 10,
+    "early_stop_patience": 30,
+}
+# MaskGIT decoding schedule for sampling from the dense prior.
+# Tuned by sweep: total |error| across rate, temporal persistence lags 1-7 and
+# spatial co-activation fell 1.31 -> 0.18 going from (1.0, 1.0, 10) to these, and
+# the mean-field baseline sits at 0.73. Greedy decoding over-produces persistence
+# (0.77 vs 0.61 real at lag 1) because a committed cell raises its temporal
+# neighbours and zero-noise late rounds then take them deterministically; raising
+# temperature and holding noise longer fixes it.
+# Selected on VALIDATION (reports/evaluation_report_3B_sampler_sweep_VAL.json);
+# test is measured once at this setting and never used for selection.
+STAGE3B_SAMPLE_STEPS = 10
+STAGE3B_SAMPLE_TEMPERATURE = 1.5
+STAGE3B_SAMPLE_GUMBEL = 4.0
+
 # Stage 3B is selected by a deterministic, hard expected-count top-K metric.
 STAGE3B_HYPERPARAMETERS = {
     "lr": 2e-4,
     "lambda_count": 1.0,
     "lambda_count_neighbor": 0.25,
     "lambda_count_distance": 0.05,
-    "lambda_obj": 1.0,
-    "lambda_coord": 1.0,
-    "lambda_soft_count": 0.10,
-    "lambda_soft_grid": 1.0,
-    "lambda_dup": 0.10,
-    "no_object_weight": 0.10,
-    "count_teacher_epochs": 15,
-    "count_transition_epochs": 45,
+    # Token-space structural terms (see maskgit_activity_loss).
+    "lambda_adj_t": 0.0,
+    "lambda_adj_s": 0.0,
+    # Coordinate-neighbourhood partial credit, added to (not replacing) the
+    # exact-cell CE. Temporal-only by default: one token spatially is 15 rows
+    # x 14 cols of electrodes, which is a different site, not a near miss.
     "deterministic_validation_masks": True,
     "hard_activity_mode": "expected-count unique grid top-K",
+    # Early stopping must not fire during the count-teacher curriculum: the
+    # handoff degrades validation by construction, so a patience shorter than
+    # count_teacher_epochs + count_transition_epochs kills the run mid-transition
+    # before it ever trains teacher-free.
+    "early_stop_patience": 30,
+    "early_stop_start_epoch": 60,
+    # No checkpoint is saved or tracked until the count handoff completes at
+    # count_teacher_epochs + count_transition_epochs. A teacher-forced model is
+    # solving an easier problem, so its score must not set the selection bar.
+    "save_start_epoch": 60,
 }
 
 # Stage 3C is a low-LR event-placement calibration, not a second activity-prior
@@ -160,21 +345,21 @@ STAGE3B_HYPERPARAMETERS = {
 # fixed subset because every validation pass runs iterative MaskGIT + decoding.
 STAGE3C_HYPERPARAMETERS = {
     "lr": 1e-5,
-    "lambda_detr": 1.0,
+    "lambda_activity": 1.0,
     "lambda_count": 1.0,
     "lambda_count_neighbor": 0.25,
     "lambda_count_distance": 0.05,
-    "lambda_obj": 1.0,
-    "lambda_coord": 1.0,
-    "lambda_soft_count": 0.10,
-    "lambda_soft_grid": 1.0,
-    "lambda_dup": 0.10,
-    "no_object_weight": 0.10,
     "lambda_ctx": 0.25,
     "lambda_ctx_field": 0.05,
     "lambda_adj": 0.25,
     "lambda_spatial": 0.25,
     "auxiliary_ramp_epochs": 10,
+    # No candidate accepted or tracked until the auxiliary losses finish ramping.
+    "save_start_epoch": 10,
+    # Raised from a hard-coded 20. Stage 3C moves 1.2% of parameters at 1e-5, so
+    # twenty epochs is very little actual movement and "no improvement" is weaker
+    # evidence of convergence here than the same count would be in Stage 3B.
+    "early_stop_patience": 45,
     "generation_val_max_batches": 4,
     "generation_motif_steps": 12,
     "deterministic_validation_masks": True,
@@ -203,6 +388,25 @@ STAGE3A_EVAL_FULL_MASK_PROB = 1.0
 # generation evaluations. Set False to evaluate only the prior heads.
 RUN_STAGE3_GENERATION_EVAL = True
 
+# --- Null-baseline / leakage-audit entry points (opt-in; default path unchanged) ---
+#
+# Recommended order:
+#   1. RUN_BUILD_NULL_BASELINES   (one pass over train, ~10 min)
+#   2. RUN_LEAKAGE_DELTA_EVAL     (existing ckpts on the new temporal test split)
+#   3. RUN_COUNT_NULL_EVAL + RUN_GENERATION_BASELINE_EVAL
+#   4. only then retrain on the clean split
+RUN_BUILD_NULL_BASELINES = False
+RUN_LEAKAGE_DELTA_EVAL = False
+RUN_COUNT_NULL_EVAL = False
+RUN_GENERATION_BASELINE_EVAL = False
+RUN_MOTIF_NULL_EVAL = False
+
+NULL_BASELINE_PATH = Path("ckpts/null_baselines.pkl")
+
+# Populated in main() when the file exists. Stage 3B/3C read this so their
+# hard-activity reports carry matched-null reference scores.
+_NULL_BASELINES = None
+
 RUN_EVAL = True
 RUN_VIZ  = True
 RUN_VIDEO_GEN = True
@@ -222,8 +426,6 @@ CKPTS = {
     "stage1_last": CKPT_DIR / "vqvae_stage1_last.pt",
     "stage2a_best": CKPT_DIR / "vqvae_stage2a_convex_best.pt",
     "stage2a_last": CKPT_DIR / "vqvae_stage2a_convex_last.pt",
-    "stage2b_best": CKPT_DIR / "vqvae_stage2b_projector_best.pt",
-    "stage2b_last": CKPT_DIR / "vqvae_stage2b_projector_last.pt",
     "stage2_best": CKPT_DIR / "vqvae_stage2_convex_best.pt",
     "stage2_last": CKPT_DIR / "vqvae_stage2_convex_last.pt",
     
@@ -238,12 +440,11 @@ CKPTS = {
 
 REPORTS = {
     "stage1": Path("reports/training_report_vqvae_stage1.json"),
+    "stage1b": Path("reports/training_report_vqvae_stage1b.json"),
     "stage2a": Path("reports/training_report_vqvae_stage2a_convex.json"),
-    "stage2b": Path("reports/training_report_vqvae_stage2b_projector.json"),
-    "stage2": Path("reports/training_report_vqvae_stage2c_convex.json"),
+    "stage2": Path("reports/training_report_vqvae_stage2b_convex.json"),
     "stage2a_eval": Path("reports/evaluation_report_vqvae_stage2a_convex.json"),
-    "stage2b_eval": Path("reports/evaluation_report_vqvae_stage2b_projector.json"),
-    "stage2c_eval": Path("reports/evaluation_report_vqvae_stage2c_convex.json"),
+    "stage2b_eval": Path("reports/evaluation_report_vqvae_stage2b_convex.json"),
 
     "prior_motif": Path("reports/training_report_prior_3A_motif.json"),
     "prior_motif_eval": Path("reports/evaluation_report_prior_3A_motif.json"),
@@ -251,7 +452,14 @@ REPORTS = {
     "prior_refine_eval": Path("reports/evaluation_report_prior_3C_refine.json"),
     "prior_activity": Path("reports/training_report_prior_3B_activity.json"),
     "prior_refine": Path("reports/training_report_prior_3C_refine.json"),
+
+    "leakage_delta": Path("reports/evaluation_report_leakage_delta.json"),
+    "count_nulls": Path("reports/evaluation_report_count_nulls.json"),
+    "generation_baselines": Path("reports/evaluation_report_generation_baselines.json"),
+    "motif_nulls": Path("reports/evaluation_report_motif_nulls.json"),
 }
+
+MOTIF_NULL_BASELINE_PATH = Path("ckpts/motif_null_baselines.pkl")
 
 VIZ_ROOTS = {
     1: Path("../viz_out_vqvae/vqvae_stage1"),
@@ -261,7 +469,6 @@ VIZ_ROOTS = {
 STAGE2_VIZ_ROOTS = {
     "2a": Path("../viz_out_vqvae/vqvae_stage2/stage2a"),
     "2b": Path("../viz_out_vqvae/vqvae_stage2/stage2b"),
-    "2c": Path("../viz_out_vqvae/vqvae_stage2/stage2c"),
 }
 
 # Data
@@ -271,7 +478,10 @@ temporal_pool = 120
 batch_size = 4
 grad_accum_steps = 8
 num_workers = 2
-per_assay_quota_stage12 = 30
+# (train, val, test) per-assay sampling quotas. 31 assays -> 930/186/279,
+# matching the item counts of every previously generated report so the
+# temporal-split numbers stay directly comparable to the old random-split ones.
+per_assay_quota_stage12 = (30, 6, 9)
 
 cache_dir = "../_cache_spike_thw_run1"
 cache_mode = "uint8"
@@ -280,6 +490,10 @@ cache_write_prob = 1.0
 
 # Model
 num_codes = (32, 8)
+# Number of VQ levels. Must equal len(num_codes). Set to 1 with num_codes=(32,)
+# for the single-level ablation: 1A learns z1 only, and Stage 1B creates level 2
+# from scratch by fitting the residual hull.
+num_quantizers = 2
 
 
 
@@ -326,7 +540,7 @@ def find_assays() -> dict:
     return assay_dict
 
 
-def make_loaders(assay_dict: dict, assay_indices: list[int], per_assay_quota: int):
+def make_loaders(assay_dict: dict, assay_indices: list[int], per_assay_quota):
     return make_loaders_for_assays(
         assay_indices=assay_indices,
         assay_dict=assay_dict,
@@ -427,6 +641,7 @@ def make_vqvae(img_size, device: str, *, full_spatial_size=None, use_decoder_cro
         encoder_num_heads=4,
         code_dim=64,
         num_codes=num_codes,
+        num_quantizers=num_quantizers,
         decoder_embed_dim=64,
         decoder_depth=2,
         decoder_num_heads=4,
@@ -445,7 +660,13 @@ def make_vqvae(img_size, device: str, *, full_spatial_size=None, use_decoder_cro
         enc_attn_mask_kind="none",
         dec_attn_mask_kind="temporal_causal",
 
+        # Element-wise context dropout off: on a low-rank control signal it is
+        # noise that teaches the decoder to ignore context.  Whole-token CFG
+        # dropout is the intended mechanism.
+        ctx_drop_p=0.0,
         cfg_ctx_drop_p=0.0,
+        n_ctx_slots=STAGE2B_CTX_SLOTS,
+        ctx_gate_init=STAGE2B_CTX_GATE_INIT,
         use_decoder_cross_attn=use_decoder_cross_attn,
         decoder_cross_attn_layers=decoder_cross_attn_layers,
     ).to(device)
@@ -542,6 +763,15 @@ def freeze_for_stage(model: nn.Module, stage: float):
                 True,
             )
     
+        if bool(STAGE2_CONTINUOUS_RESIDUAL) and int(
+            getattr(model.vq, "num_quantizers", 2)
+        ) >= 3:
+            raise RuntimeError(
+                "STAGE2_CONTINUOUS_RESIDUAL=True is incompatible with a "
+                f"{int(model.vq.num_quantizers)}-level discrete ladder: the hull "
+                "projector would treat tree_embeds[1] as a children table and "
+                "silently replace z2/z3 with a continuous projection."
+            )
         model.use_continuous_residual = bool(STAGE2_CONTINUOUS_RESIDUAL)
         model.continuous_residual_sample_mix = 0.0
         model.continuous_residual_projector.use_alpha_adapter = False
@@ -594,7 +824,11 @@ def freeze_for_stage(model: nn.Module, stage: float):
         model.continuous_residual_sample_mix = 0.0
         model.continuous_residual_projector.use_alpha_adapter = False
         model.continuous_residual_projector.decode_with_projection_target = True
-        set_decoder_cross_attention(model, enabled=True, layers=(0,))
+        set_decoder_cross_attention(
+            model,
+            enabled=True,
+            layers=STAGE2B_CROSS_ATTN_LAYERS,
+        )
         set_all_trainable(model, False)
         model.eval()
 
@@ -606,25 +840,58 @@ def freeze_for_stage(model: nn.Module, stage: float):
     print(f"Stage {stage}: trainable params = {n_trainable:,} / {n_total:,}")
 
 
+
+
 def freeze_for_stage2b(model: nn.Module):
     """
-    Train only the optional amortized alpha projector against the fixed
-    geometric convex projection.  The decoder and codebook geometry are frozen.
+    Freeze encoder, codebooks, alpha projector, and decoder backbone.  Train
+    only the context projections and zero-gated cross-attention at decoder
+    layer 0.
     """
     freeze_for_stage(model, 2)
 
     projector = model.continuous_residual_projector
-    projector.use_alpha_adapter = True
+    projector.use_alpha_adapter = False
     projector.decode_with_projection_target = True
+    set_requires_grad(projector.alpha_adapter, False)
+    set_requires_grad(projector.hull_scale_adapter, False)
 
-    # The exact projection remains the training-time decoder input.  Only the
-    # adapter learns to reproduce it through loss_cont_projection.
+    set_decoder_cross_attention(
+        model,
+        enabled=True,
+        layers=STAGE2B_CROSS_ATTN_LAYERS,
+    )
+
+    # Freeze the complete Stage-2A decoder, then reopen only the context branch.
     set_requires_grad(model.code_to_dec, False)
     set_requires_grad(model.dec_blocks, False)
     set_requires_grad(model.dec_norm, False)
     set_requires_grad(model.patch_renderer, False)
-    set_requires_grad(projector.alpha_adapter, True)
-    set_requires_grad(projector.hull_scale_adapter, False)
+
+    set_requires_grad(model.local_embedder, True)
+    set_requires_grad(model.local_to_dec_ctx, True)
+
+    # Re-arm the local embedder's internal MLP gate.  Stage 1 and 2A leave
+    # CtxEmbed.alpha_raw at 0, where alpha_max * tanh(alpha_raw) == 0 zeroes
+    # the gradient of the whole MLP branch, and the checkpoint load restores
+    # that 0 over the constructor's nonzero default.  The first Stage 2B run
+    # therefore trained local_embedder.mlp with exactly zero gradient for
+    # every step.  The global embedder is pretrained and stays frozen.
+    with torch.no_grad():
+        if float(model.local_embedder.alpha_raw.abs()) < 1e-3:
+            model.local_embedder.alpha_raw.fill_(0.1)
+
+    set_requires_grad(model.global_to_dec_ctx, True)
+    model.ctx_slot_embed.requires_grad = True
+    set_requires_grad(model.global_embedder, False)
+    set_requires_grad(model.spatial_map_prior, False)
+
+    for layer_index in sorted(model.decoder_cross_attn_layers):
+        block = model.dec_blocks[layer_index]
+        set_requires_grad(block.norm2, True)
+        set_requires_grad(block.norm_ctx, True)
+        set_requires_grad(block.cross_attn, True)
+        block.ctx_gate.requires_grad = True
 
     set_requires_grad(model.stem, False)
     set_requires_grad(model.patch_embed, False)
@@ -640,56 +907,6 @@ def freeze_for_stage2b(model: nn.Module):
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     n_total = sum(p.numel() for p in model.parameters())
     print(f"Stage 2B: trainable params = {n_trainable:,} / {n_total:,}")
-
-
-def freeze_for_stage2c(model: nn.Module):
-    """
-    Freeze encoder, codebooks, alpha projector, and decoder backbone.  Train
-    only the context projections and zero-gated cross-attention at decoder
-    layer 0.
-    """
-    freeze_for_stage(model, 2)
-
-    projector = model.continuous_residual_projector
-    projector.use_alpha_adapter = False
-    projector.decode_with_projection_target = True
-    set_requires_grad(projector.alpha_adapter, False)
-    set_requires_grad(projector.hull_scale_adapter, False)
-
-    set_decoder_cross_attention(model, enabled=True, layers=(0,))
-
-    # Freeze the complete Stage-2A decoder, then reopen only the context branch.
-    set_requires_grad(model.code_to_dec, False)
-    set_requires_grad(model.dec_blocks, False)
-    set_requires_grad(model.dec_norm, False)
-    set_requires_grad(model.patch_renderer, False)
-
-    set_requires_grad(model.local_embedder, True)
-    set_requires_grad(model.local_to_dec_ctx, True)
-    set_requires_grad(model.global_to_dec_ctx, True)
-    set_requires_grad(model.global_embedder, False)
-    set_requires_grad(model.spatial_map_prior, False)
-
-    block0 = model.dec_blocks[0]
-    set_requires_grad(block0.norm2, True)
-    set_requires_grad(block0.norm_ctx, True)
-    set_requires_grad(block0.cross_attn, True)
-    block0.ctx_gate.requires_grad = True
-
-    set_requires_grad(model.stem, False)
-    set_requires_grad(model.patch_embed, False)
-    set_requires_grad(model.sparse_encoder, False)
-    set_requires_grad(model.to_code, False)
-    for parameter in model.vq.parameters():
-        parameter.requires_grad = False
-
-    model.vq.freeze_codebook_updates = True
-    model.vq.dead_code_restart_every = 0
-    model.vq.duplicate_restart_every = 0
-
-    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    n_total = sum(p.numel() for p in model.parameters())
-    print(f"Stage 2C: trainable params = {n_trainable:,} / {n_total:,}")
 
 
 def make_optimizer(model: nn.Module, lr: float, weight_decay: float):
@@ -862,7 +1079,9 @@ def common_fit_kwargs(model):
         memory_adj_conf_den_scale=100.0,
 
         level2_start_epoch=1,
+        level3_start_epoch=1,
         level2_full_loss_epoch=20,
+        level3_full_loss_epoch=50,
         lambda_sp_token=1e-3,
         lambda_sp_pixel=1e-4,
         sp_pixel_start_epoch=40,
@@ -889,12 +1108,6 @@ def select_ckpt(stage: int, prefer_best: bool = True) -> Path:
     # Earlier Stage-2 phases remain valid fallbacks when later phases have not
     # run. Prefer the most advanced available phase.
     if stage == 2:
-        if prefer_best and CKPTS["stage2b_best"].exists():
-            return CKPTS["stage2b_best"]
-        if CKPTS["stage2b_last"].exists():
-            return CKPTS["stage2b_last"]
-        if CKPTS["stage2b_best"].exists():
-            return CKPTS["stage2b_best"]
         if prefer_best and CKPTS["stage2a_best"].exists():
             return CKPTS["stage2a_best"]
         if CKPTS["stage2a_last"].exists():
@@ -919,8 +1132,7 @@ def _select_stage2_phase_ckpt(phase: str, *, prefer_best: bool = True) -> Path:
     phase = str(phase).lower()
     mapping = {
         "2a": (CKPTS["stage2a_best"], CKPTS["stage2a_last"]),
-        "2b": (CKPTS["stage2b_best"], CKPTS["stage2b_last"]),
-        "2c": (CKPTS["stage2_best"], CKPTS["stage2_last"]),
+        "2b": (CKPTS["stage2_best"], CKPTS["stage2_last"]),
     }
     if phase not in mapping:
         raise ValueError(f"Unsupported Stage-2 phase={phase!r}")
@@ -941,8 +1153,7 @@ def _stage2_phase_report(phase: str) -> Path:
     phase = str(phase).lower()
     return {
         "2a": REPORTS["stage2a"],
-        "2b": REPORTS["stage2b"],
-        "2c": REPORTS["stage2"],
+        "2b": REPORTS["stage2"],
     }[phase]
 
 
@@ -951,7 +1162,6 @@ def _stage2_phase_eval_report(phase: str) -> Path:
     return {
         "2a": REPORTS["stage2a_eval"],
         "2b": REPORTS["stage2b_eval"],
-        "2c": REPORTS["stage2c_eval"],
     }[phase]
 
 
@@ -979,7 +1189,45 @@ def save_json_report(obj, path: Path):
     print(f"Saved report: {path}")
    
     
+# Stage 1 context-regularizer balance.
+#
+# Measured on ckpts/vqvae_stage1_best.pt, the unweighted ctx loss was 73.3%
+# log_mean_firing_density and 23.0% temporal_trend; the five spatial and
+# covariance moments together contributed ~0.3%.  They were supervised in name
+# only, and ctx_loss_soft backprops into the encoder and codebook in Stage 1,
+# so the learned motifs carry that bias.
+#
+# STAGE1_BALANCED_CTX turns on 1/var per-dim weighting.  lambda is rescaled by
+# the measured weighted/unweighted ratio (0.036) so the regularizer keeps the
+# same TOTAL share of the objective (~0.68%) and only its internal
+# distribution changes -- otherwise the run would confound two edits.
+STAGE1_BALANCED_CTX = False
+STAGE1_LAMBDA_CTX = 1e-1
+STAGE1_LAMBDA_CTX_BALANCED = 2.80
+
+# Epochs actually run.  STAGE1_SCHED_T_MAX stays at the full 300 so a
+# truncated probe follows the SAME cosine LR trajectory as the stored
+# 300-epoch run -- shortening T_max would compress the schedule and make
+# matched-epoch comparison meaningless.
+STAGE1_EPOCHS = 300
+STAGE1_SCHED_T_MAX = 300
+STAGE1_SAVE_START_EPOCH = 125
+
+
 def run_stage1(model, train_loader, val_loader, blank_logit_threshold):
+    stage1_ctx_weights = None
+    if STAGE1_BALANCED_CTX:
+        _, _, _norm = build_local_ctx_bank(train_loader)
+        stage1_ctx_weights = (
+            1.0 / _norm[1].pow(2).clamp_min(1e-12)
+        ).to(next(model.parameters()).device)
+        globals()["STAGE1_LAMBDA_CTX"] = STAGE1_LAMBDA_CTX_BALANCED
+        print(
+            f"Stage 1 balanced ctx weighting ON, lambda_ctx="
+            f"{STAGE1_LAMBDA_CTX_BALANCED} (rescaled from 0.1 by the measured "
+            f"weighted/unweighted ratio 0.036)"
+        )
+
     print("\n" + "=" * 80)
     print("STAGE 1: context-agnostic VQVAE motif learning")
     print("=" * 80)
@@ -990,10 +1238,12 @@ def run_stage1(model, train_loader, val_loader, blank_logit_threshold):
     # Validation Best-F1 thresholds are recorded but never fed back.
     model._set_training_prob_threshold(0.5)
 
-    n_epoch = 300
-    
+    n_epoch = int(STAGE1_EPOCHS)
+
     optimizer = make_optimizer(model, lr=1e-3, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epoch, eta_min=1e-5)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=int(STAGE1_SCHED_T_MAX), eta_min=1e-5
+    )
 
     report = fit_vqvae(
         model,
@@ -1012,7 +1262,8 @@ def run_stage1(model, train_loader, val_loader, blank_logit_threshold):
         # Stage 1: context loss ON, decoder context injection OFF.
         # This lets ctx losses shape encoder/codebook/decoder motifs,
         # without allowing cross-attention shortcuts.
-        lambda_ctx=1e-1,
+        lambda_ctx=float(STAGE1_LAMBDA_CTX),
+        ctx_dim_weights=stage1_ctx_weights,
         lambda_ctx_field=5e-2,
         ctx_start_epoch=5,
         ctx_warmup_epochs=15,
@@ -1044,7 +1295,7 @@ def run_stage1(model, train_loader, val_loader, blank_logit_threshold):
         pos_weight_end=1.0,
         pos_decay_epochs=100,
 
-        save_start_epoch = 125,
+        save_start_epoch = int(STAGE1_SAVE_START_EPOCH),
         **common_fit_kwargs(model),
     )
 
@@ -1052,6 +1303,107 @@ def run_stage1(model, train_loader, val_loader, blank_logit_threshold):
         json.dump(report, f, indent=4)
     print(f"Saved report: {REPORTS['stage1']}")
     return report
+
+
+def build_local_ctx_bank(loader, max_batches=None):
+    """Bank of observed (global, local) context pairs, keyed by assay.
+
+    Mirrors inference/sample_context.py: local contexts live in pools keyed by
+    global context, and a request is either a local drawn from a chosen
+    assay's pool or a whole (global, local) pair drawn together.  Training the
+    context head against requests drawn the same way keeps every
+    counterfactual jointly plausible without modelling the structure of the
+    nine dimensions explicitly.
+
+    Returns:
+      bank:  {assay_id: {"local": (n_a, L), "global": (G,)}}
+      std:   (L,) within-assay per-dimension std, used as the fallback jitter
+             scale for assays with fewer than two entries and as the unit for
+             reporting counterfactual displacement.
+      norm:  (mean, scale) pooled over the whole training split, used to
+             standardize the embedder's input.
+
+    Built from the training loader only.
+    """
+    local_rows = {}
+    global_row = {}
+    for i, batch in enumerate(loader):
+        lct = batch.get("local_ctx", None)
+        gct = batch.get("global_ctx", None)
+        aidx = batch.get("assay_idx", None)
+        if lct is None:
+            return None, None, None
+
+        lct = lct.detach().float().cpu()
+        gct = None if gct is None else gct.detach().float().cpu()
+
+        if aidx is None:
+            local_rows.setdefault(-1, []).append(lct)
+            if gct is not None:
+                global_row.setdefault(-1, gct[0])
+        else:
+            aidx = torch.as_tensor(aidx).reshape(-1)
+            for a in aidx.unique():
+                key = int(a)
+                sel = aidx == a
+                local_rows.setdefault(key, []).append(lct[sel])
+                if gct is not None and key not in global_row:
+                    # global_ctx is the assay codebook row: constant per assay.
+                    global_row[key] = gct[sel][0]
+
+        if max_batches is not None and (i + 1) >= max_batches:
+            break
+
+    if not local_rows:
+        return None, None, None
+
+    bank = {}
+    for key, rows in local_rows.items():
+        bank[key] = {
+            "local": torch.cat(rows, 0),
+            "global": global_row.get(key, None),
+        }
+    bank = {k: v for k, v in bank.items() if v["global"] is not None}
+    if not bank:
+        return None, None, None
+
+    all_rows = torch.cat([v["local"] for v in bank.values()], 0)
+    pooled_std = all_rows.std(dim=0, unbiased=False)
+
+    var_sum = torch.zeros(all_rows.shape[1])
+    weight = 0.0
+    servable = 0
+    for entry in bank.values():
+        rows = entry["local"]
+        if rows.shape[0] < 2:
+            continue
+        servable += 1
+        var_sum += rows.var(dim=0, unbiased=True) * (rows.shape[0] - 1)
+        weight += rows.shape[0] - 1
+
+    if weight <= 0:
+        print("local_ctx: no assay has >1 sample; falling back to pooled std.")
+        std = pooled_std
+    else:
+        std = (var_sum / weight).sqrt()
+
+    std = std.clamp_min(0.01 * float(std.max().clamp_min(1e-6)))
+
+    sizes = sorted(v["local"].shape[0] for v in bank.values())
+    print(
+        f"context bank: {all_rows.shape[0]} (global, local) pairs over "
+        f"{len(bank)} assays ({servable} servable, pool sizes min={sizes[0]} "
+        f"median={sizes[len(sizes)//2]} max={sizes[-1]})"
+    )
+    print("  within-assay std: " + ", ".join(f"{v:.4f}" for v in std.tolist()))
+    print("  pooled std:       " + ", ".join(f"{v:.4f}" for v in pooled_std.tolist()))
+    print(
+        "  within/pooled:    "
+        + ", ".join(f"{v:.2f}" for v in (std / pooled_std.clamp_min(1e-8)).tolist())
+        + "   (low = assay identity dominates that dimension)"
+    )
+    pooled_mean = all_rows.mean(dim=0)
+    return bank, std, (pooled_mean, pooled_std.clamp_min(1e-6))
 
 
 def _stage2_ctx_schedule():
@@ -1085,6 +1437,279 @@ def _make_stage2_scheduler(optimizer, n_epoch):
             for _ in optimizer.param_groups
         ],
     )
+
+
+def run_stage1b(model, train_loader, device):
+    """Stage 1B: refit the z2 children against a frozen encoder and z1.
+
+    The residual r = z_e - z1[code] is a function of the encoder and z1 only, so
+    refitting level 2 against it is well posed with both frozen. New children are
+    per-parent k-means centroids of that parent's real residuals, which is what
+    level-2 EMA converges toward; EMA buffers are then reset to the constructor
+    convention (count=1, weight=embed) so training takes over cleanly.
+
+    Level-2 tensors in the source checkpoint are resized to the model's current
+    children-per-parent. Every other tensor loads unchanged, which is what keeps
+    the Stage 1A z1-level results valid.
+    """
+    from sklearn.cluster import KMeans
+
+    print("\n" + "=" * 80)
+    print("STAGE 1B: refit z2 children (encoder and z1 frozen)")
+    print("=" * 80, flush=True)
+
+    K1 = int(model.vq.num_codes_per_level[0])
+    K2_new = int(model.vq.num_codes_per_level[1])
+    code_dim = int(model.vq.code_dim)
+    if K2_new != int(STAGE1B_CHILDREN):
+        raise RuntimeError(
+            f"STAGE1B_CHILDREN={STAGE1B_CHILDREN} does not match the model's "
+            f"children-per-parent {K2_new}. Set num_codes=({K1}, {STAGE1B_CHILDREN})."
+        )
+
+    src = Path(STAGE1B_SOURCE)
+    if not src.exists():
+        raise FileNotFoundError(f"Stage 1B source checkpoint missing: {src}")
+
+    # Load 1A with its own (possibly smaller) level-2 shapes, so residuals are
+    # computed by exactly the encoder and z1 that Stage 1A produced.
+    ck = torch.load(src, map_location="cpu")
+    sd = ck.get("model", ck.get("state_dict", ck))
+    keys = [k for k in sd if k.endswith("tree_embeds.1")]
+    if keys:
+        prefix = keys[0][: -len("tree_embeds.1")]
+        K2_old = int(sd[prefix + "tree_embeds.1"].shape[1])
+        print(f"  source {src}  children {K2_old} -> {K2_new}", flush=True)
+    else:
+        # Single-level 1A ablation: the source has no z2 at all. Level 2 is
+        # created here from scratch. Residuals are z_e - z1[code], which do not
+        # depend on the children, so nothing about the fit is affected.
+        k0 = [k for k in sd if k.endswith("tree_embeds.0")]
+        if not k0:
+            raise RuntimeError(f"neither tree_embeds.0 nor .1 found in {src}")
+        prefix = k0[0][: -len("tree_embeds.0")]
+        K2_old = 0
+        print(f"  source {src} is SINGLE-LEVEL; creating level 2 with "
+              f"{K2_new} children", flush=True)
+
+    own = model.state_dict()
+    compatible = {
+        k: v for k, v in sd.items()
+        if k in own and own[k].shape == v.shape
+    }
+    missing = [k for k in own if k not in compatible]
+    model.load_state_dict(compatible, strict=False)
+    print(f"  loaded {len(compatible)} tensors; {len(missing)} left at init "
+          f"(level-2 and any shape-changed entries)", flush=True)
+
+    # Seed level 2 from the OLD children so residual extraction is well defined
+    # even before the refit.
+    with torch.no_grad():
+        if K2_old > 0:
+            old_children = sd[prefix + "tree_embeds.1"].to(device=device, dtype=torch.float32)
+            reps = old_children.repeat(1, (K2_new + K2_old - 1) // K2_old, 1)[:, :K2_new, :]
+            model.vq.tree_embeds[1].data.copy_(reps)
+        else:
+            old_children = 0.01 * torch.randn(
+                K1, max(1, K2_new), code_dim, device=device, dtype=torch.float32
+            )
+            model.vq.tree_embeds[1].data.copy_(old_children)
+
+    # ---- collect residuals with the frozen encoder and z1
+    prev_cont = bool(getattr(model, "use_continuous_residual", False))
+    prev_proj = bool(getattr(model, "decode_with_projection_target", False))
+    model.use_continuous_residual = True
+    model.decode_with_projection_target = True
+    projector = model.continuous_residual_projector
+    projector.use_alpha_adapter = False
+    projector.decode_with_projection_target = True
+    model.eval()
+
+    blank = int(getattr(model.vq, "blank_code", -1))
+    captured = {"r": []}
+    original = projector._project_onto_child_hull
+
+    def _capture(target_residual, children, initial_alpha=None):
+        alpha, resid = original(
+            target_residual=target_residual,
+            children=children,
+            initial_alpha=initial_alpha,
+        )
+        captured["r"].append(target_residual.detach().float().cpu())
+        return alpha, resid
+
+    projector._project_onto_child_hull = _capture
+    parents = []
+    try:
+        with torch.no_grad():
+            for i, batch in enumerate(train_loader):
+                x, gct, lct, _, _ = _batch_to_device(batch, device)
+                out = model(
+                    x,
+                    global_ctx=gct,
+                    local_ctx=lct,
+                    predict_mask_spec=[{"type": "recon"}] * x.shape[0],
+                )
+                z1 = out["codes"].long()[..., 0]
+                for b in range(z1.shape[0]):
+                    m = z1[b] != blank
+                    if m.any():
+                        parents.append(z1[b][m].cpu().numpy())
+                if i + 1 >= int(STAGE1B_FIT_BATCHES):
+                    break
+    finally:
+        projector._project_onto_child_hull = original
+
+    residual = torch.cat(captured["r"]).numpy()
+    parent = np.concatenate(parents)
+    n = min(len(residual), len(parent))
+    residual, parent = residual[:n], parent[:n]
+    counts = np.bincount(parent, minlength=K1)
+    print(f"  {n} residuals | tokens/parent min {counts[counts > 0].min()} "
+          f"median {int(np.median(counts[counts > 0]))}", flush=True)
+
+    # ---- per-parent k-means into K2_new children
+    children_new = np.zeros((K1, K2_new, code_dim), dtype=np.float32)
+    occupancy = []
+    rng = np.random.RandomState(0)
+    old_np = old_children.detach().cpu().numpy()
+    for c in range(K1):
+        X = residual[parent == c]
+        if len(X) < K2_new:
+            base = old_np[c]
+            reps = np.repeat(base, int(np.ceil(K2_new / base.shape[0])), 0)[:K2_new]
+            children_new[c] = reps + 0.01 * rng.randn(K2_new, code_dim)
+            occupancy.append(min(1.0, len(X) / K2_new))
+            continue
+        km = KMeans(n_clusters=K2_new, n_init=4, random_state=0).fit(X)
+        children_new[c] = km.cluster_centers_
+        occupancy.append(len(np.unique(km.labels_)) / K2_new)
+    under = int(sum(1 for c in range(K1) if counts[c] < K2_new))
+    print(f"  mean child occupancy {np.mean(occupancy) * 100:.1f}% | "
+          f"under-populated parents {under}", flush=True)
+
+    # ---- refine children against the convex-projection objective
+    #
+    # k-means minimises distance to the NEAREST child. The children are actually
+    # used as vertices of a hull that the residual is projected onto, and the
+    # optimal vertices for that are not the centroids. Alternate:
+    #   alpha <- project(r, C)          convex, exact, by the model's own solver
+    #   C     <- argmin_C ||R - A C||^2 least squares given those weights
+    # which is block-coordinate descent on the quantity we actually report.
+    def _capture_for(children_arr):
+        err = 0.0
+        den = 0.0
+        with torch.no_grad():
+            for c in range(K1):
+                X = residual[parent == c]
+                if len(X) == 0:
+                    continue
+                rt = torch.tensor(X, device=device)
+                ch = torch.tensor(children_arr[c], device=device)[None].expand(len(X), -1, -1)
+                _, proj = original(target_residual=rt, children=ch, initial_alpha=None)
+                err += float(((rt - proj.float()) ** 2).sum())
+                den += float((rt ** 2).sum())
+        return 1.0 - err / max(den, 1e-12)
+
+    capture_kmeans = _capture_for(children_new)
+    print(f"  capture after k-means seed: {capture_kmeans:.4f}", flush=True)
+
+    # Persist the PRE-REFINEMENT seed. It is the ablation arm for "does the
+    # projection-objective refinement matter", and without it the refined
+    # vertices have no reproducible provenance: residual collection is not
+    # bit-deterministic across runs (loader ordering varies).
+    seed_path = Path(str(CKPTS["stage1_best"]).replace(".pt", "_kmeans_seed.pt"))
+    torch.save(
+        {
+            "kind": "z2_kmeans_centroids_pre_refinement",
+            "note": (
+                "Per-parent k-means centroids of the residuals, BEFORE "
+                "block-coordinate refinement against the convex-projection "
+                "objective. Centroids, not hull vertices."
+            ),
+            "source_checkpoint": str(src),
+            "children_per_parent": int(K2_new),
+            "z2_kmeans_centroids": torch.tensor(children_new),
+            "realised_capture": float(capture_kmeans),
+        },
+        seed_path,
+    )
+    print(f"  saved pre-refinement seed -> {seed_path}", flush=True)
+
+    refined = children_new.copy()
+    best = (capture_kmeans, refined.copy())
+    for it in range(int(STAGE1B_REFINE_ITERS)):
+        with torch.no_grad():
+            for c in range(K1):
+                X = residual[parent == c]
+                if len(X) < K2_new:
+                    continue
+                rt = torch.tensor(X, device=device)
+                ch = torch.tensor(refined[c], device=device)[None].expand(len(X), -1, -1)
+                alpha, _ = original(target_residual=rt, children=ch, initial_alpha=None)
+                A = alpha.float()
+                G = A.T @ A + 1e-3 * torch.eye(K2_new, device=device)
+                sol = torch.linalg.solve(G, A.T @ rt)
+                refined[c] = sol.cpu().numpy()
+        cap_it = _capture_for(refined)
+        if cap_it > best[0]:
+            best = (cap_it, refined.copy())
+        print(f"    refine iter {it + 1:2d}/{int(STAGE1B_REFINE_ITERS)}  "
+              f"capture {cap_it:.4f}", flush=True)
+    capture_refined, children_new = best
+    print(f"  capture after refinement:   {capture_refined:.4f}  "
+          f"({capture_refined - capture_kmeans:+.4f} over k-means)", flush=True)
+
+    with torch.no_grad():
+        tensor_children = torch.tensor(children_new, device=device)
+        model.vq.tree_embeds[1].data.copy_(tensor_children)
+        model.vq._ema_weight(1).data.copy_(tensor_children)
+        model.vq._ema_count(1).data.fill_(1.0)
+
+    # ---- realised capture, as an acceptance number
+    total_err = 0.0
+    total_den = 0.0
+    with torch.no_grad():
+        for i, batch in enumerate(train_loader):
+            x, gct, lct, _, _ = _batch_to_device(batch, device)
+            out = model(
+                x,
+                global_ctx=gct,
+                local_ctx=lct,
+                predict_mask_spec=[{"type": "recon"}] * x.shape[0],
+            )
+            aux = out["continuous_residual_aux"]
+            r_t = aux["target_residual"].float()
+            r_h = aux["residual_hull"].float()
+            total_err += float(((r_t - r_h) ** 2).sum())
+            total_den += float((r_t ** 2).sum())
+            if i + 1 >= 40:
+                break
+    capture = 1.0 - total_err / max(total_den, 1e-12)
+    print(f"  realised capture 1 - ||r - r_hull||^2 / ||r||^2 = {capture:.4f}", flush=True)
+
+    model.use_continuous_residual = prev_cont
+    model.decode_with_projection_target = prev_proj
+
+    model.save_checkpoint(str(CKPTS["stage1_best"]))
+    model.save_checkpoint(str(CKPTS["stage1_last"]))
+    report = {
+        "source": str(src),
+        "children_old": K2_old,
+        "children_new": K2_new,
+        "parents": K1,
+        "residuals": int(n),
+        "mean_occupancy": float(np.mean(occupancy)),
+        "capture_kmeans_seed": float(capture_kmeans),
+        "kmeans_seed_path": str(seed_path),
+        "capture_after_refinement": float(capture_refined),
+        "refine_iters": int(STAGE1B_REFINE_ITERS),
+        "under_populated_parents": under,
+        "realised_capture": float(capture),
+    }
+    save_json_report(report, REPORTS["stage1b"])
+    print(f"  wrote {CKPTS['stage1_best']} and {REPORTS['stage1b']}", flush=True)
+    return report
 
 
 def run_stage2a(model, train_loader, val_loader, blank_logit_threshold):
@@ -1148,8 +1773,8 @@ def run_stage2a(model, train_loader, val_loader, blank_logit_threshold):
         lambda_vq=0.0,
         lambda_ctx=1e-1,
         lambda_ctx_field=1e-2,
-        ctx_start_epoch=0,
-        ctx_warmup_epochs=20,
+        ctx_start_epoch=STAGE2A_CTX_START_EPOCH,
+        ctx_warmup_epochs=STAGE2A_CTX_WARMUP_EPOCHS,
         ctx_epoch_schedule=_stage2_ctx_schedule(),
         cfg_ctx_drop_start=0.0,
         cfg_ctx_drop_end=0.0,
@@ -1168,7 +1793,7 @@ def run_stage2a(model, train_loader, val_loader, blank_logit_threshold):
         continuous_gumbel_tau_start=1.0,
         continuous_gumbel_tau_end=1.0,
         continuous_posterior_temperature=0.35,
-        save_start_epoch=1,
+        save_start_epoch=STAGE2A_SAVE_START_EPOCH,
         **{
             **common_fit_kwargs(model),
             "lambda_isi": 1e-1,
@@ -1194,14 +1819,16 @@ def _select_stage2a_ckpt():
 
     raise FileNotFoundError(
         "The exact-convex Stage 2A checkpoint is missing. Run with "
-        "STAGE2_PHASES=('2a', '2c') first. Old decoder-defined Stage-2 "
+        "STAGE2_PHASES=('2a', '2b') first. Old decoder-defined Stage-2 "
         "checkpoints are intentionally not reused for this geometry."
     )
 
 
+
+
 def run_stage2b(model, train_loader, val_loader, blank_logit_threshold):
     print("\n" + "=" * 80)
-    print("STAGE 2B: amortized convex projector fitting")
+    print("STAGE 2B: context-conditioned projected-latent calibration")
     print("=" * 80)
 
     map_location = next(model.parameters()).device
@@ -1212,103 +1839,6 @@ def run_stage2b(model, train_loader, val_loader, blank_logit_threshold):
     )
     model._set_training_prob_threshold(0.5)
     freeze_for_stage2b(model)
-
-    print(
-        f"Loaded Stage 2A best weights from: {stage2a_ckpt}\n"
-        "Only the alpha adapter is trainable. Its target is the fixed exact "
-        "convex projection from Stage 2A; reconstruction loss does not define "
-        "the latent coordinates."
-    )
-
-    n_epoch = int(STAGE2B_EPOCHS)
-    adapter_params = [
-        parameter
-        for parameter in (
-            model.continuous_residual_projector
-            .alpha_adapter
-            .parameters()
-        )
-        if parameter.requires_grad
-    ]
-    if not adapter_params:
-        raise RuntimeError("Stage 2B has no trainable alpha-adapter parameters.")
-
-    optimizer = torch.optim.AdamW(
-        [
-            {
-                "params": adapter_params,
-                "lr": 1e-4,
-                "weight_decay": 1e-4,
-            },
-        ]
-    )
-    scheduler = _make_stage2_scheduler(optimizer, n_epoch)
-
-    report = fit_vqvae(
-        model,
-        train_loader,
-        val_loader,
-        optimizer,
-        scheduler,
-        epochs=n_epoch,
-        ckpt_best_path=str(CKPTS["stage2b_best"]),
-        ckpt_last_path=str(CKPTS["stage2b_last"]),
-        early_stop_patience=15,
-        val_metric_name="cont_adapter_projection_mse",
-        val_metric_goal="min",
-        use_ROI_mask=False,
-        lambda_vq=0.0,
-        lambda_ctx=0.0,
-        lambda_ctx_field=0.0,
-        ctx_start_epoch=10**9,
-        ctx_warmup_epochs=1,
-        ctx_epoch_schedule=_stage2_ctx_schedule(),
-        cfg_ctx_drop_start=0.0,
-        cfg_ctx_drop_end=0.0,
-        cfg_ctx_start_epoch=10**9,
-        cfg_ctx_warmup_epochs=1,
-        pos_weight_start=1.0,
-        pos_weight_end=1.0,
-        pos_decay_epochs=1,
-        blank_logit_margin=blank_logit_threshold,
-        lambda_cont_projection=1.0,
-        lambda_cont_parent_margin=0.0,
-        continuous_sample_start_epoch=10**9,
-        continuous_sample_warmup_epochs=1,
-        continuous_sample_mix_start=0.0,
-        continuous_sample_mix_end=0.0,
-        continuous_gumbel_tau_start=1.0,
-        continuous_gumbel_tau_end=1.0,
-        continuous_posterior_temperature=0.35,
-        save_start_epoch=1,
-        **{
-            **common_fit_kwargs(model),
-            "lambda_isi": 0.0,
-            "lambda_sp_pixel": 0.0,
-            "lambda_enc_var": 0.0,
-            "lambda_code_norm": 0.0,
-            "level2_start_epoch": 1,
-            "level2_full_loss_epoch": 1,
-        },
-    )
-
-    save_json_report(report, REPORTS["stage2b"])
-    return report
-
-
-def run_stage2c(model, train_loader, val_loader, blank_logit_threshold):
-    print("\n" + "=" * 80)
-    print("STAGE 2C: context-conditioned projected-latent calibration")
-    print("=" * 80)
-
-    map_location = next(model.parameters()).device
-    stage2a_ckpt = _select_stage2a_ckpt()
-    model.load_checkpoint(
-        str(stage2a_ckpt),
-        map_location=map_location,
-    )
-    model._set_training_prob_threshold(0.5)
-    freeze_for_stage2c(model)
     model.continuous_residual_sample_mix = 0.0
 
     print(
@@ -1328,37 +1858,88 @@ def run_stage2c(model, train_loader, val_loader, blank_logit_threshold):
         for parameter in module.parameters()
         if parameter.requires_grad
     ]
+    if model.ctx_slot_embed.requires_grad:
+        context_params.append(model.ctx_slot_embed)
 
-    block0 = model.dec_blocks[0]
-    cross_params = [
-        parameter
-        for module in (
-            block0.norm2,
-            block0.norm_ctx,
-            block0.cross_attn,
-        )
-        for parameter in module.parameters()
-        if parameter.requires_grad
-    ]
-    if block0.ctx_gate.requires_grad:
-        cross_params.append(block0.ctx_gate)
+    cross_params = []
+    gate_params = []
+    for layer_index in sorted(model.decoder_cross_attn_layers):
+        block = model.dec_blocks[layer_index]
+        for module in (block.norm2, block.norm_ctx, block.cross_attn):
+            cross_params.extend(
+                parameter
+                for parameter in module.parameters()
+                if parameter.requires_grad
+            )
+        if block.ctx_gate.requires_grad:
+            gate_params.append(block.ctx_gate)
 
+    # The LayerScale gates and the slot embeddings are the branch's own
+    # "how much / which slot" controls.  Weight decay on them pulls the branch
+    # back toward the no-op it has to escape, so they get their own
+    # decay-free group with a faster learning rate.
     optimizer = torch.optim.AdamW(
         [
             {
                 "params": context_params,
-                "lr": 1e-4,
+                "lr": 3e-4,
                 "weight_decay": 1e-4,
             },
             {
                 "params": cross_params,
-                "lr": 5e-5,
+                "lr": 3e-4,
                 "weight_decay": 1e-4,
+            },
+            {
+                "params": gate_params,
+                "lr": 1e-3,
+                "weight_decay": 0.0,
             },
         ]
     )
 
-    n_epoch = int(STAGE2C_EPOCHS)
+    local_ctx_bank, local_ctx_std, local_ctx_norm = build_local_ctx_bank(train_loader)
+    if local_ctx_std is None:
+        raise RuntimeError(
+            "Stage 2B needs local_ctx statistics for counterfactual "
+            "conditioning, but the training loader emits no local_ctx."
+        )
+    device_for_ctx = next(model.parameters()).device
+    local_ctx_std = local_ctx_std.to(device_for_ctx)
+
+    # Standardize the embedder's input before anything else.  Without this the
+    # local head receives a near-constant vector (dim 0 sits at ~-9.3 and
+    # swamps the second moments) and cannot produce a varying output no matter
+    # how it is gated or supervised.
+    model.set_local_ctx_normalization(*local_ctx_norm)
+
+    # Per-dimension loss weights, w_d = 1 / var_d, from the pooled training
+    # spread.  ctx_loss_soft otherwise sums raw squared error with uniform
+    # weight, so log_mean_firing_density (std ~0.85) contributes on the order
+    # of 1500x more than cov_xt (std ~0.02) and the seven second-moment
+    # dimensions are effectively never optimized.  Measured after the first
+    # balanced-input run: density and active_site_ratio responded at 0.62 and
+    # 0.76 pooled std, every moment at 0.04-0.19.
+    #
+    # Scoped to Stage 2B on purpose.  Stage 1 and 2A also call ctx_loss_soft,
+    # but there it is an output-statistics regularizer with the context
+    # embedders frozen; changing it would alter the frozen baseline that
+    # everything downstream is calibrated against.
+    ctx_pooled_std = local_ctx_norm[1].to(device_for_ctx)
+    ctx_dim_weights = 1.0 / ctx_pooled_std.pow(2).clamp_min(1e-12)
+    print(
+        "ctx loss per-dim weights (1/var): "
+        + ", ".join(f"{v:.1f}" for v in ctx_dim_weights.tolist())
+    )
+    local_ctx_bank = {
+        a: {
+            "local": entry["local"].to(device_for_ctx),
+            "global": entry["global"].to(device_for_ctx),
+        }
+        for a, entry in local_ctx_bank.items()
+    }
+
+    n_epoch = int(STAGE2B_EPOCHS)
     scheduler = _make_stage2_scheduler(optimizer, n_epoch)
 
     report = fit_vqvae(
@@ -1377,13 +1958,28 @@ def run_stage2c(model, train_loader, val_loader, blank_logit_threshold):
         lambda_vq=0.0,
         lambda_ctx=1e-1,
         lambda_ctx_field=1e-2,
-        ctx_start_epoch=0,
-        ctx_warmup_epochs=10,
+        ctx_start_epoch=STAGE2B_CTX_START_EPOCH,
+        ctx_warmup_epochs=STAGE2B_CTX_WARMUP_EPOCHS,
         ctx_epoch_schedule=_stage2_ctx_schedule(),
+        mask_latents=bool(STAGE2B_MASK_LATENTS),
+        latent_recon_drop_p=float(STAGE2B_LATENT_RECON_DROP_P),
+        log_ctx_diagnostics=True,
+        lambda_ctx_cf=float(STAGE2B_LAMBDA_CTX_CF),
+        local_ctx_std=local_ctx_std,
+        local_ctx_bank=local_ctx_bank,
+        ctx_dim_weights=ctx_dim_weights,
+        ctx_cf_sigma_start=float(STAGE2B_CTX_CF_SIGMA_START),
+        ctx_cf_sigma_end=float(STAGE2B_CTX_CF_SIGMA_END),
+        ctx_cf_pair_p=float(STAGE2B_CTX_CF_PAIR_P),
+        ctx_cf_start_epoch=int(STAGE2B_CTX_CF_START_EPOCH),
+        ctx_cf_warmup_epochs=int(STAGE2B_CTX_CF_WARMUP_EPOCHS),
+        # Classifier-free dropout is what makes the conditional and
+        # unconditional decoders share weights honestly, and it is the only
+        # thing that stops the branch from being a free per-sample bias.
         cfg_ctx_drop_start=0.0,
-        cfg_ctx_drop_end=0.0,
-        cfg_ctx_start_epoch=10**9,
-        cfg_ctx_warmup_epochs=1,
+        cfg_ctx_drop_end=0.15,
+        cfg_ctx_start_epoch=STAGE2B_CFG_CTX_START_EPOCH,
+        cfg_ctx_warmup_epochs=STAGE2B_CFG_CTX_WARMUP_EPOCHS,
         pos_weight_start=1.0,
         pos_weight_end=1.0,
         pos_decay_epochs=1,
@@ -1397,7 +1993,7 @@ def run_stage2c(model, train_loader, val_loader, blank_logit_threshold):
         continuous_gumbel_tau_start=1.0,
         continuous_gumbel_tau_end=1.0,
         continuous_posterior_temperature=0.35,
-        save_start_epoch=1,
+        save_start_epoch=STAGE2B_SAVE_START_EPOCH,
         **{
             **common_fit_kwargs(model),
             "lambda_isi": 1e-1,
@@ -1415,7 +2011,7 @@ def run_stage2c(model, train_loader, val_loader, blank_logit_threshold):
 def run_stage2(model, train_loader, val_loader, blank_logit_threshold):
     phases = _normalize_substage_phases(
         STAGE2_PHASES,
-        ("2a", "2b", "2c"),
+        ("2a", "2b"),
         name="STAGE2_PHASES",
     )
 
@@ -1428,16 +2024,9 @@ def run_stage2(model, train_loader, val_loader, blank_logit_threshold):
             blank_logit_threshold,
         )
 
+
     if "2b" in phases:
         reports["2b"] = run_stage2b(
-            model,
-            train_loader,
-            val_loader,
-            blank_logit_threshold,
-        )
-
-    if "2c" in phases:
-        reports["2c"] = run_stage2c(
             model,
             train_loader,
             val_loader,
@@ -1584,7 +2173,7 @@ def build_prior_from_model(
     pT, pH, pW = model.patch_size
     token_grid = (T // pT, H // pH, W // pW)
 
-    activity_prior = DETRActivityPrior(
+    activity_kwargs = dict(
         global_dim=dim_assay_for_emb,
         local_dim=9,
         num_tasks=4,
@@ -1594,11 +2183,12 @@ def build_prior_from_model(
         n_layer=4,
         n_head=4,
         dropout=0.1,
-        coordinate_mode=(
-            STAGE3_COORDINATE_MODE
-            if coordinate_mode is None
-            else coordinate_mode
-        ),
+    )
+    activity_prior = MaskGITActivityPrior(
+        **activity_kwargs,
+        region_grid=STAGE3B_REGION_GRID,
+        n_decoder_layer=STAGE3B_DECODER_LAYERS,
+        n_maskgit_layer=STAGE3B_MASKGIT_LAYERS,
     ).to(device)
 
     motif_prior = MaskGITMotifPrior(
@@ -1804,10 +2394,16 @@ def _print_stage3_startup(label, hyperparameters, module, *, checkpoint_paths=()
         * int(module.Kmax)
         * int(module.Ttok + module.Htok + module.Wtok)
     )
-    grid_head_parameters = (
-        sum(parameter.numel() for parameter in module.grid_head.parameters())
-        if module.grid_head is not None
-        else 0
+    # SparseRegionActivityPrior has no monolithic grid head; its placement
+    # parameters live in the region/within pair.
+    coordinate_head_modules = [
+        getattr(module, name, None)
+        for name in ("grid_head", "region_head", "within_head")
+    ]
+    grid_head_parameters = sum(
+        sum(parameter.numel() for parameter in head.parameters())
+        for head in coordinate_head_modules
+        if head is not None
     )
     print(
         f"{label} coordinate mode: {module.coordinate_mode}\n"
@@ -1919,6 +2515,17 @@ def _load_stage3_activity_best(prior, model, device):
 
 def run_stage3a(prior, model, train_loader, val_loader, device):
     print("[3A] Training motif prior.")
+
+    if STAGE3A_WARM_START and STAGE3A_WARM_START_PATH.exists():
+        warm = torch.load(str(STAGE3A_WARM_START_PATH), map_location=device)
+        missing, unexpected = prior.motif_prior.load_state_dict(
+            warm.get("model", warm), strict=False
+        )
+        print(
+            f"[3A] warm start from {STAGE3A_WARM_START_PATH} "
+            f"(epoch {warm.get('epoch', '?')}); "
+            f"missing={len(missing)} unexpected={len(unexpected)}"
+        )
     opt_motif = torch.optim.AdamW(
         [p for p in prior.motif_prior.parameters() if p.requires_grad],
         lr=3e-4,
@@ -1934,17 +2541,38 @@ def run_stage3a(prior, model, train_loader, val_loader, device):
         epochs=int(STAGE3A_EPOCHS),
         grad_clip=1.0,
         ckpt_out=str(CKPTS["motif_prior_best"]),
-        early_stop_patience=30,
+        # Was 30. Both train and val z1 accuracy were still climbing at the old
+        # 200-epoch limit with no overfit gap, so the run was budget-limited.
+        early_stop_patience=150,
         grad_accum_steps=grad_accum_steps,
         full_mask_prob=0.15,
+
+        # Loss rebalancing. At the end of the previous run the budget was:
+        #   z1 CE 53%, alpha 23%, z1 neighbour-CE 15%, ctx 8%, rest ~1%.
+        # Measured against matched nulls, alpha is unpredictable by ANY method
+        # (model 0.168, per-position lookup 0.164, uniform simplex 0.170), so
+        # 23% of the gradient was spent on a target carrying no signal. Its
+        # weight is dropped to 0.1 -- not zero, because the alpha head still
+        # feeds decoding and should not drift.
+        loss_weights=(1.0, 0.1),
+
+        # The neighbourhood-CE term spreads target mass over the 5 codebook-
+        # nearest codes. It was included so near-misses are not punished, but
+        # the model loses to the null on codebook DISTANCE as badly as on exact
+        # identity (0.475 vs 0.395), so the smoothing is not buying anything and
+        # is suppressing commitment. Reduced from 0.25.
         lambda_z1_distance=0.05,
-        lambda_z1_neighbor_ce=0.25,
+        lambda_z1_neighbor_ce=0.05,
         z1_neighbor_tau=0.25,
         topk=(5, 2),
-        lambda_ctx=1.0,
+
+        # Voxel-domain auxiliary losses reduced from 1.0 so the motif objective
+        # dominates while z1 is still improving. Stage 3C performs the
+        # inference-aligned statistical calibration; 3A's job is motif identity.
+        lambda_ctx=0.25,
         lambda_ctx_field=0.05,
-        lambda_adj=1.0,
-        lambda_spatial=1.0,
+        lambda_adj=0.25,
+        lambda_spatial=0.25,
         ctx_tau=0.25,
         ctx_field_tau=0.25,
         memory_tok=getattr(model, "memory_tok", None),
@@ -1993,41 +2621,52 @@ def run_stage3b(prior, model, train_loader, val_loader, device):
         ),
     )
 
-    history = train_activity_prior_detr(
+    token_adj_bank = None
+    _tab = Path("ckpts/token_adjacency_bank.pt")
+    if STAGE3B_USE_TOKEN_ADJ_BANK and _tab.exists():
+        from .model.spatial_map import GlobalContextAdjacencyBank
+        _p = torch.load(str(_tab), map_location="cpu")
+        token_adj_bank = GlobalContextAdjacencyBank()
+        token_adj_bank.load_state_dict(_p[STAGE3B_TOKEN_ADJ_VARIANT])
+        print(
+            f"[3B] token adjacency bank: {_tab} variant={STAGE3B_TOKEN_ADJ_VARIANT} "
+            f"bands={token_adj_bank.gap_bins} assays={len(token_adj_bank._num)}"
+        )
+    elif STAGE3B_USE_TOKEN_ADJ_BANK:
+        raise FileNotFoundError(f"{_tab} missing; build it before enabling the bank.")
+
+    # Selected on NLL rather than F1:
+    # F1 is maximized by emitting the mode, which is the wrong target for a
+    # checkpoint that exists to be sampled.
+    dcfg = dict(STAGE3B_MASKGIT_HYPERPARAMETERS)
+    history = train_maskgit_activity_prior(
         activity_prior=prior.activity_prior,
         vqvae=model,
         opt=opt_activity,
         train_loader=train_loader,
         val_loader=val_loader,
-        epochs=int(STAGE3B_EPOCHS),
+        epochs=int(dcfg["epochs"]),
         grad_clip=1.0,
-        lambda_count=float(config["lambda_count"]),
-        lambda_count_neighbor=float(config["lambda_count_neighbor"]),
-        lambda_count_distance=float(config["lambda_count_distance"]),
-        lambda_obj=float(config["lambda_obj"]),
-        lambda_coord=float(config["lambda_coord"]),
-        lambda_soft_count=float(config["lambda_soft_count"]),
-        lambda_soft_grid=float(config["lambda_soft_grid"]),
-        lambda_dup=float(config["lambda_dup"]),
-        no_object_weight=float(config["no_object_weight"]),
-        count_neighbor_k=11,
-        count_neighbor_tau=2.0,
-        count_distance_scale=5.0,
-        soft_count_beta=5.0,
-        count_teacher_epochs=int(config["count_teacher_epochs"]),
-        count_transition_epochs=int(config["count_transition_epochs"]),
-        hard_tolerance=(1, 1, 1),
-        memory_tok=getattr(model, "memory_tok", None),
+        blank_code=getattr(model.vq, "blank_code", -1),
+        lambda_bce=float(dcfg["lambda_bce"]),
+        pos_weight=float(dcfg["pos_weight"]),
+        lambda_count=float(dcfg["lambda_count"]),
+        token_adj_bank=token_adj_bank,
+        lambda_adj_t=float(dcfg["lambda_adj_t"]),
+        lambda_adj_s=float(dcfg["lambda_adj_s"]),
+        lambda_spatial=float(dcfg["lambda_spatial"]),
+        random_mask_prob=float(dcfg["random_mask_prob"]),
+        random_mask_ratio=tuple(dcfg["random_mask_ratio"]),
+        select_on=str(dcfg["select_on"]),
+        save_start_epoch=int(dcfg["save_start_epoch"]),
+        early_stop_patience=int(dcfg["early_stop_patience"]),
         deterministic_val_masks=bool(config["deterministic_validation_masks"]),
-        ckpt_out=str(CKPTS["activity_prior_best"]),
-        ckpt_loss_out=str(CKPTS["activity_prior_best_loss"]),
-        ckpt_hard_out=str(CKPTS["activity_prior_best_hard_metric"]),
-        early_stop_patience=30,
-        grad_accum_steps=grad_accum_steps,
+        ckpt_out=str(CKPTS["activity_prior_best_hard_metric"]),
     )
     save_json_report(history, REPORTS["prior_activity"])
     _load_stage3_activity_best(prior, model, device)
     return history
+
 
 
 def run_stage3c(prior, model, train_loader, val_loader, device):
@@ -2078,19 +2717,13 @@ def run_stage3c(prior, model, train_loader, val_loader, device):
         epochs=int(STAGE3C_EPOCHS),
         grad_clip=1.0,
         ckpt_out=str(CKPTS["activity_prior_refined_best"]),
-        early_stop_patience=20,
+        early_stop_patience=int(config["early_stop_patience"]),
         grad_accum_steps=grad_accum_steps,
         freeze_motif=True,
-        lambda_detr=float(config["lambda_detr"]),
+        lambda_activity=float(config["lambda_activity"]),
         lambda_count=float(config["lambda_count"]),
         lambda_count_neighbor=float(config["lambda_count_neighbor"]),
         lambda_count_distance=float(config["lambda_count_distance"]),
-        lambda_obj=float(config["lambda_obj"]),
-        lambda_coord=float(config["lambda_coord"]),
-        lambda_soft_count=float(config["lambda_soft_count"]),
-        lambda_soft_grid=float(config["lambda_soft_grid"]),
-        lambda_dup=float(config["lambda_dup"]),
-        no_object_weight=float(config["no_object_weight"]),
         count_neighbor_k=11,
         count_neighbor_tau=2.0,
         count_distance_scale=5.0,
@@ -2100,6 +2733,7 @@ def run_stage3c(prior, model, train_loader, val_loader, device):
         lambda_adj=float(config["lambda_adj"]),
         lambda_spatial=float(config["lambda_spatial"]),
         auxiliary_ramp_epochs=int(config["auxiliary_ramp_epochs"]),
+        save_start_epoch=int(config["save_start_epoch"]),
         ctx_field_tau=0.25,
         memory_tok=getattr(model, "memory_tok", None),
         memory_adj=getattr(model, "memory_adj", None),
@@ -2108,7 +2742,8 @@ def run_stage3c(prior, model, train_loader, val_loader, device):
         generation_val_max_batches=int(config["generation_val_max_batches"]),
         generation_motif_steps=int(config["generation_motif_steps"]),
         deterministic_val_masks=bool(config["deterministic_validation_masks"]),
-        hard_tolerance=(1, 1, 1),
+        hard_tolerance=STAGE3_HARD_TOLERANCE,
+        null_baselines=_NULL_BASELINES,
     )
     save_json_report(history, REPORTS["prior_refine"])
     return history
@@ -2288,7 +2923,7 @@ def load_stage3_prior(model, device, *, activity_phase: str):
 
 
 @torch.no_grad()
-def evaluate_stage3a_predictive(model, test_loader, device):
+def evaluate_stage3a_predictive(model, test_loader, device, train_loader=None):
     prior = _load_stage3_eval_prior(
         model,
         device,
@@ -2321,11 +2956,46 @@ def evaluate_stage3a_predictive(model, test_loader, device):
 
     blank_code = getattr(model.vq, "blank_code", -1)
 
+    # ---- null ladder -------------------------------------------------------
+    # z1_acc against 32 classes is uninterpretable on its own.  The relevant
+    # question is whether the prior beats a lookup table: the empirical z1
+    # frequency at this assay and this grid position.  The same comparison
+    # already showed the activity head losing to an assay-frequency null, so
+    # 3A does not get to report a raw accuracy without one.
+    #
+    # Fit on TRAINING data only.  The tables are keyed to codebook identity,
+    # so they must be rebuilt whenever Stage 1 is retrained.
+    null_levels = ("uniform", "global", "assay", "assay_position")
+    null_payload = None
+    if train_loader is not None:
+        K1, K2 = int(motif_prior.K1), int(motif_prior.K2)
+        if MOTIF_NULL_BASELINE_PATH.exists():
+            null_payload = load_motif_null_baselines(str(MOTIF_NULL_BASELINE_PATH))
+            if int(null_payload.get("K1", -1)) != K1:
+                print(
+                    f"[3A nulls] cached payload has K1={null_payload.get('K1')} "
+                    f"but model has K1={K1}; rebuilding."
+                )
+                null_payload = None
+        if null_payload is None:
+            print("[3A nulls] building motif null baselines from the training split...")
+            null_payload = build_motif_null_baselines(
+                train_loader, model, K1=K1, K2=K2, device=device,
+                save_path=str(MOTIF_NULL_BASELINE_PATH),
+            )
+    else:
+        print("[3A nulls] no train_loader supplied; skipping the null ladder.")
+
+    null_totals = {
+        lvl: {"correct": 0.0, "top5": 0.0, "ce": 0.0} for lvl in null_levels
+    }
+
     for batch in test_loader:
         x, gct, lct, task_id, mask_spec = _batch_to_device(
             batch,
             device,
         )
+        assay_idx_batch = batch.get("assay_idx", None)
         codes, alpha_target, pmask, _ = _vq_codes_alpha_and_pmask(
             model,
             x,
@@ -2407,6 +3077,33 @@ def evaluate_stage3a_predictive(model, test_loader, device):
                 z1_top5.eq(z1_target.unsqueeze(-1)).any(dim=-1).sum().item()
             )
 
+            if null_payload is not None and assay_idx_batch is not None:
+                import numpy as _np
+                sel = z1_mask.nonzero(as_tuple=False)          # (m, 2): sample, position
+                sample_of = sel[:, 0].detach().cpu().numpy()
+                pos_of = sel[:, 1].detach().cpu().numpy()
+                assay_np = (
+                    torch.as_tensor(assay_idx_batch).reshape(-1).detach().cpu().numpy()
+                )
+                assay_of = assay_np[sample_of]
+                tgt_np = z1_target.detach().cpu().numpy()
+
+                for lvl in null_levels:
+                    z1_prob, _ = motif_null_predictions(
+                        null_payload, assay_of, pos_of, level=lvl
+                    )
+                    pred = z1_prob.argmax(axis=1)
+                    null_totals[lvl]["correct"] += float((pred == tgt_np).sum())
+                    k5 = min(5, z1_prob.shape[1])
+                    top5 = _np.argpartition(-z1_prob, k5 - 1, axis=1)[:, :k5]
+                    null_totals[lvl]["top5"] += float(
+                        (top5 == tgt_np[:, None]).any(axis=1).sum()
+                    )
+                    p_true = z1_prob[_np.arange(len(tgt_np)), tgt_np]
+                    null_totals[lvl]["ce"] += float(
+                        -_np.log(_np.clip(p_true, 1e-12, None)).sum()
+                    )
+
         alpha_mask = targets["alpha_loss_mask"].bool()
         n_alpha = float(alpha_mask.sum().item())
         if n_alpha > 0:
@@ -2458,114 +3155,32 @@ def evaluate_stage3a_predictive(model, test_loader, device):
         "samples": int(totals["samples"]),
         "full_mask_prob": float(STAGE3A_EVAL_FULL_MASK_PROB),
     }
+
+    if null_payload is not None:
+        for lvl in null_levels:
+            acc = null_totals[lvl]["correct"] / z1_den
+            top5 = null_totals[lvl]["top5"] / z1_den
+            ce = null_totals[lvl]["ce"] / z1_den
+            report[f"null_{lvl}_z1_acc"] = acc
+            report[f"null_{lvl}_z1_top5_acc"] = top5
+            report[f"null_{lvl}_z1_ce"] = ce
+            report[f"null_{lvl}_z1_acc_margin"] = report["z1_acc"] - acc
+            report[f"null_{lvl}_z1_top5_margin"] = report["z1_top5_acc"] - top5
+            report[f"null_{lvl}_z1_ce_margin"] = ce - report["loss_z1"]
+        strongest = max(
+            null_levels, key=lambda L: report[f"null_{L}_z1_acc"]
+        )
+        report["null_strongest_level"] = strongest
+        report["beats_strongest_null_acc"] = bool(
+            report["z1_acc"] > report[f"null_{strongest}_z1_acc"]
+        )
+
     save_json_report(report, REPORTS["prior_motif_eval"])
     print("Stage 3A held-out predictive evaluation:", report)
     return report
 
 
 @torch.no_grad()
-def evaluate_stage3_activity_predictive(
-    model,
-    test_loader,
-    device,
-    *,
-    phase: str,
-):
-    phase = str(phase).lower()
-    if phase not in ("3b", "3c"):
-        raise ValueError("Activity predictive evaluation requires phase '3b' or '3c'.")
-
-    prior = _load_stage3_eval_prior(
-        model,
-        device,
-        phase=phase,
-        load_generation_memories=False,
-        load_motif=False,
-    )
-    activity_prior = prior.activity_prior
-    activity_prior.eval()
-    model.eval()
-
-    token_grid = (
-        activity_prior.Ttok,
-        activity_prior.Htok,
-        activity_prior.Wtok,
-    )
-    blank_code = getattr(model.vq, "blank_code", -1)
-    total = {}
-    total_samples = 0.0
-
-    for batch in test_loader:
-        x, gct, lct, task_id, mask_spec = _batch_to_device(
-            batch,
-            device,
-        )
-        codes, pmask, _ = _vq_codes_and_pmask(
-            model,
-            x,
-            gct,
-            lct,
-            mask_spec,
-            device,
-        )
-        targets = build_activity_targets_from_codes(
-            codes=codes,
-            token_grid=token_grid,
-            Kmax=activity_prior.Kmax,
-            blank_code=blank_code,
-            predict_mask=pmask,
-        )
-        a_in = _make_activity_in_from_codes(
-            codes,
-            pmask,
-            blank_code=blank_code,
-            a_mask_id=activity_prior.a_mask_id,
-        )
-        out = activity_prior(
-            global_ctx=gct,
-            local_ctx=lct,
-            task_id=task_id,
-            a_in=a_in,
-            roi_mask=pmask,
-        )
-        _, aux = detr_activity_loss(
-            out,
-            targets,
-            activity_prior,
-            lambda_count=1.0,
-            lambda_count_neighbor=0.25,
-            lambda_count_distance=0.05,
-            lambda_obj=1.0,
-            lambda_coord=1.0,
-            lambda_soft_count=0.1,
-            lambda_soft_grid=1.0,
-            lambda_dup=0.01,
-            no_object_weight=0.1,
-            count_neighbor_k=11,
-            count_neighbor_tau=2.0,
-            count_distance_scale=5.0,
-            soft_count_beta=5.0,
-        )
-
-        batch_size_current = float(x.size(0))
-        total_samples += batch_size_current
-        for key, value in aux.items():
-            if torch.is_tensor(value):
-                value = float(value.detach().item())
-            total[key] = total.get(key, 0.0) + float(value) * batch_size_current
-
-    den = max(total_samples, 1.0)
-    report = {key: value / den for key, value in total.items()}
-    report["phase"] = phase
-    report["samples"] = int(total_samples)
-    report_path = (
-        REPORTS["prior_activity_eval"]
-        if phase == "3b"
-        else REPORTS["prior_refine_eval"]
-    )
-    save_json_report(report, report_path)
-    print(f"Stage {phase.upper()} held-out activity evaluation:", report)
-    return report
 
 
 @torch.no_grad()
@@ -3310,6 +3925,503 @@ def make_viz_loader(test_loader):
     )
 
 
+# =============================================================================
+# Null baselines and leakage audit
+# =============================================================================
+
+def _load_null_baselines_if_available():
+    """Return the null-baseline payload, or None with an explanatory message."""
+    if not NULL_BASELINE_PATH.exists():
+        print(
+            f"[nulls] {NULL_BASELINE_PATH} not found. "
+            "Set RUN_BUILD_NULL_BASELINES=True once to create it. "
+            "Null reference scores will be skipped."
+        )
+        return None
+    try:
+        return load_null_baselines(str(NULL_BASELINE_PATH))
+    except Exception as exc:
+        print(f"[nulls] could not load {NULL_BASELINE_PATH}: {exc}")
+        return None
+
+
+@torch.no_grad()
+def evaluate_existing_checkpoints_on_temporal_split(model, test_loader, device):
+    """Reconstruction on the temporal test split, using the CURRENT checkpoints.
+
+    Those checkpoints were fit under the old index-level split, where the same
+    burst file appeared in train and test. Running them unchanged against a
+    genuinely held-out temporal split measures how much of the reported
+    performance depended on that overlap. Run this before committing to a full
+    retrain: the delta is informative either way, and it is one evaluation pass.
+    """
+    print("\n" + "=" * 80)
+    print("LEAKAGE DELTA: existing checkpoints, temporal held-out test split")
+    print("=" * 80)
+
+    rows = {}
+    for stage_label, checkpoint in (
+        ("stage1", CKPTS["stage1_best"]),
+        ("stage2a", CKPTS["stage2a_best"]),
+        ("stage2b", CKPTS["stage2_best"]),
+    ):
+        if not checkpoint.exists():
+            print(f"  [{stage_label}] missing {checkpoint}; skipped.")
+            continue
+
+        model.load_checkpoint(str(checkpoint), map_location=device)
+        if stage_label == "stage1":
+            model.use_continuous_residual = False
+            set_decoder_cross_attention(model, enabled=False, layers=())
+        else:
+            model.use_continuous_residual = bool(STAGE2_CONTINUOUS_RESIDUAL)
+            model.continuous_residual_projector.use_alpha_adapter = False
+            model.continuous_residual_projector.decode_with_projection_target = True
+            set_decoder_cross_attention(
+                model,
+                enabled=(stage_label == "stage2b"),
+                layers=STAGE2B_CROSS_ATTN_LAYERS,
+            )
+
+        report = evaluate_vqvae(
+            model,
+            test_loader,
+            use_ROI_mask=False,
+            recon_tolerance=recon_tolerance,
+            metric_tolerance=metric_tolerance,
+            eval_cfg_modes=True,
+        )
+        rows[stage_label] = report
+        print(
+            f"  [{stage_label}] AUPRC_cond={report['AUPRC_cond']:.5f} "
+            f"BestF1_cond={report['BestF1_cond']:.5f} "
+            f"AUPRC_tol_cond={report['AUPRC_tol_cond']:.5f} "
+            f"| AUPRC_uncond={report['AUPRC_uncond']:.5f} "
+            f"(cond-uncond delta={report['AUPRC_cond'] - report['AUPRC_uncond']:+.2e})"
+        )
+
+    payload = {
+        "note": (
+            "Existing checkpoints (trained under the old index-level split, which "
+            "placed the same burst files in train and test) evaluated on the new "
+            "temporal within-assay held-out test split. Compare against the "
+            "corresponding val_metrics entries in the stage training reports."
+        ),
+        "split": "temporal_within_assay",
+        "results": rows,
+    }
+    save_json_report(payload, REPORTS["leakage_delta"])
+    return payload
+
+
+@torch.no_grad()
+def evaluate_count_nulls(model, test_loader, device, null_baselines):
+    """Compare the activity count head against trivial count predictors.
+
+    Total spike count is analytically recoverable from local context feature 0
+    (log mean firing density), so a closed-form map from that feature is the
+    trivial solution available to any reader. A constant predictor emitting the
+    training mean is the weaker reference. If the count head does not beat both,
+    it has not earned its parameters and the manuscript should say so.
+    """
+    print("\n" + "=" * 80)
+    print("COUNT NULLS: activity count head vs trivial predictors")
+    print("=" * 80)
+
+    prior = load_stage3_prior(model, device, activity_phase="3c")
+    activity_prior = prior.activity_prior
+    activity_prior.eval()
+    model.eval()
+
+    token_grid = (activity_prior.Ttok, activity_prior.Htok, activity_prior.Wtok)
+    blank_code = getattr(model.vq, "blank_code", -1)
+
+    global_stats = null_baselines["count_stats"]["global"]
+    per_assay_stats = null_baselines["count_stats"]["per_assay"]
+    density_fit = null_baselines["density_to_count"]
+    density_fit_per_assay = null_baselines.get("density_to_count_per_assay", {})
+
+    errors = {"model": [], "constant_global": [], "constant_per_assay": [],
+              "density_global": [], "density_per_assay": []}
+    targets = []
+
+    for batch in test_loader:
+        x, gct, lct, task_id, mask_spec = _batch_to_device(batch, device)
+        codes, pmask, _ = _vq_codes_and_pmask(model, x, gct, lct, mask_spec, device)
+        activity_targets = build_activity_targets_from_codes(
+            codes=codes,
+            token_grid=token_grid,
+            Kmax=activity_prior.Kmax,
+            blank_code=blank_code,
+            predict_mask=pmask,
+        )
+        a_in = _make_activity_in_from_codes(
+            codes, pmask, blank_code=blank_code, a_mask_id=activity_prior.a_mask_id
+        )
+        out = activity_prior(
+            global_ctx=gct, local_ctx=lct, task_id=task_id,
+            a_in=a_in, roi_mask=pmask,
+        )
+
+        true_count = activity_targets["count_target"].float().cpu().numpy()
+        predicted = activity_prior._expected_count_from_logits(
+            out["count_logits"]
+        ).float().cpu().numpy()
+
+        assay_idx = np.asarray(batch["assay_idx"]).reshape(-1).astype(np.int64)
+        log_density = lct[:, 0].float().cpu().numpy()
+
+        # Targets count active tokens INSIDE the ROI, while the null statistics
+        # are whole-grid counts, so each null must be scaled to the ROI.
+        #
+        # Scaling by ROI area would assume activity is spread uniformly over the
+        # grid, which is wrong for the causal task (the ROI is a time suffix) and
+        # for the spatial task (a box over a non-uniform electrode support). Use
+        # the assay's measured token-activation map to compute the fraction of
+        # expected activity that actually falls inside this ROI, and fall back to
+        # the area fraction only when the assay is missing from the bank.
+        roi_bool = (pmask.squeeze(-1) if pmask.dim() == 3 else pmask).bool()
+        token_frequency = token_frequency_for_batch(
+            null_baselines, batch, token_grid, device
+        )
+        if token_frequency is None:
+            roi_fraction = (
+                roi_bool.sum(dim=1).float() / float(activity_prior.Ntok)
+            ).cpu().numpy()
+        else:
+            flat_frequency = token_frequency.reshape(roi_bool.shape[0], -1)
+            inside = (flat_frequency * roi_bool.float()).sum(dim=1)
+            total = flat_frequency.sum(dim=1).clamp_min(1e-8)
+            roi_fraction = (inside / total).cpu().numpy()
+
+        constant_global = np.full_like(true_count, float(global_stats["mean"])) * roi_fraction
+        constant_per_assay = np.array([
+            float(per_assay_stats.get(int(a), global_stats)["mean"]) for a in assay_idx
+        ]) * roi_fraction
+        density_global = predict_count_from_density(density_fit, log_density) * roi_fraction
+        density_per_assay = np.array([
+            predict_count_from_density(
+                density_fit_per_assay.get(int(a), density_fit), [d]
+            )[0]
+            for a, d in zip(assay_idx, log_density)
+        ]) * roi_fraction
+
+        targets.extend(true_count.tolist())
+        errors["model"].extend(np.abs(predicted - true_count).tolist())
+        errors["constant_global"].extend(np.abs(constant_global - true_count).tolist())
+        errors["constant_per_assay"].extend(np.abs(constant_per_assay - true_count).tolist())
+        errors["density_global"].extend(np.abs(density_global - true_count).tolist())
+        errors["density_per_assay"].extend(np.abs(density_per_assay - true_count).tolist())
+
+    target_arr = np.asarray(targets, dtype=np.float64)
+    payload = {
+        "samples": int(target_arr.size),
+        "target_count_mean": float(target_arr.mean()),
+        "target_count_mad": float(np.abs(target_arr - target_arr.mean()).mean()),
+        "mae": {k: float(np.mean(v)) for k, v in errors.items()},
+    }
+    payload["model_beats"] = {
+        k: bool(payload["mae"]["model"] < payload["mae"][k])
+        for k in errors if k != "model"
+    }
+
+    print(f"  target count mean={payload['target_count_mean']:.2f} "
+          f"MAD={payload['target_count_mad']:.2f}  (n={payload['samples']})")
+    for name, value in payload["mae"].items():
+        marker = "" if name == "model" else (
+            "  <-- model WORSE" if value < payload["mae"]["model"] else ""
+        )
+        print(f"    MAE[{name:20s}] = {value:7.3f}{marker}")
+
+    save_json_report(payload, REPORTS["count_nulls"])
+    return payload
+
+
+@torch.no_grad()
+def evaluate_generation_baselines(model, test_loader, device, null_baselines,
+                                  max_batches: int = 8):
+    """Model generation vs an independent-rate surrogate, plus a context swap.
+
+    Surrogate: per-voxel independent Bernoulli using the assay's empirical
+    firing-rate map, rescaled to the requested density. It reproduces marginal
+    rates and nothing else, so any metric on which the model does not beat it is
+    not evidence of learned spatiotemporal structure.
+
+    Context swap: generate sample i's volume using sample j's local context from
+    the same assay. If the generated statistics track j (the supplied context)
+    rather than i, conditioning is real; if they track neither, the context is
+    being ignored.
+    """
+    print("\n" + "=" * 80)
+    print("GENERATION BASELINES: model vs independent-rate surrogate")
+    print("=" * 80)
+
+    prior = load_stage3_prior(model, device, activity_phase="3c")
+    model.eval()
+    prior.eval()
+
+    generator = torch.Generator(device=device).manual_seed(20240917)
+    rows = {"model": [], "surrogate": [], "swapped_context": []}
+
+    import time as _time
+    start_time = _time.time()
+
+    for batch_index, batch in enumerate(test_loader):
+        if batch_index >= int(max_batches):
+            break
+
+        if batch_index and batch_index % 5 == 0:
+            done = batch_index
+            rate = (_time.time() - start_time) / max(done, 1)
+            remaining = (min(int(max_batches), len(test_loader)) - done) * rate
+            print(
+                f"  [genbaselines] batch {done}/{min(int(max_batches), len(test_loader))} "
+                f"({rate:.1f}s/batch, ~{remaining/60:.1f} min left)",
+                flush=True,
+            )
+
+        x, gct, lct, task_id, mask_spec = _batch_to_device(batch, device)
+        batch_size = x.shape[0]
+        tok_out = model(x, global_ctx=gct, local_ctx=lct, predict_mask_spec=None)
+        grid = tok_out["grid"]
+        n_tokens = int(grid[0] * grid[1] * grid[2])
+
+        roi = torch.ones((batch_size, n_tokens), dtype=torch.bool, device=device)
+        zeros_task = torch.zeros((batch_size,), dtype=torch.long, device=device)
+
+        # Roll the local context within the batch so each sample is generated
+        # under a different sample's requested activity descriptor.
+        swapped_lct = torch.roll(lct, shifts=1, dims=0)
+
+        for label, context in (("model", lct), ("swapped_context", swapped_lct)):
+            sampled = sample_hierarchical_roi(
+                prior=prior,
+                global_ctx=gct,
+                local_ctx=context,
+                task_id=zeros_task,
+                roi_mask=roi,
+                visible_codes=None,
+                motif_steps=12,
+                motif_temperature=1.0,
+            )
+            generated = decode_codes_to_xgen(
+                model, sampled["codes"], alpha=sampled["alpha"], grid=grid,
+                global_ctx=gct, local_ctx=context,
+                roi_hw=batch.get("roi_hw", None), pad_hw=batch.get("pad_hw", None),
+            )
+            rows[label].append(
+                _generation_row(generated["x_gen"], x, context, model)
+            )
+
+        surrogate = generate_rate_surrogate(
+            null_baselines=null_baselines,
+            assay_idx=batch["assay_idx"],
+            local_ctx=lct,
+            shape=x.shape,
+            device=device,
+            generator=generator,
+        )
+        rows["surrogate"].append(_generation_row(surrogate["x_gen"], x, lct, model))
+
+    payload = {
+        "batches": int(min(max_batches, batch_index + 1)),
+        "results": {
+            name: {
+                key: float(np.mean([r[key] for r in batch_rows]))
+                for key in batch_rows[0]
+            }
+            for name, batch_rows in rows.items()
+            if batch_rows
+        },
+        "note": (
+            "context_mae for 'swapped_context' is measured against the SUPPLIED "
+            "(rolled) context, so a low value means the generator tracks the "
+            "requested descriptor rather than the assay average."
+        ),
+    }
+
+    print(f"{'':20s}{'count_rel_err':>14s}{'ctx_mae':>10s}{'field_err':>11s}{'gap_mae':>10s}")
+    for name, values in payload["results"].items():
+        print(f"{name:20s}{values['count_relative_error']:14.4f}"
+              f"{values['context_mae']:10.4f}{values['local_field_error']:11.4f}"
+              f"{values['short_gap_mae']:10.4f}")
+
+    save_json_report(payload, REPORTS["generation_baselines"])
+    return payload
+
+
+def _generation_row(x_gen, x_target, requested_ctx, model):
+    """Shared metric row so model and surrogate are scored by identical code."""
+    from .training.stage3_activity import _activity_ctx_torch, _hard_gap_rates
+
+    _, _, t_dec, h_dec, w_dec = x_gen.shape
+    target = x_target[:, :1, :t_dec, :h_dec, :w_dec]
+
+    generated_count = x_gen.sum(dim=(1, 2, 3, 4)).float()
+    target_count = target.sum(dim=(1, 2, 3, 4)).float()
+
+    generated_ctx = _activity_ctx_torch(x_gen[:, 0])
+    context_error = (generated_ctx - requested_ctx[:, :9].to(generated_ctx)).abs()
+
+    generated_gap = _hard_gap_rates(x_gen, gap_bins)
+    target_gap = _hard_gap_rates(target, gap_bins)
+
+    probability = x_gen.clamp(1e-4, 1.0 - 1e-4)
+    logits = torch.log(probability) - torch.log1p(-probability)
+    field_error = local_moment_field_loss(
+        logits_b1thw=logits,
+        target_b1thw=target,
+        patch_size=model.patch_size,
+        tau=0.25,
+        prob_threshold=float(model.best_thr_tol.item()),
+    )
+
+    return {
+        "count_relative_error": float(
+            ((generated_count - target_count).abs()
+             / target_count.clamp_min(1.0)).mean().item()
+        ),
+        "context_mae": float(context_error.mean().item()),
+        "local_field_error": float(field_error.item()),
+        "short_gap_mae": float((generated_gap - target_gap).abs().mean().item()),
+        "generated_spike_count": float(generated_count.mean().item()),
+        "target_spike_count": float(target_count.mean().item()),
+    }
+
+
+@torch.no_grad()
+def evaluate_motif_nulls(model, train_loader, test_loader, device, *, rebuild: bool = True):
+    """Motif prior vs empirical motif nulls, in the prior's most favourable regime.
+
+    Activity is teacher-forced from ground truth and every active ROI motif is
+    masked, matching STAGE3A_EVAL_FULL_MASK_PROB=1.0. The model additionally
+    sees true motifs at visible (non-ROI) positions, which the nulls do not, so
+    the comparison is conservative in the model's favour.
+
+    Reported per active ROI token:
+      z1 top-1 / top-5   motif identity (chance = 1/K1)
+      alpha MAE          convex within-motif coefficients
+      latent MSE         || z_pred - z_true ||^2 for z = e_z1 + sum_j alpha_j c_j,
+                         which is what the decoder actually consumes, reported
+                         both absolutely and relative to substituting the blank
+                         token, as a scale reference
+    """
+    prior = load_stage3_prior(model, device, activity_phase="3c")
+    motif_prior = prior.motif_prior
+    motif_prior.eval()
+    model.eval()
+    K1, K2 = int(motif_prior.K1), int(motif_prior.K2)
+
+    if rebuild or not MOTIF_NULL_BASELINE_PATH.exists():
+        payload = build_motif_null_baselines(
+            train_loader, model, K1=K1, K2=K2, device=device,
+            save_path=str(MOTIF_NULL_BASELINE_PATH),
+        )
+    else:
+        payload = load_motif_null_baselines(str(MOTIF_NULL_BASELINE_PATH))
+
+    table0 = model.vq.tree_embeds[0].detach().float()
+    table1 = model.vq.tree_embeds[1].detach().float()
+    scale0 = float(model.vq.level_scales[0])
+    scale1 = float(model.vq.level_scales[1])
+    hull = 1.0 + max(0.0, float(model.continuous_residual_projector.hull_margin_fraction))
+
+    def _latent(z1_ids, alpha):
+        return scale0 * table0[z1_ids] + scale1 * hull * torch.einsum(
+            "mk,mkd->md", alpha, table1[z1_ids]
+        )
+
+    names = ["model", "uniform", "global", "assay", "assay_position"]
+    totals = {n: {"t1": 0.0, "t5": 0.0, "alpha_mae": 0.0, "latent_mse": 0.0} for n in names}
+    n_tokens = 0.0
+    blank_reference = 0.0
+    blank_code = getattr(model.vq, "blank_code", -1)
+
+    for batch in test_loader:
+        x, gct, lct, task_id, mask_spec = _batch_to_device(batch, device)
+        codes, alpha_target, pmask, _ = _vq_codes_alpha_and_pmask(
+            model, x, gct, lct, mask_spec, device
+        )
+        targets = motif_prior.make_targets_from_codes(
+            codes=codes, predict_mask=pmask, blank_code=blank_code, alpha=alpha_target
+        )
+        a_in, z1_in, z2_in, alpha_in, targets = motif_prior.corrupt_inputs_from_targets(
+            targets, ensure_at_least_one_mask=True, full_mask_prob=1.0
+        )
+        logits, _, _ = motif_prior(
+            a_in, z1_in, z2_in, alpha_in=alpha_in,
+            global_ctx=gct, local_ctx=lct, task_id=task_id, targets=None,
+        )
+        selected = targets["z1_loss_mask"].bool()
+        if not bool(selected.any()):
+            continue
+
+        z1_true = targets["z1"][selected].long()
+        alpha_true = targets["alpha"][selected].float()
+        batch_pos, token_pos = torch.nonzero(selected, as_tuple=True)
+        assay_idx = np.asarray(batch["assay_idx"]).reshape(-1)[batch_pos.cpu().numpy()]
+        positions = token_pos.cpu().numpy()
+
+        true_latent = _latent(z1_true, alpha_true)
+        blank_reference += float(
+            (model.vq.blank_token.detach().float().unsqueeze(0) - true_latent)
+            .pow(2).sum().item()
+        )
+
+        predictions = {
+            "model": (
+                logits["z1"][selected].float(),
+                logits["alpha_mean"][selected].float(),
+            )
+        }
+        for level in ("uniform", "global", "assay", "assay_position"):
+            z1_probability, alpha_estimate = motif_null_predictions(
+                payload, assay_idx, positions, level=level
+            )
+            predictions[level] = (
+                torch.from_numpy(np.log(z1_probability + 1e-12)).float().to(device),
+                torch.from_numpy(alpha_estimate).float().to(device),
+            )
+
+        for name, (z1_logits, alpha_estimate) in predictions.items():
+            top_k = z1_logits.topk(min(5, K1), dim=-1).indices
+            totals[name]["t1"] += float((z1_logits.argmax(-1) == z1_true).sum().item())
+            totals[name]["t5"] += float(
+                (top_k == z1_true.unsqueeze(-1)).any(-1).sum().item()
+            )
+            totals[name]["alpha_mae"] += float(
+                (alpha_estimate - alpha_true).abs().mean(-1).sum().item()
+            )
+            totals[name]["latent_mse"] += float(
+                (_latent(z1_logits.argmax(-1), alpha_estimate) - true_latent)
+                .pow(2).sum().item()
+            )
+        n_tokens += float(selected.sum().item())
+
+    denominator = max(n_tokens, 1.0)
+    report = {
+        "active_roi_tokens": int(n_tokens),
+        "chance_z1_top1": 1.0 / K1,
+        "blank_token_latent_mse": blank_reference / denominator,
+        "results": {
+            name: {
+                "z1_top1": values["t1"] / denominator,
+                "z1_top5": values["t5"] / denominator,
+                "alpha_mae": values["alpha_mae"] / denominator,
+                "latent_mse": values["latent_mse"] / denominator,
+                "latent_mse_vs_blank": values["latent_mse"] / max(blank_reference, 1e-9),
+            }
+            for name, values in totals.items()
+        },
+    }
+    for name in names:
+        r = report["results"][name]
+        print(f"  {name:18s} z1_top1={r['z1_top1']:.4f} z1_top5={r['z1_top5']:.4f} "
+              f"alpha_mae={r['alpha_mae']:.4f} latent_mse={r['latent_mse']:.5f}")
+    save_json_report(report, REPORTS["motif_nulls"])
+    return report
+
+
 def evaluate_and_visualize(
     model,
     test_loader,
@@ -3344,11 +4456,11 @@ def evaluate_and_visualize(
         stage == 2 and STAGE2_CONTINUOUS_RESIDUAL
     )
 
-    using_alpha_adapter = bool(
+    # The alpha-adapter stage was removed: it trained only the adapter and showed
+    # no measurable effect, so nothing selects it any more.
+    using_alpha_adapter = False
+    using_stage2b_context = bool(
         stage == 2 and stage2_phase == "2b"
-    )
-    using_stage2c_context = bool(
-        stage == 2 and stage2_phase == "2c"
     )
 
     model.continuous_residual_projector.use_alpha_adapter = (
@@ -3358,21 +4470,37 @@ def evaluate_and_visualize(
     model.continuous_residual_sample_mix = 0.0
     set_decoder_cross_attention(
         model,
-        enabled=using_stage2c_context,
-        layers=(0,) if using_stage2c_context else (),
+        enabled=using_stage2b_context,
+        layers=STAGE2B_CROSS_ATTN_LAYERS if using_stage2b_context else (),
     )
 
 
     if RUN_EVAL:
         eval_label = stage2_phase.upper() if stage == 2 else str(stage)
         print(f"Evaluating VQVAE stage {eval_label} using {ckpt} ...")
+        # Stage 2B is scored under the same latent masking it trained with;
+        # under full autoencoding the context has nothing to contribute and
+        # the conditional/unconditional comparison is uninformative.
+        eval_masked = bool(using_stage2b_context and STAGE2B_MASK_LATENTS)
         test_metrics = evaluate_vqvae(
             model,
             test_loader,
             pos_weight=2.0,
             use_amp=True,
             use_ROI_mask=False,
+            mask_latents=eval_masked,
+            latent_recon_drop_p=float(STAGE2B_LATENT_RECON_DROP_P),
+            eval_ctx_shuffle=bool(using_stage2b_context),
         )
+        if using_stage2b_context:
+            test_metrics["ctx_effect_bce"] = (
+                test_metrics["val_loss_BCE_uncond"]
+                - test_metrics["val_loss_BCE_cond"]
+            )
+            test_metrics["ctx_effect_auprc_tol"] = (
+                test_metrics["AUPRC_tol_cond"]
+                - test_metrics["AUPRC_tol_uncond"]
+            )
         print(f"TEST stage {eval_label}:", test_metrics)
         if stage == 2:
             save_json_report(
@@ -3782,7 +4910,7 @@ def run_stage_evaluation(
     if stage == 2:
         eval_phases = _normalize_substage_phases(
             STAGE2_EVAL_PHASES,
-            ("2a", "2b", "2c"),
+            ("2a", "2b"),
             name="STAGE2_EVAL_PHASES",
         )
         if not eval_phases:
@@ -3831,6 +4959,7 @@ def run_stage_evaluation(
                     model,
                     test_loader,
                     device,
+                    train_loader=train_loader,
                 )
             except FileNotFoundError as exc:
                 if RUN_SKIP_MISSING_EVAL:
@@ -3842,13 +4971,11 @@ def run_stage_evaluation(
             if phase not in eval_phases:
                 continue
 
+            # The old predictive evaluator went with the set-prediction
+            # readout it scored. Stage 3B is now scored by NLL/AUPRC during
+            # training and by sample-based generative metrics afterwards.
             try:
-                evaluate_stage3_activity_predictive(
-                    model,
-                    test_loader,
-                    device,
-                    phase=phase,
-                )
+                pass
             except FileNotFoundError as exc:
                 if RUN_SKIP_MISSING_EVAL:
                     print(f"Skipping Stage {phase.upper()} evaluation: {exc}")
@@ -4014,7 +5141,45 @@ def main():
     
     if 0 not in TRAIN_STAGES and needs_spatial_pretrain:
         load_spatial_pretrain_if_available(model)
-    
+
+    # ============================================================
+    # Null baselines and leakage audit (opt-in, no training)
+    # ============================================================
+    global _NULL_BASELINES
+
+    if RUN_BUILD_NULL_BASELINES:
+        build_null_baselines(
+            train_loader,
+            model,
+            device=device,
+            save_path=str(NULL_BASELINE_PATH),
+        )
+
+    _NULL_BASELINES = _load_null_baselines_if_available()
+
+    if RUN_LEAKAGE_DELTA_EVAL:
+        evaluate_existing_checkpoints_on_temporal_split(model, test_loader, device)
+        # The checkpoint loads above leave the model in the last-evaluated
+        # stage's configuration; restore Stage 0 state before anything else.
+        load_spatial_pretrain_if_available(model)
+
+    if RUN_COUNT_NULL_EVAL:
+        if _NULL_BASELINES is None:
+            print("[nulls] skipping count nulls: no baseline file.")
+        else:
+            evaluate_count_nulls(model, test_loader, device, _NULL_BASELINES)
+
+    if RUN_MOTIF_NULL_EVAL:
+        evaluate_motif_nulls(model, train_loader, test_loader, device)
+
+    if RUN_GENERATION_BASELINE_EVAL:
+        if _NULL_BASELINES is None:
+            print("[nulls] skipping generation baselines: no baseline file.")
+        else:
+            evaluate_generation_baselines(
+                model, test_loader, device, _NULL_BASELINES
+            )
+
     
     for stage in TRAIN_STAGES:
         # ========================================================
@@ -4043,12 +5208,20 @@ def main():
             )
     
         elif stage == 1:
-            run_stage1(
-                model,
-                train_loader,
-                val_loader,
-                blank_logit_threshold=1.05*logit_baseline
+            phases = _normalize_substage_phases(
+                STAGE1_PHASES,
+                ("1a", "1b"),
+                name="STAGE1_PHASES",
             )
+            if "1a" in phases:
+                run_stage1(
+                    model,
+                    train_loader,
+                    val_loader,
+                    blank_logit_threshold=1.05*logit_baseline
+                )
+            if "1b" in phases:
+                run_stage1b(model, train_loader, device)
     
         elif stage == 2:
             run_stage2(

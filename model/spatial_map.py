@@ -526,3 +526,16 @@ class SpatialMapPrior(nn.Module):
         
     
     
+
+
+# Ordered shift set used by model.prior._soft_coactivation_rate to build its
+# temporal and spatial shift sets. Indices below select the two subsets.
+# The token-lag adjacency TARGET comes from a GlobalContextAdjacencyBank
+# instantiated with token-unit gap bins (see the bank builder), matched band for
+# band, so nothing here needs to agree with a second bank implementation.
+TOKEN_ADJ_SHIFTS = (
+    (1, 0, 0), (2, 0, 0), (3, 0, 0),          # temporal lags, indices 0..2
+    (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),  # spatial 4-neighbourhood, 3..6
+)
+TOKEN_ADJ_TEMPORAL_IDX = (0, 1, 2)
+TOKEN_ADJ_SPATIAL_IDX = (3, 4, 5, 6)

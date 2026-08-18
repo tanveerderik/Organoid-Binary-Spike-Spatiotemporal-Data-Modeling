@@ -17,12 +17,14 @@ from ..utils.recon import (
     dilate_spatial_support_hw,
     sample_full_pixel_map_to_crop,
     sample_full_token_map_to_crop,
+    perturb_local_ctx,
 )
 
 from ..utils.losses import (
     tolerant_spike_loss,
     short_gap_excess_loss_from_logits_batch_targets,
     ctx_loss_soft,
+    ctx_features_soft_from_logits,
     local_moment_field_loss,
     encoder_isotropy_loss,
     variance_floor_loss,
@@ -58,6 +60,21 @@ def fit_vqvae(
     pos_weight_end: float = 20.0,
     pos_decay_epochs: int = 50,        # reach pos_weight by epoch 50
 
+    # Peak/multi neighbourhood for tolerant_spike_loss, decoupled from the hit
+    # tolerance. The hit term's max_pool REWARDS a spike anywhere within
+    # radius_*, so widening that permits smear; peak/multi PUNISH mass away from
+    # the centre, so widening these suppresses it. They were sharing one radius,
+    # and with radius_t=0 at the final refinement nothing ever compared across
+    # frames -- which is why the within-token temporal profile sits at entropy
+    # 1.699 against a 1.792 flat ceiling while the spatial profile, where
+    # radius_h/w=1 gave the peak term reach, reaches 3.19 against 5.35.
+    peak_radius_t: int = 3,          # spans the 6-frame token extent
+    peak_radius_h: int = 1,
+    peak_radius_w: int = 1,
+    gamma_peak_mid: float = 0.05,
+    gamma_peak_final: float = 0.15,
+    delta_multi_mid: float = 0.05,
+    delta_multi_final: float = 0.05,
     lambda_isi: float = 1e-2,
     lambda_vq: float = 1.0,
     lambda_ctx: float = 1e-3,
@@ -65,6 +82,34 @@ def fit_vqvae(
     
     ctx_start_epoch: int = 30,         # start ctx after 20
     ctx_warmup_epochs: int = 50,       # ramp duration (or shorter, like 10–15)
+
+    # ---- latent masking (Stage 2C context conditioning) ----
+    # Hide a subset of latent tokens from the decoder so the clip-level
+    # context has something to contribute.  Under full autoencoding the
+    # context is redundant with the codes and the branch cannot train.
+    mask_latents: bool = False,
+    latent_recon_drop_p: float = 0.5,
+    log_ctx_diagnostics: bool = False,
+
+    # ---- counterfactual context conditioning (trains the local ctx head) ----
+    # A second decode of the same latents under a perturbed context request.
+    # This is the only term that puts the context in tension with the codes;
+    # without it argmin(recon) == argmin(ctx_loss) and the head never learns.
+    lambda_ctx_cf: float = 0.0,
+    local_ctx_std: Optional[Any] = None,
+    local_ctx_bank: Optional[Any] = None,
+    # Per-dimension weights for ctx_loss_soft, w_d = 1 / var_d.  Without these
+    # the nine activity features enter the loss as raw squared error, and
+    # log_mean_firing_density (std 0.85) contributes ~1500x more than cov_xt
+    # (std 0.02) -- so only density and active_site_ratio ever get optimized.
+    # w_d = 1/var_d makes the objective a plain mean of squared errors
+    # measured in each dimension's own std units.
+    ctx_dim_weights: Optional[Any] = None,
+    ctx_cf_sigma_start: float = 0.25,
+    ctx_cf_sigma_end: float = 1.0,
+    ctx_cf_pair_p: float = 0.5,
+    ctx_cf_start_epoch: int = 0,
+    ctx_cf_warmup_epochs: int = 10,
     
     # ---- hierarchical refinement supervision ----
     refinement_loss_weights: Optional[list[float]] = None,
@@ -72,7 +117,9 @@ def fit_vqvae(
     
     # ---- hierarchical VQ schedule ----
     level2_start_epoch: int = 1,
+    level3_start_epoch: int = 1,
     level2_full_loss_epoch: int = 20,
+    level3_full_loss_epoch: int = 50,
     
     # ---- CFG FiLM conditioning dropout schedule (per-sample) ----
     cfg_ctx_drop_start: float = 0.0,     # start p(drop conditioning)
@@ -208,7 +255,17 @@ def fit_vqvae(
             "loss_isi": 0.0,
             
             "loss_ctx": 0.0,
+            "loss_ctx_raw": 0.0,
             "loss_ctx_field": 0.0,
+            "latent_hidden_frac": 0.0,
+            "latent_hidden_active_frac": 0.0,
+            "loss_ctx_cf": 0.0,
+            "ctx_steer_gain": 0.0,
+            "ctx_steer_batches": 0.0,
+            "ctx_cf_bank_frac": 0.0,
+            "ctx_cf_pair_frac": 0.0,
+            "ctx_cf_displacement": 0.0,
+            "ctx_cf_batches": 0.0,
             "loss_sp_cons": 0.0,
             "loss_sp_token": 0.0,
             "loss_sp_pixel": 0.0,
@@ -251,10 +308,17 @@ def fit_vqvae(
         }
         
         # ---- hierarchy schedule ----
+        # Was hardcoded to 1-or-2, which silently capped a 3-level model at two
+        # levels every epoch, overriding the constructor. Level 3 was allocated
+        # (1024 entries) but never assigned: perplexity_nonblank_l3 = 0.
+        _L_max = int(getattr(model.vq, "num_quantizers", 1))
         if epoch < level2_start_epoch:
-            model.vq.set_active_quantizers(1)
+            _n_active = 1
+        elif _L_max < 3 or epoch < level3_start_epoch:
+            _n_active = min(2, _L_max)
         else:
-            model.vq.set_active_quantizers(2)
+            _n_active = min(3, _L_max)
+        model.vq.set_active_quantizers(_n_active)
         
         max_ref_levels = int(getattr(model.vq, "num_quantizers", 1))
         
@@ -275,6 +339,13 @@ def fit_vqvae(
         sum_pred_mean_p = 0.0
         sum_tgt_mean    = 0.0
         num_batches = 0
+        ctx_diag_keys: set = set()
+
+        # Opt-in per-block context diagnostics.  These are what would have
+        # caught the first Stage 2C run immediately: a gate pinned at ~0 and a
+        # cross-attention output with zero across-patch variation.
+        for block in getattr(model, "dec_blocks", []):
+            block.collect_ctx_stats = bool(log_ctx_diagnostics)
 
         cfg_p = _cosine_ramp(
             epoch_idx=epoch,
@@ -282,6 +353,21 @@ def fit_vqvae(
             warmup_epochs=cfg_ctx_warmup_epochs,
             v0=cfg_ctx_drop_start,
             v1=cfg_ctx_drop_end,
+        )
+
+        # Counterfactual conditioning: the loss weight switches on at
+        # ctx_cf_start_epoch, and the request displacement grows from
+        # ctx_cf_sigma_start to ctx_cf_sigma_end so early requests stay
+        # physically achievable.
+        lambda_ctx_cf_eff = (
+            float(lambda_ctx_cf) if epoch >= ctx_cf_start_epoch else 0.0
+        )
+        ctx_cf_sigma_eff = _cosine_ramp(
+            epoch_idx=epoch,
+            start_epoch=ctx_cf_start_epoch,
+            warmup_epochs=ctx_cf_warmup_epochs,
+            v0=ctx_cf_sigma_start,
+            v1=ctx_cf_sigma_end,
         )
 
         cont_sample_mix_eff = _cosine_ramp(
@@ -316,6 +402,18 @@ def fit_vqvae(
                 refinement_loss_weights_eff = [1.0, 0.5]
             else:
                 refinement_loss_weights_eff = [0.75, 1.0]
+        elif L_active == 3:
+            # Two handovers instead of one, walking the tolerance ladder
+            # (1,1,1) -> (0,1,1) -> (0,0,0). level3_full_loss_epoch defaults to
+            # 50 rather than 40 so the second handover does not land on top of
+            # the ctx dim schedule completing at 40, which would confound two
+            # transitions in the same epochs.
+            if epoch < level2_full_loss_epoch:
+                refinement_loss_weights_eff = [1.0, 0.5, 0.25]
+            elif epoch < level3_full_loss_epoch:
+                refinement_loss_weights_eff = [0.75, 1.0, 0.5]
+            else:
+                refinement_loss_weights_eff = [0.5, 0.75, 1.0]
         else:
             raise ValueError(f"Unsupported active quantizer count: {L_active}")
         
@@ -335,22 +433,61 @@ def fit_vqvae(
                 raise KeyError('Batch missing "task_id".')
             task_id = task_id.to(device, non_blocking=True).long()
             
+            _last_handover = (
+                level3_full_loss_epoch if L_active >= 3 else level2_full_loss_epoch
+            )
             do_refinement_supervision = (
-                (epoch < level2_full_loss_epoch)
+                (epoch < _last_handover)
                 or (num_batches % 100 == 0)
             )
             num_batches += 1
             
+            # ---- counterfactual context request ----
+            # ctx_dims for this epoch is resolved below from
+            # ctx_epoch_schedule; recompute it here so the perturbation only
+            # touches dimensions that actually carry a loss term.
+            cf_dims = tuple(
+                d for d, ep0 in sorted(ctx_epoch_schedule.items())
+                if epoch >= ep0
+            )
+            lct_cf = None
+            gct_cf = None
+            if (
+                lambda_ctx_cf_eff > 0.0
+                and isinstance(lct, torch.Tensor)
+                and local_ctx_std is not None
+                and len(cf_dims) > 0
+            ):
+                (lct_cf, gct_cf), cf_stats = perturb_local_ctx(
+                    lct,
+                    local_ctx_std,
+                    dims=cf_dims,
+                    global_ctx=gct,
+                    bank=local_ctx_bank,
+                    assay_idx=batch.get("assay_idx", None),
+                    pair_p=float(ctx_cf_pair_p),
+                    sigma_scale=ctx_cf_sigma_eff,
+                    return_stats=True,
+                )
+                sums["ctx_cf_bank_frac"] += cf_stats.get("bank_frac", 0.0)
+                sums["ctx_cf_pair_frac"] += cf_stats.get("pair_frac", 0.0)
+                sums["ctx_cf_displacement"] += cf_stats.get("displacement", 0.0)
+                sums["ctx_cf_batches"] += 1.0
+
             with torch.cuda.amp.autocast(enabled=amp_enabled):
                 out = model(
                     x,
                     global_ctx=gct,
                     local_ctx=lct,
+                    counterfactual_local_ctx=lct_cf,
+                    counterfactual_global_ctx=gct_cf,
                     predict_mask_spec=predict_mask_spec,
                     cfg_ctx_drop_p=cfg_p,
                     roi_hw=roi_hw,
                     pad_hw=pad_hw,
                     return_all_refinements=do_refinement_supervision,
+                    mask_latents=mask_latents,
+                    latent_recon_drop_p=latent_recon_drop_p,
                 )                
                 vq_loss = out["vq_loss"]
                 z_e_active = out["z_e_active"]
@@ -524,40 +661,74 @@ def fit_vqvae(
                     logits_ref = _get_ref_logits(ref)
                     level_id = int(ref.get("level", ridx))
                     is_final_refinement = ridx == num_ref
+
+                    # Single-quantizer models have no coarse companion decode,
+                    # so their sole pass is is_final_refinement from epoch 1 and
+                    # never sees the tolerant curriculum that shapes z1 over the
+                    # first level2_full_loss_epoch epochs of a two-level run.
+                    # Without this the z1-size sweep confounds "one pass instead
+                    # of two" with "exact objective from scratch", while still
+                    # being scored on the tolerant metric. Give the single pass
+                    # the same curriculum: tolerant first, exact from
+                    # level2_full_loss_epoch on. L_active == 2 is untouched.
+                    if L_active == 1 and epoch < level2_full_loss_epoch:
+                        is_final_refinement = False
                 
-                    if not is_final_refinement:
-                        # ---- early/intermediate refinements: tolerant coarse supervision ----
-                        ref_parts = tolerant_spike_loss(
-                            logits=logits_ref,
-                            target=tgt_vol,
-                            mask_vol=mask_vol,
-                            pos_weight=pos_weight_eff,
-                            radius_t=rt,
-                            radius_h=rh,
-                            radius_w=rw,
-                            alpha_exact=1,
-                            beta_hit=0.1,
-                            gamma_peak=0.05,
-                            delta_multi=0.05,
-                            return_parts=True,
-                        )
+                    # ---- tolerance ladder ----
+                    # L=3 walks (1,1,1) -> (0,1,1) -> (0,0,0) keyed on level_id.
+                    # L<=2 reproduces the historical two-branch behaviour exactly.
+                    #
+                    # beta_hit STAYS NON-ZERO at zero tolerance. At radius
+                    # (0,0,0) the hit term's max_pool3d is the identity, so
+                    # loss_hit = -log(p[pos]).mean() -- an UNWEIGHTED,
+                    # POSITIVE-ONLY log-likelihood with no false-positive
+                    # counterbalance. That is NOT a duplicate of alpha_exact's
+                    # BCE, which carries pos_weight (decaying 100 -> 1 over the
+                    # first 100 epochs) and the negative term. beta_hit is the
+                    # only anchor holding probability up at true spikes once
+                    # pos_weight has decayed.
+                    # Setting it to 0 collapsed the model: pred_mean_p halved
+                    # (0.00179 -> 0.00088) and AUPRC_cond turned over
+                    # (0.03848 -> 0.02377) exactly at level3_full_loss_epoch=65,
+                    # when this tier took full weight. Target density is 0.00012,
+                    # so 99.99% zeros dominate the BCE without this term.
+                    #
+                    # peak/multi keep peak_radius_* at EVERY tier. Those are
+                    # decoupled from radius_* precisely so the profile is still
+                    # shaped once the hit tolerance vanishes (utils/losses.py:118);
+                    # without it the exact tier is per-voxel BCE with nothing
+                    # penalising a flat profile.
+                    if L_active >= 3:
+                        if level_id <= 1:
+                            tier = (rt, rh, rw, 0.10, gamma_peak_mid, delta_multi_mid)
+                        elif level_id == 2:
+                            tier = (0, 1, 1, 0.05, gamma_peak_mid, delta_multi_mid)
+                        else:
+                            tier = (0, 0, 0, 0.05, gamma_peak_final, delta_multi_final)
+                    elif not is_final_refinement:
+                        tier = (rt, rh, rw, 0.10, gamma_peak_mid, delta_multi_mid)
                     else:
-                        # ---- final refinement: mostly exact, weak local-tolerance auxiliary ----
-                        ref_parts = tolerant_spike_loss(
-                            logits=logits_ref,
-                            target=tgt_vol,
-                            mask_vol=mask_vol,
-                            pos_weight=pos_weight_eff,
-                            radius_t=0,
-                            radius_h=1,
-                            radius_w=1,
-                            alpha_exact=1,
-                            beta_hit=0.05,
-                            gamma_peak=0.01,
-                            delta_multi=0.01,
-                            return_parts=True,
-                        )
-                
+                        tier = (0, 1, 1, 0.05, gamma_peak_final, delta_multi_final)
+                    t_rt, t_rh, t_rw, t_beta, t_gamma, t_delta = tier
+
+                    ref_parts = tolerant_spike_loss(
+                        logits=logits_ref,
+                        target=tgt_vol,
+                        mask_vol=mask_vol,
+                        pos_weight=pos_weight_eff,
+                        radius_t=t_rt,
+                        radius_h=t_rh,
+                        radius_w=t_rw,
+                        alpha_exact=1,
+                        beta_hit=t_beta,
+                        gamma_peak=t_gamma,
+                        delta_multi=t_delta,
+                        peak_radius_t=peak_radius_t,
+                        peak_radius_h=peak_radius_h,
+                        peak_radius_w=peak_radius_w,
+                        return_parts=True,
+                    )
+
                     ref_total = ref_parts["total"]
                     recon_total = recon_total + float(w_ref) * ref_total
                     
@@ -667,9 +838,40 @@ def fit_vqvae(
                     logits_b1thw=logits_vol_raw,
                     ctx_tgt_b9=lct,
                     dims=ctx_dims,
+                    weights=ctx_dim_weights,
                     tau=0.25,
                     prob_threshold=active_prob_threshold,
                 )
+                # Unweighted mirror of loss_ctx, logged only.  The stored
+                # Stage 1 report recorded the unweighted quantity, so this is
+                # what makes a rebalanced run comparable to it at matched
+                # epochs.
+                loss_ctx_raw = loss_ctx
+                if ctx_dim_weights is not None:
+                    with torch.no_grad():
+                        loss_ctx_raw = ctx_loss_soft(
+                            logits_b1thw=logits_vol_raw,
+                            ctx_tgt_b9=lct,
+                            dims=ctx_dims,
+                            tau=0.25,
+                            prob_threshold=active_prob_threshold,
+                        )
+
+                # Per-dimension ctx error, raw units.  This is the direct test
+                # of whether rebalancing actually moved the under-supervised
+                # moments, rather than inferring it from an aggregate.
+                if log_ctx_diagnostics and len(ctx_dims) > 0:
+                    with torch.no_grad():
+                        _f = ctx_features_soft_from_logits(
+                            logits_vol_raw.float(), tau=0.25,
+                            prob_threshold=active_prob_threshold,
+                        )
+                        _e = (_f - lct.to(_f)).pow(2).mean(0)
+                        for _d in ctx_dims:
+                            _k = f"ctxerr_d{_d}"
+                            sums[_k] = sums.get(_k, 0.0) + float(_e[_d].cpu())
+                            ctx_diag_keys.add(_k)
+
                 lambda_ctx_field_eff = (
                     float(lambda_ctx_field)
                     * float(ctx_ramp)
@@ -690,6 +892,23 @@ def fit_vqvae(
                         prob_threshold=active_prob_threshold,
                     )
                 
+                # --- counterfactual controllability loss ---
+                # The request in lct_cf disagrees with what the codes encode.
+                # Only using the context can satisfy this term, so it is the
+                # gradient that actually trains the local context head.
+                loss_ctx_cf = logits_vol_raw.new_zeros(())
+                logits_cf = out.get("logits_vol_raw_cf", None)
+
+                if logits_cf is not None and lct_cf is not None:
+                    loss_ctx_cf = ctx_loss_soft(
+                        logits_b1thw=logits_cf,
+                        ctx_tgt_b9=lct_cf,
+                        dims=cf_dims,
+                        weights=ctx_dim_weights,
+                        tau=0.25,
+                        prob_threshold=active_prob_threshold,
+                    )
+
                 # --- blank patch enforcing loss ---
                 t_blank = (epoch - blank_start_epoch) / max(1, blank_warmup_epochs)
                 t_blank = min(1.0, max(0.0, t_blank))
@@ -839,6 +1058,7 @@ def fit_vqvae(
                 + lambda_cont_projection * loss_cont_projection
                 + lambda_cont_parent_margin * loss_cont_parent_margin
                 + lambda_ctx_eff * loss_ctx
+                + lambda_ctx_cf_eff * loss_ctx_cf
                 + lambda_ctx_field_eff * loss_ctx_field
                 + loss_sp_cons
                 + lambda_blank_eff * loss_blank + lambda_blank_sep_eff * loss_blank_sep
@@ -923,7 +1143,83 @@ def fit_vqvae(
             sums["loss_blank_sep"] += float(loss_blank_sep.detach().cpu())
             
             sums["loss_isi"] += float(loss_isi.detach().cpu())
+
+            latent_hidden_mask = out.get("latent_hidden_mask", None)
+            if latent_hidden_mask is not None:
+                sums["latent_hidden_frac"] += float(
+                    latent_hidden_mask.float().mean().detach().cpu()
+                )
+                # ~92% of tokens are blank at this spike density, so the
+                # overall hidden fraction badly overstates how much
+                # information the hole actually removes.  What matters is the
+                # share of ACTIVE tokens hidden.
+                active_mask_enc = out.get("active_mask", None)
+                if active_mask_enc is not None:
+                    n_active = active_mask_enc.sum()
+                    if int(n_active) > 0:
+                        sums["latent_hidden_active_frac"] += float(
+                            (
+                                (latent_hidden_mask & active_mask_enc).sum()
+                                / n_active
+                            ).detach().cpu()
+                        )
+
+            if log_ctx_diagnostics:
+                for layer_index in sorted(
+                    getattr(model, "decoder_cross_attn_layers", set())
+                ):
+                    block_stats = getattr(
+                        model.dec_blocks[layer_index], "_last_ctx_stats", None
+                    )
+                    if not block_stats:
+                        continue
+                    for stat_name, stat_value in block_stats.items():
+                        key = f"L{layer_index}_{stat_name}"
+                        sums[key] = sums.get(key, 0.0) + float(stat_value)
+                        ctx_diag_keys.add(key)
+
             sums["loss_ctx"] += float(loss_ctx.detach().cpu())
+            sums["loss_ctx_raw"] += float(loss_ctx_raw.detach().cpu())
+            sums["loss_ctx_cf"] += float(loss_ctx_cf.detach().cpu())
+
+            # Steering gain: does conditioning on the counterfactual request
+            # actually move the output toward it?  Compares the distance to
+            # the request achieved by the true-context decode against the
+            # counterfactual decode, over the supervised dims only.
+            # Positive means the control signal is doing work.
+            if logits_cf is not None and lct_cf is not None:
+                with torch.no_grad():
+                    dim_idx = list(cf_dims)
+                    feat_true = ctx_features_soft_from_logits(
+                        logits_vol_raw.float(),
+                        tau=0.25,
+                        prob_threshold=active_prob_threshold,
+                    )[:, dim_idx]
+                    feat_cf = ctx_features_soft_from_logits(
+                        logits_cf.float(),
+                        tau=0.25,
+                        prob_threshold=active_prob_threshold,
+                    )[:, dim_idx]
+                    target = lct_cf[:, dim_idx].to(feat_cf)
+                    err_true = (feat_true - target).pow(2).mean()
+                    err_cf = (feat_cf - target).pow(2).mean()
+                    sums["ctx_steer_gain"] += float((err_true - err_cf).cpu())
+                    sums["ctx_steer_batches"] += 1.0
+
+                    # Per-dimension, in std units, so no single dim can hide
+                    # the others behind its scale.
+                    if ctx_dim_weights is not None:
+                        w = torch.as_tensor(
+                            ctx_dim_weights, device=feat_cf.device
+                        )[dim_idx].sqrt()
+                        per_true = ((feat_true - target) * w).pow(2).mean(0)
+                        per_cf = ((feat_cf - target) * w).pow(2).mean(0)
+                        for j, d in enumerate(dim_idx):
+                            key = f"steer_d{d}"
+                            sums[key] = sums.get(key, 0.0) + float(
+                                (per_true[j] - per_cf[j]).cpu()
+                            )
+                            ctx_diag_keys.add(key)
             sums["loss_ctx_field"] += float(loss_ctx_field.detach().cpu())
             sums["loss_sp_cons"] += float(loss_sp_cons.detach().cpu())
             sums["loss_sp_token"] += float(loss_sp_token.detach().cpu())
@@ -1049,7 +1345,27 @@ def fit_vqvae(
             "loss_isi": sums["loss_isi"] / max(1, num_batches),
             
             "loss_ctx": sums["loss_ctx"] / max(1, num_batches),
+            "loss_ctx_raw": sums["loss_ctx_raw"] / max(1, num_batches),
             "loss_ctx_field": sums["loss_ctx_field"] / max(1, num_batches),
+            "latent_hidden_frac": sums["latent_hidden_frac"] / max(1, num_batches),
+            "latent_hidden_active_frac": (
+                sums["latent_hidden_active_frac"] / max(1, num_batches)
+            ),
+            "loss_ctx_cf": sums["loss_ctx_cf"] / max(1, num_batches),
+            "lambda_ctx_cf_eff": lambda_ctx_cf_eff,
+            "ctx_cf_sigma_eff": ctx_cf_sigma_eff,
+            "ctx_steer_gain": (
+                sums["ctx_steer_gain"] / max(1.0, sums["ctx_steer_batches"])
+            ),
+            "ctx_cf_bank_frac": (
+                sums["ctx_cf_bank_frac"] / max(1.0, sums["ctx_cf_batches"])
+            ),
+            "ctx_cf_pair_frac": (
+                sums["ctx_cf_pair_frac"] / max(1.0, sums["ctx_cf_batches"])
+            ),
+            "ctx_cf_displacement": (
+                sums["ctx_cf_displacement"] / max(1.0, sums["ctx_cf_batches"])
+            ),
             "loss_sp_cons": sums["loss_sp_cons"] / max(1, num_batches),
             "loss_sp_token": sums["loss_sp_token"] / max(1, num_batches),
             "loss_sp_pixel": sums["loss_sp_pixel"] / max(1, num_batches),
@@ -1125,7 +1441,23 @@ def fit_vqvae(
                 use_ROI_mask=use_ROI_mask,
                 recon_tolerance=recon_tolerance,
                 metric_tolerance=metric_tolerance,
+                mask_latents=mask_latents,
+                latent_recon_drop_p=latent_recon_drop_p,
+                eval_ctx_shuffle=bool(log_ctx_diagnostics),
             )
+
+            # Context effect sizes, reported next to the raw metrics so an
+            # inert context branch is visible in the epoch line rather than
+            # only discoverable by diffing cond/uncond columns afterwards.
+            if "val_loss_BCE_uncond" in eval_report:
+                eval_report["ctx_effect_bce"] = (
+                    eval_report["val_loss_BCE_uncond"]
+                    - eval_report["val_loss_BCE_cond"]
+                )
+                eval_report["ctx_effect_auprc_tol"] = (
+                    eval_report["AUPRC_tol_cond"]
+                    - eval_report["AUPRC_tol_uncond"]
+                )
 
             if val_metric_name in eval_report:
                 val_metric = eval_report[val_metric_name]
@@ -1137,6 +1469,14 @@ def fit_vqvae(
                 )
 
             train_log[val_metric_name] = val_metric
+            # Log BOTH AUPRC variants regardless of which one selects. Only the
+            # selected metric was stored, so every comparison ran on the tolerant
+            # number alone -- which structurally favours a diffuse field, since
+            # radius (1,1,1) is a 27-voxel neighbourhood a blurry model harvests
+            # cheaply. A sharper model looked worse with no way to see otherwise.
+            for _k in ("AUPRC_cond", "AUPRC_tol_cond"):
+                if eval_report is not None and _k in eval_report:
+                    train_log[_k] = float(eval_report[_k])
 
             # These remain raw evaluation operating points.
             exact_thr = eval_report["BestF1_threshold_cond"]
@@ -1148,6 +1488,9 @@ def fit_vqvae(
             )
 
             history["val_metrics"].append(eval_report)
+
+        for key in sorted(ctx_diag_keys):
+            train_log[key] = sums[key] / max(1, num_batches)
 
         history["train_log"].append(train_log)
 
@@ -1295,6 +1638,52 @@ def fit_vqvae(
                 log_str += f"  Thr_tol={eval_report['BestF1_threshold_tol_cond']:.3f}"
 
         print(log_str)
+
+        if log_ctx_diagnostics:
+            ctx_lines = [
+                "  [ctx] hidden_frac=%.3f hidden_active_frac=%.3f "
+                "ctx_cf=%.5f bank=%.2f pair=%.2f displ=%.2f steer_gain=%+.3e"
+                % (
+                    train_log.get("latent_hidden_frac", 0.0),
+                    train_log.get("latent_hidden_active_frac", 0.0),
+                    train_log.get("loss_ctx_cf", 0.0),
+                    train_log.get("ctx_cf_bank_frac", 0.0),
+                    train_log.get("ctx_cf_pair_frac", 0.0),
+                    train_log.get("ctx_cf_displacement", 0.0),
+                    train_log.get("ctx_steer_gain", 0.0),
+                )
+            ]
+            for layer_index in sorted(
+                getattr(model, "decoder_cross_attn_layers", set())
+            ):
+                prefix = f"L{layer_index}_"
+                fields = [
+                    (name, train_log[prefix + name])
+                    for name in (
+                        "ctx_gate_absmean",
+                        "ctx_delta_rms",
+                        "ctx_patch_selectivity",
+                        "ctx_attn_entropy_frac",
+                        "ctx_attn_query_spread",
+                    )
+                    if (prefix + name) in train_log
+                ]
+                if fields:
+                    ctx_lines.append(
+                        f"  [ctx] block{layer_index} "
+                        + " ".join(f"{n}={v:.4f}" for n, v in fields)
+                    )
+            if val_loader is not None and len(history["val_metrics"]) > 0:
+                last_val = history["val_metrics"][-1]
+                ctx_lines.append(
+                    "  [ctx] effect_bce=%+.5f effect_auprc_tol=%+.5f specificity_bce=%+.5f"
+                    % (
+                        last_val.get("ctx_effect_bce", float("nan")),
+                        last_val.get("ctx_effect_auprc_tol", float("nan")),
+                        last_val.get("ctx_specificity_bce", float("nan")),
+                    )
+                )
+            print("\n".join(ctx_lines))
         print(" ")
 
         

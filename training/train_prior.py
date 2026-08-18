@@ -9,7 +9,6 @@ from typing import Union
 
 from ..model.prior import (
     build_activity_targets_from_codes,
-    detr_activity_loss,
 )
 
 from ..inference.decode import decode_motif_logits_soft_given_activity
@@ -168,11 +167,16 @@ def _vq_codes_alpha_and_pmask(vqvae, x, gct, lct, mask_spec, device):
 
 
 def expected_code_distance_loss(logits, target, mask, distance_matrix):
-    """Expected normalized z1 codebook distance from the target code."""
+    """Expected normalized z1 codebook distance from the target code.
+
+    Computed in fp32. Under AMP the incoming logits are fp16 while softmax is
+    promoted to fp32, so mixing them silently relies on type promotion; forcing
+    fp32 keeps this small reduction both correct and numerically stable.
+    """
     mask = mask.bool()
     if not mask.any():
         return logits.sum() * 0.0
-    lm = logits[mask]
+    lm = logits[mask].float()
     ym = target[mask].long()
     p = F.softmax(lm, dim=-1)
     d = distance_matrix.to(device=lm.device, dtype=lm.dtype)[ym]
@@ -190,7 +194,11 @@ def distance_neighborhood_ce_loss(
     mask = mask.bool()
     if not mask.any():
         return logits.sum() * 0.0
-    lm = logits[mask]
+    # fp32 throughout. Under AMP `logits` is fp16 but F.softmax below is
+    # promoted to fp32, and scatter() requires the destination and source to
+    # share a dtype, so building `q` from a fp16 zeros_like raised
+    # "scatter(): Expected self.dtype to be equal to src.dtype".
+    lm = logits[mask].float()
     ym = target[mask].long()
     dist = distance_matrix.to(device=lm.device, dtype=lm.dtype)[ym]
     k = max(1, min(int(k), dist.size(-1)))
@@ -376,7 +384,9 @@ def train_motif_prior_mgit(
             ensure_at_least_one_mask=ensure_at_least_one_mask,
             full_mask_prob=full_mask_prob,
         )
-        targets["z1_teacher_prob"] = z1_teacher_prob
+        # Permanent teacher forcing for the ALPHA branch only; the z1 head
+        # is still trained against its own predictions via its CE loss.
+        targets["z1_teacher_prob"] = 1.0
 
         return a_in, z1_in, z2_in, alpha_in, targets
 
@@ -464,7 +474,7 @@ def train_motif_prior_mgit(
                     
                     # z2 is continuous alpha now; its stochastic logistic-normal
                     # loss is already included in loss_ce_raw by motif_prior.
-                    loss_topk_z2 = logits["alpha_mu"].sum() * 0.0
+                    loss_topk_z2 = logits["alpha_concentration"].sum() * 0.0
                     loss_topk = (
                         float(lambda_z1_neighbor_ce) * loss_topk_z1
                         + float(lambda_z1_distance) * loss_z1_distance
@@ -674,7 +684,7 @@ def train_motif_prior_mgit(
                     
                     # z2 is continuous alpha now; its stochastic logistic-normal
                     # loss is already included in loss_ce_raw by motif_prior.
-                    loss_topk_z2 = logits["alpha_mu"].sum() * 0.0
+                    loss_topk_z2 = logits["alpha_concentration"].sum() * 0.0
                     loss_topk = (
                         float(lambda_z1_neighbor_ce) * loss_topk_z1
                         + float(lambda_z1_distance) * loss_z1_distance
@@ -849,8 +859,10 @@ def train_motif_prior_mgit(
                 motif_prior.K1,
                 topk=topk_z1,
             )
+            # Log of the Dirichlet mean, so softmax() inside the metric
+            # recovers the mean exactly and both argmax and entropy stay valid.
             mz2 = _masked_cls_metrics(
-                logits["alpha_mu"],
+                logits["alpha_mean"].clamp_min(1e-8).log(),
                 targets["alpha"].argmax(dim=-1),
                 z2_mask,
                 motif_prior.K2,
@@ -949,6 +961,15 @@ def train_motif_prior_mgit(
 
     best_val = float("inf")
     patience = 0
+    # Separate accuracy-selected checkpoint.
+    #
+    # Selecting on total validation loss alone is unsafe here: as the model
+    # sharpens, confident errors raise cross-entropy even while z1 accuracy
+    # improves, so loss and accuracy diverge and the loss-best epoch can be
+    # materially worse at the actual task. Track both and always keep a copy
+    # of the best-z1-accuracy epoch.
+    best_val_z1_acc = -1.0
+    ckpt_acc_out = os.path.splitext(ckpt_out)[0] + "_best_z1acc.pt"
     history = {"train": [], "val": []}
 
     for ep in range(1, epochs + 1):
@@ -996,6 +1017,22 @@ def train_motif_prior_mgit(
             f"sup_z2/sample={val_m['supervised_z2_tokens_per_sample']:.1f}"
         )
 
+        current_z1_acc = float(val_m.get("z1_acc", -1.0))
+        if current_z1_acc > best_val_z1_acc:
+            best_val_z1_acc = current_z1_acc
+            torch.save(
+                {
+                    # Key must be "model" to match the loss-selected checkpoint
+                    # and main._load_stage3_motif_best, which reads ckpt["model"].
+                    "model": motif_prior.state_dict(),
+                    "epoch": ep,
+                    "best_val_z1_acc": best_val_z1_acc,
+                    "val_loss_at_best_acc": float(val_m["loss"]),
+                },
+                ckpt_acc_out,
+            )
+            print(f"  saved {ckpt_acc_out}  best_z1_acc={best_val_z1_acc:.4f}")
+
         if val_m["loss"] < best_val - float(min_delta):
             best_val = val_m["loss"]
             patience = 0
@@ -1018,750 +1055,11 @@ def train_motif_prior_mgit(
 
 
 
-def train_activity_prior_detr(
-    activity_prior,
-    vqvae,
-    opt,
-    train_loader,
-    val_loader=None,
-    *,
-    epochs: int = 20,
-    grad_clip: float = 1.0,
-    ckpt_out: str = "ckpts/activity_prior_best.pt",
-    early_stop_patience: int = 5,
-    min_delta: float = 0.0,
-    use_amp: bool = True,
-    grad_accum_steps: int = 1,
-    log_every: int = 50,
-    blank_code: int = None,
-    lambda_count: float = 1.0,
-    lambda_count_neighbor: float = 0.25,
-    lambda_count_distance: float = 0.05,
-    lambda_obj: float = 1.0,
-    lambda_coord: float = 1.0,
-    lambda_soft_count: float = 0.1,
-    lambda_soft_grid: float = 1.0,
-    lambda_dup: float = 0.01,
-    no_object_weight: float = 0.1,
-    count_neighbor_k: int = 11,
-    count_neighbor_tau: float = 2.0,
-    count_distance_scale: float = 5.0,
-    soft_count_beta: float = 5.0,
-):
-    """
-    Stage 3B.
 
-    Trains DETRActivityPrior only:
-        global_ctx + local_ctx + task_id -> count + sparse activity coordinates
 
-    VQVAE is frozen and only provides target codes.
-    """
 
-    device = next(activity_prior.parameters()).device
-    amp_enabled = bool(use_amp and device.type == "cuda")
-    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
 
-    _freeze_module(vqvae)
 
-    os.makedirs(os.path.dirname(ckpt_out) or ".", exist_ok=True)
-
-    if blank_code is None:
-        blank_code = getattr(vqvae.vq, "blank_code", -1)
-
-    token_grid = (
-        activity_prior.Ttok,
-        activity_prior.Htok,
-        activity_prior.Wtok,
-    )
-
-    def _run_epoch(loader, train: bool):
-        activity_prior.train(train)
-
-        total = {}
-        total_samples = 0.0
-
-        for it, batch in enumerate(loader, start=1):
-            x, gct, lct, task_id, mask_spec = _batch_to_device(batch, device)
-
-            with torch.no_grad():
-                codes, pmask, _ = _vq_codes_and_pmask(vqvae, x, gct, lct, mask_spec, device)
-                targets = build_activity_targets_from_codes(
-                    codes=codes,
-                    token_grid=token_grid,
-                    Kmax=activity_prior.Kmax,
-                    blank_code=blank_code,
-                    predict_mask=pmask,
-                )
-                
-                a_in = _make_activity_in_from_codes(
-                    codes,
-                    pmask,
-                    blank_code=blank_code,
-                    a_mask_id=activity_prior.a_mask_id,
-                )
-
-            if train:
-                if (it - 1) % grad_accum_steps == 0:
-                    opt.zero_grad(set_to_none=True)
-
-                with torch.cuda.amp.autocast(enabled=amp_enabled):
-                    out = activity_prior(
-                        global_ctx=gct,
-                        local_ctx=lct,
-                        task_id=task_id,
-                        a_in=a_in,
-                        roi_mask=pmask,
-                    )
-
-                    loss, aux = detr_activity_loss(
-                        out,
-                        targets,
-                        activity_prior,
-                        lambda_count=lambda_count,
-                        lambda_count_neighbor=lambda_count_neighbor,
-                        lambda_count_distance=lambda_count_distance,
-                        lambda_obj=lambda_obj,
-                        lambda_coord=lambda_coord,
-                        lambda_soft_count=lambda_soft_count,
-                        lambda_soft_grid=lambda_soft_grid,
-                        lambda_dup=lambda_dup,
-                        no_object_weight=no_object_weight,
-                        count_neighbor_k=count_neighbor_k,
-                        count_neighbor_tau=count_neighbor_tau,
-                        count_distance_scale=count_distance_scale,
-                        soft_count_beta=soft_count_beta,
-                    )
-
-                scaler.scale(loss / float(grad_accum_steps)).backward()
-
-                do_step = (it % grad_accum_steps == 0) or (it == len(loader))
-                if do_step:
-                    if grad_clip is not None and grad_clip > 0:
-                        scaler.unscale_(opt)
-                        torch.nn.utils.clip_grad_norm_(
-                            activity_prior.parameters(),
-                            float(grad_clip),
-                        )
-                    scaler.step(opt)
-                    scaler.update()
-
-            else:
-                with torch.no_grad():
-                    out = activity_prior(
-                        global_ctx=gct,
-                        local_ctx=lct,
-                        task_id=task_id,
-                        a_in=a_in,
-                        roi_mask=pmask,
-                    )
-                    loss, aux = detr_activity_loss(
-                        out,
-                        targets,
-                        activity_prior,
-                        lambda_count=lambda_count,
-                        lambda_count_neighbor=lambda_count_neighbor,
-                        lambda_count_distance=lambda_count_distance,
-                        lambda_obj=lambda_obj,
-                        lambda_coord=lambda_coord,
-                        lambda_soft_count=lambda_soft_count,
-                        lambda_soft_grid=lambda_soft_grid,
-                        lambda_dup=lambda_dup,
-                        no_object_weight=no_object_weight,
-                        count_neighbor_k=count_neighbor_k,
-                        count_neighbor_tau=count_neighbor_tau,
-                        count_distance_scale=count_distance_scale,
-                        soft_count_beta=soft_count_beta,
-                    )
-
-            B = x.size(0)
-            total_samples += float(B)
-
-            for k, v in aux.items():
-                if torch.is_tensor(v):
-                    v = float(v.detach().item())
-                total[k] = total.get(k, 0.0) + float(v) * float(B)
-
-            if train and log_every and (it % log_every == 0):
-                den = max(total_samples, 1.0)
-                print(
-                    f"  [3B Activity] it {it:05d}: "
-                    f"loss={total['loss'] / den:.4f} "
-                    f"count={total['loss_count'] / den:.4f} "
-                    f"count_exact={total['loss_count_exact'] / den:.4f} "
-                    f"count_neighbor={total['loss_count_neighbor'] / den:.4f} "
-                    f"count_dist={total['loss_count_distance'] / den:.4f} "
-                    f"obj={total['loss_obj'] / den:.4f} "
-                    f"coord={total['loss_coord'] / den:.4f} "
-                    f"soft_count={total['loss_soft_count'] / den:.4f} "
-                    f"dup={total['loss_dup'] / den:.4f} "
-                    f"eventK={total['event_soft_count_mean'] / den:.2f} "
-                    f"countE={total['count_expected_mean'] / den:.2f} "
-                    f"modeK={total['count_mode_mean'] / den:.2f} "
-                    f"tgtK={total['target_count_mean'] / den:.2f} "
-                    f"maeE={total['count_expected_mae'] / den:.2f} "
-                    f"within5={total['count_within_5'] / den:.3f}"
-                )
-
-        den = max(total_samples, 1.0)
-        return {k: v / den for k, v in total.items()}
-
-    best_val = float("inf")
-    patience = 0
-    history = {"train": [], "val": []}
-
-    for ep in range(1, epochs + 1):
-        train_m = _run_epoch(train_loader, train=True)
-        val_m = _run_epoch(val_loader, train=False) if val_loader is not None else train_m
-
-        history["train"].append(train_m)
-        history["val"].append(val_m)
-
-        print(
-            f"[activity epoch {ep:03d}] "
-            f"train loss={train_m['loss']:.4f} "
-            f"val loss={val_m['loss']:.4f} "
-            f"count={val_m['loss_count']:.4f} "
-            f"count_exact={val_m['loss_count_exact']:.4f} "
-            f"count_neighbor={val_m['loss_count_neighbor']:.4f} "
-            f"count_dist={val_m['loss_count_distance']:.4f} "
-            f"obj={val_m['loss_obj']:.4f} "
-            f"coord={val_m['loss_coord']:.4f} "
-            f"soft_count={val_m['loss_soft_count']:.4f} "
-            f"dup={val_m['loss_dup']:.4f} "
-            f"eventK={val_m['event_soft_count_mean']:.2f} "
-            f"countE={val_m['count_expected_mean']:.2f} "
-            f"modeK={val_m['count_mode_mean']:.2f} "
-            f"tgtK={val_m['target_count_mean']:.2f} "
-            f"rawK={val_m['target_raw_count_mean']:.2f} "
-            f"maeE={val_m['count_expected_mae']:.2f} "
-            f"top5={val_m['count_top5_acc']:.3f} "
-            f"within5={val_m['count_within_5']:.3f} "
-            f"H={val_m['count_entropy']:.3f}"
-        )
-
-        if val_m["loss"] < best_val - float(min_delta):
-            best_val = val_m["loss"]
-            patience = 0
-            torch.save(
-                {
-                    "model": activity_prior.state_dict(),
-                    "epoch": ep,
-                    "best_val_loss": best_val,
-                    "token_grid": token_grid,
-                    "Kmax": activity_prior.Kmax,
-                },
-                ckpt_out,
-            )
-            print(f"  saved {ckpt_out}  best={best_val:.4f}")
-        else:
-            patience += 1
-            if patience >= int(early_stop_patience):
-                print(f"Early stopping at epoch {ep}; best={best_val:.4f}")
-                break
-
-    return history
-
-
-
-
-def train_activity_prior_with_frozen_motif(
-    activity_prior,
-    motif_prior,
-    vqvae,
-    opt,
-    train_loader,
-    val_loader=None,
-    *,
-    epochs: int = 20,
-    grad_clip: float = 1.0,
-    ckpt_out: str = "ckpts/activity_prior_refined_best.pt",
-    early_stop_patience: int = 5,
-    min_delta: float = 0.0,
-    use_amp: bool = True,
-    grad_accum_steps: int = 1,
-    log_every: int = 50,
-    blank_code: int = None,
-    freeze_motif: bool = True,
-    lambda_detr: float = 1.0,
-    lambda_count: float = 1.0,
-    lambda_count_neighbor: float = 0.25,
-    lambda_count_distance: float = 0.05,
-    lambda_obj: float = 1.0,
-    lambda_coord: float = 1.0,
-    lambda_soft_count: float = 0.1,
-    lambda_soft_grid: float = 1.0,
-    lambda_dup: float = 0.01,
-    no_object_weight: float = 0.1,
-    count_neighbor_k: int = 11,
-    count_neighbor_tau: float = 2.0,
-    count_distance_scale: float = 5.0,
-    soft_count_beta: float = 5.0,
-    
-    lambda_ctx: float = 1.0,
-    lambda_ctx_field: float = 0.05,
-    lambda_adj: float = 1.0,
-    lambda_spatial: float = 1.0,
-    
-    ctx_tau: float = 0.25,
-    ctx_field_tau: float = 0.25,
-    
-    motif_tau_z: float = 0.25,
-    isi_tau: float = 0.25,
-    isi_margin: float = 0.25,
-    isi_lower_margin: float = 0.20,
-    isi_lower_weight: float = 0.50,
-    isi_max_gap: int = 3,
-    isi_gap_bins=None,
-    memory_adj=None,
-    memory_tok=None,
-    memory_adj_conf_den_scale: float = 100.0,
-):
-    """
-    Stage 3C.
-
-    Refines DETRActivityPrior through frozen/low-LR motif prior and frozen VQVAE.
-
-    Path:
-        activity_prior(ctx) -> soft activity_prob
-        motif_prior.forward_with_activity_prob(...)
-        decode_motif_logits_soft_given_activity(...)
-        voxel biological losses
-        gradients update activity_prior
-    """
-
-    device = next(activity_prior.parameters()).device
-    amp_enabled = bool(use_amp and device.type == "cuda")
-    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
-
-    _freeze_module(vqvae)
-
-    if freeze_motif:
-        _freeze_module(motif_prior)
-    else:
-        motif_prior.train()
-
-    os.makedirs(os.path.dirname(ckpt_out) or ".", exist_ok=True)
-
-    if blank_code is None:
-        blank_code = getattr(vqvae.vq, "blank_code", -1)
-
-    token_grid = (
-        activity_prior.Ttok,
-        activity_prior.Htok,
-        activity_prior.Wtok,
-    )
-
-    def _make_roi_mask_inputs(motif_targets):
-        z1_in = motif_targets["z1"].clone()
-        z2_in = motif_targets["z2"].clone()
-    
-        active = motif_targets["active"].bool()
-        pmask = motif_targets["predict_mask"].bool()
-    
-        z1_in[~active] = motif_prior.z1_null_id
-        z2_in[~active] = motif_prior.z2_null_id
-    
-        motif_mask = pmask
-        z1_in[motif_mask] = motif_prior.z1_mask_id
-        z2_in[motif_mask] = motif_prior.z2_mask_id
-    
-        alpha_in = motif_targets["alpha"].clone()
-        alpha_in[~active] = 0.0
-        alpha_in[motif_mask] = 0.0
-        
-        return z1_in, z2_in, alpha_in
-
-    def _run_epoch(loader, train: bool):
-        activity_prior.train(train)
-
-        if freeze_motif:
-            motif_prior.eval()
-        else:
-            motif_prior.train(train)
-
-        total = {}
-        total_samples = 0.0
-
-        for it, batch in enumerate(loader, start=1):
-            x, gct, lct, task_id, mask_spec = _batch_to_device(batch, device)
-
-            with torch.no_grad():
-                codes, alpha_target, pmask, grid = _vq_codes_alpha_and_pmask(
-                    vqvae, x, gct, lct, mask_spec, device
-                )
-
-                activity_targets = build_activity_targets_from_codes(
-                    codes=codes,
-                    token_grid=token_grid,
-                    Kmax=activity_prior.Kmax,
-                    blank_code=blank_code,
-                    predict_mask=pmask,
-                )
-
-                motif_targets = motif_prior.make_targets_from_codes(
-                    codes=codes,
-                    predict_mask=pmask,
-                    blank_code=blank_code,
-                    alpha=alpha_target,
-                )
-
-                # Predict only ROI tokens; outside ROI remains teacher-forced.
-                
-                active = motif_targets["a"].bool()
-                roi_mask = motif_targets["predict_mask"].bool()
-
-                motif_targets["z1_loss_mask"] = roi_mask & active
-                motif_targets["z2_loss_mask"] = roi_mask & active
-                motif_targets["z_loss_mask"] = roi_mask & active
-                
-                # Motif CE remains restricted to GT-active tokens, but soft decoding
-                # must use motif predictions anywhere Stage 3C predicts soft activity.
-                motif_targets["decode_motif_mask"] = roi_mask
-                
-                z1_in, z2_in, alpha_in = _make_roi_mask_inputs(motif_targets)
-                
-                a_in = _make_activity_in_from_codes(
-                    codes,
-                    pmask,
-                    blank_code=blank_code,
-                    a_mask_id=activity_prior.a_mask_id,
-                )
-
-            if train:
-                if (it - 1) % grad_accum_steps == 0:
-                    opt.zero_grad(set_to_none=True)
-
-                context = torch.enable_grad()
-            else:
-                context = torch.no_grad()
-
-            with context:
-                with torch.cuda.amp.autocast(enabled=amp_enabled):
-                    activity_out = activity_prior(
-                        global_ctx=gct,
-                        local_ctx=lct,
-                        task_id=task_id,
-                        a_in=a_in,
-                        roi_mask=pmask,
-                    )
-
-                    loss_detr, aux_detr = detr_activity_loss(
-                        activity_out,
-                        activity_targets,
-                        activity_prior,
-                        lambda_count=lambda_count,
-                        lambda_count_neighbor=lambda_count_neighbor,
-                        lambda_count_distance=lambda_count_distance,
-                        lambda_obj=lambda_obj,
-                        lambda_coord=lambda_coord,
-                        lambda_soft_count=lambda_soft_count,
-                        lambda_soft_grid=lambda_soft_grid,
-                        lambda_dup=lambda_dup,
-                        no_object_weight=no_object_weight,
-                        count_neighbor_k=count_neighbor_k,
-                        count_neighbor_tau=count_neighbor_tau,
-                        count_distance_scale=count_distance_scale,
-                        soft_count_beta=soft_count_beta,
-                    )
-
-                    activity_prob_roi = activity_prior.soft_activity_flat(activity_out, roi_mask=pmask)
-
-                    pmask_bool = motif_targets["predict_mask"].bool()
-                    gt_activity = motif_targets["a"].to(
-                        device=activity_prob_roi.device,
-                        dtype=activity_prob_roi.dtype,
-                    )
-                    
-                    activity_prob = torch.where(
-                        pmask_bool,
-                        activity_prob_roi,
-                        gt_activity,
-                    )
-
-                    motif_logits = motif_prior.forward_with_activity_prob(
-                        z1_in=z1_in,
-                        z2_in=z2_in,
-                        activity_prob=activity_prob,
-                        global_ctx=gct,
-                        local_ctx=lct,
-                        task_id=task_id,
-                        roi_mask=pmask,
-                        alpha_in=alpha_in,
-                    )
-
-                    dec = decode_motif_logits_soft_given_activity(
-                        model=vqvae,
-                        logits=motif_logits,
-                        targets=motif_targets,
-                        activity_prob=activity_prob,
-                        grid=grid,
-                        global_ctx=gct,
-                        local_ctx=lct,
-                        tau_z=motif_tau_z,
-                        roi_hw=batch.get("roi_hw", None),
-                        pad_hw=batch.get("pad_hw", None),
-                    )
-
-                    logits_vol = dec["logits_vol"]
-
-                    loss_ctx = loss_detr.new_zeros(())
-                    loss_ctx_field = loss_detr.new_zeros(())
-                    loss_adj = loss_detr.new_zeros(())
-                    loss_spatial = loss_detr.new_zeros(())
-
-                    if lambda_ctx > 0.0 and lct is not None:
-                        loss_ctx = ctx_loss_soft(
-                            logits_b1thw=logits_vol,
-                            ctx_tgt_b9=lct,
-                            dims=tuple(range(9)),
-                            tau=ctx_tau,
-                            prob_threshold=float(
-                                float(vqvae.best_thr_tol.item())
-                            ),
-                        )
-
-                    if lambda_ctx_field > 0.0:
-                        _, _, T_dec, H_dec, W_dec = logits_vol.shape
-
-                        target_vol = x[
-                            :,
-                            :1,
-                            :T_dec,
-                            :H_dec,
-                            :W_dec,
-                        ]
-
-                        if target_vol.shape != logits_vol.shape:
-                            raise RuntimeError(
-                                "Stage 3C local field target/decoder shape mismatch: "
-                                f"target={tuple(target_vol.shape)}, "
-                                f"logits={tuple(logits_vol.shape)}"
-                            )
-
-                        loss_ctx_field = local_moment_field_loss(
-                            logits_b1thw=logits_vol,
-                            target_b1thw=target_vol,
-                            patch_size=vqvae.patch_size,
-                            tau=ctx_field_tau,
-                            min_active_spikes=1,
-                            min_shape_spikes=5,
-                            min_trend_spikes=6,
-                            min_trend_frames=3,
-                            prob_threshold=float(
-                                float(vqvae.best_thr_tol.item())
-                            ),
-                        )
-
-                    if lambda_adj > 0.0:
-                        if memory_adj is None:
-                            raise RuntimeError("lambda_adj > 0 but memory_adj is None.")
-
-                        adj_target_bg = memory_adj.get(
-                            gct,
-                            device=device,
-                            dtype=torch.float32,
-                        )
-
-                        adj_conf_bg = memory_adj.get_confidence(
-                            gct,
-                            device=device,
-                            dtype=torch.float32,
-                            den_scale=memory_adj_conf_den_scale,
-                        )
-
-                        adj_parts = short_gap_excess_loss_from_logits_batch_targets(
-                            logits_b1thw=logits_vol.float(),
-                            target_gap_rates_bg=adj_target_bg.float(),
-                            max_gap=isi_max_gap,
-                            gap_bins=isi_gap_bins,
-                            tau=isi_tau,
-                            prob_threshold=float(
-                                float(vqvae.best_thr_tol.item())
-                            ),
-                            margin=isi_margin,
-                            lower_margin=isi_lower_margin,
-                            lower_weight=isi_lower_weight,
-                            confidence_bg=adj_conf_bg.float(),
-                            return_parts=True,
-                        )
-
-                        loss_adj = torch.nan_to_num(
-                            adj_parts["loss"],
-                            nan=0.0,
-                            posinf=1e3,
-                            neginf=0.0,
-                        )
-
-                    if lambda_spatial > 0.0 and memory_tok is not None and gct is not None:
-                        full_teacher_tok = memory_tok.get(
-                            gct,
-                            device=device,
-                            dtype=logits_vol.dtype,
-                        )
-
-                        _, _, _, Hp, Wp = logits_vol.shape
-                        _, pH, pW = vqvae.patch_size
-                        h_tok = Hp // pH
-                        w_tok = Wp // pW
-
-                        teacher_tok = sample_full_token_map_to_crop(
-                            full_tok_bhw=full_teacher_tok,
-                            out_tok_hw=(h_tok, w_tok),
-                            patch_size=vqvae.patch_size,
-                            roi_hw=batch.get("roi_hw", None),
-                            pad_hw=batch.get("pad_hw", None),
-                        )
-
-                        student_tok = soft_spatial_token_map_from_logits(
-                            logits_b1thw=logits_vol,
-                            patch_size=vqvae.patch_size,
-                            tau=0.25,
-                            prob_threshold=float(
-                                float(vqvae.best_thr_tol.item())
-                            ),
-                        )
-
-                        teacher_tok_tol = dilate_spatial_support_hw(
-                            teacher_tok.detach(),
-                            radius_h=1,
-                            radius_w=1,
-                        )
-
-                        loss_spatial = spatial_support_violation_loss(
-                            pred_support=student_tok,
-                            allowed_support=teacher_tok_tol,
-                            neg_thresh=0.20,
-                        )
-
-                    loss = (
-                        float(lambda_detr) * loss_detr
-                        + float(lambda_ctx) * loss_ctx
-                        + float(lambda_ctx_field) * loss_ctx_field
-                        + float(lambda_adj) * loss_adj
-                        + float(lambda_spatial) * loss_spatial
-                    )
-
-            if train:
-                scaler.scale(loss / float(grad_accum_steps)).backward()
-
-                do_step = (it % grad_accum_steps == 0) or (it == len(loader))
-                if do_step:
-                    if grad_clip is not None and grad_clip > 0:
-                        scaler.unscale_(opt)
-                        params = list(activity_prior.parameters())
-                        if not freeze_motif:
-                            params += list(motif_prior.parameters())
-                        torch.nn.utils.clip_grad_norm_(params, float(grad_clip))
-
-                    scaler.step(opt)
-                    scaler.update()
-
-            B = x.size(0)
-            total_samples += float(B)
-
-            metrics = {
-                "loss": loss,
-                "loss_detr": loss_detr,
-                "loss_ctx": loss_ctx,
-                "loss_ctx_field": loss_ctx_field,
-                "loss_adj": loss_adj,
-                "loss_spatial": loss_spatial,
-                "activity_prob_mean": activity_prob.mean(),
-                "activity_prob_sum": activity_prob.sum(dim=1).mean(),
-            }
-            metrics.update({f"detr_{k}": v for k, v in aux_detr.items()})
-
-            for k, v in metrics.items():
-                if torch.is_tensor(v):
-                    v = float(v.detach().item())
-                total[k] = total.get(k, 0.0) + float(v) * float(B)
-
-            if train and log_every and (it % log_every == 0):
-                den = max(total_samples, 1.0)
-                print(
-                    f"  [3C Joint] it {it:05d}: "
-                    f"loss={total['loss'] / den:.4f} "
-                    f"detr={total['loss_detr'] / den:.4f} "
-                    f"ctx={total['loss_ctx'] / den:.4f} "
-                    f"field={total['loss_ctx_field'] / den:.4f} "
-                    f"adj={total['loss_adj'] / den:.4f} "
-                    f"sp={total['loss_spatial'] / den:.4f} "
-                    f"softK={total['activity_prob_sum'] / den:.2f} "
-                    f"tgtK={total['detr_target_count_mean'] / den:.2f}"
-                )
-
-        den = max(total_samples, 1.0)
-        return {k: v / den for k, v in total.items()}
-
-    best_val = float("inf")
-    patience = 0
-    history = {"train": [], "val": []}
-
-    for ep in range(1, epochs + 1):
-        train_m = _run_epoch(train_loader, train=True)
-        val_m = _run_epoch(val_loader, train=False) if val_loader is not None else train_m
-
-        history["train"].append(train_m)
-        history["val"].append(val_m)
-
-        print(
-            f"[activity-refine epoch {ep:03d}] "
-            f"train loss={train_m['loss']:.4f} "
-            f"val loss={val_m['loss']:.4f} "
-            f"detr={val_m['loss_detr']:.4f} "
-            f"ctx={val_m['loss_ctx']:.4f} "
-            f"ctx_field={val_m['loss_ctx_field']:.4f} "
-            f"adj={val_m['loss_adj']:.4f} "
-            f"sp={val_m['loss_spatial']:.4f} "
-            f"softK={val_m['activity_prob_sum']:.2f} "
-            f"countE={val_m['detr_count_expected_mean']:.2f} "
-            f"modeK={val_m['detr_count_mode_mean']:.2f} "
-            f"tgtK={val_m['detr_target_count_mean']:.2f} "
-            f"maeE={val_m['detr_count_expected_mae']:.2f} "
-            f"within5={val_m['detr_count_within_5']:.3f}"
-        )
-
-        if val_m["loss"] < best_val - float(min_delta):
-            best_val = val_m["loss"]
-            patience = 0
-            torch.save(
-                {
-                    "activity_prior": activity_prior.state_dict(),
-                    "motif_prior": motif_prior.state_dict() if not freeze_motif else None,
-                    "epoch": ep,
-                    "best_val_loss": best_val,
-                    "token_grid": token_grid,
-                    "Kmax": activity_prior.Kmax,
-                },
-                ckpt_out,
-            )
-            print(f"  saved {ckpt_out}  best={best_val:.4f}")
-        else:
-            patience += 1
-            if patience >= int(early_stop_patience):
-                print(f"Early stopping at epoch {ep}; best={best_val:.4f}")
-                break
-
-    return history
-
-# Backward-compatible direct imports. The audited Stage 3B/3C implementations
-# live in stage3_activity.py; Stage 3A and the shared encoding helpers remain in
-# this module unchanged.
-_legacy_train_activity_prior_detr = train_activity_prior_detr
-_legacy_train_activity_prior_with_frozen_motif = (
-    train_activity_prior_with_frozen_motif
-)
-
-
-def train_activity_prior_detr(*args, **kwargs):
-    from .stage3_activity import train_activity_prior_detr as implementation
-
-    return implementation(*args, **kwargs)
-
-
-def train_activity_prior_with_frozen_motif(*args, **kwargs):
-    from .stage3_activity import (
-        train_activity_prior_with_frozen_motif as implementation,
-    )
-
-    return implementation(*args, **kwargs)
+# Stage 3A and the shared encoding helpers live in this module. Stage 3B/3C are
+# in stage3_activity.py and are imported from there directly; the backward-compat
+# shims that used to re-export them here went with the DETR implementations.

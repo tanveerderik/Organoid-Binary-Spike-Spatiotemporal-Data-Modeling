@@ -115,6 +115,21 @@ def tolerant_spike_loss(
     delta_multi: float = 0.10,
     peak_margin: float = 0.5,
     multi_margin: float = 1.0,
+    # Peak/multi neighbourhood, decoupled from the hit tolerance.
+    #
+    # These previously reused radius_t/h/w, which conflates two opposite jobs:
+    # the hit term's max_pool REWARDS a spike landing anywhere in its radius
+    # (permitting smear), while peak/multi PUNISH mass away from the centre.
+    # With radius_t=0 at the final refinement the peak term never compared across
+    # frames at all, so nothing penalised a temporally flat profile -- measured
+    # within-token temporal entropy 1.699 against a 1.792 flat ceiling, versus
+    # 0.312 for real data. Spatially, where radius_h/w=1 did give it reach, the
+    # profile is much sharper (3.19 against a 5.35 ceiling).
+    #
+    # None falls back to radius_* so existing callers are unchanged.
+    peak_radius_t: Optional[int] = None,
+    peak_radius_h: Optional[int] = None,
+    peak_radius_w: Optional[int] = None,
     max_peak_sites: Optional[int] = None,
     max_multi_sites: Optional[int] = None,
     eps: float = 1e-6,
@@ -154,6 +169,10 @@ def tolerant_spike_loss(
     kH = 2 * radius_h + 1
     kW = 2 * radius_w + 1
 
+    prt = radius_t if peak_radius_t is None else int(peak_radius_t)
+    prh = radius_h if peak_radius_h is None else int(peak_radius_h)
+    prw = radius_w if peak_radius_w is None else int(peak_radius_w)
+
     probs = torch.sigmoid(logits).clamp(eps, 1.0 - eps)
 
     # 2) Tolerant local-hit supervision
@@ -170,49 +189,30 @@ def tolerant_spike_loss(
     else:
         loss_hit = logits.new_zeros(())
 
-    # 3) Peakness term: center should beat neighbors EXCLUDING center
+    # 3) Peakness term: center should beat neighbors EXCLUDING center.
+    #
+    # Vectorized. The previous implementation was a Python loop over every
+    # positive site with no cap at either call site, which made it the expensive
+    # part of the loss and effectively capped how wide the neighbourhood could be.
+    # Excluding the centre is done by pushing it to -inf before the pooling, so a
+    # wider temporal radius now costs one extra max_pool3d rather than more
+    # Python iterations.
     loss_peak = logits.new_zeros(())
     if gamma_peak > 0.0 and pos_mask.any():
-        pos_idx = pos_mask.nonzero(as_tuple=False)  # (M,5)
-
-        if max_peak_sites is not None and pos_idx.size(0) > max_peak_sites:
-            perm = torch.randperm(pos_idx.size(0), device=pos_idx.device)[:max_peak_sites]
-            pos_idx = pos_idx[perm]
-
-        B, _, T, H, W = logits.shape
-        peak_terms = []
-
-        for idx in pos_idx:
-            b, _, t, h, w = idx.tolist()
-
-            t0 = max(0, t - radius_t)
-            t1 = min(T, t + radius_t + 1)
-            h0 = max(0, h - radius_h)
-            h1 = min(H, h + radius_h + 1)
-            w0 = max(0, w - radius_w)
-            w1 = min(W, w + radius_w + 1)
-
-            patch_logits = logits[b, 0, t0:t1, h0:h1, w0:w1]
-            patch_valid = mask_bool[b, 0, t0:t1, h0:h1, w0:w1]
-
-            ct = t - t0
-            ch = h - h0
-            cw = w - w0
-
-            neigh_valid = patch_valid.clone()
-            neigh_valid[ct, ch, cw] = False
-
-            neigh_logits = patch_logits[neigh_valid]
-            if neigh_logits.numel() == 0:
-                continue
-
-            center_logit = logits[b, 0, t, h, w]
-            max_neighbor = neigh_logits.max()
-
-            peak_terms.append(F.relu(max_neighbor - center_logit + peak_margin))
-
-        if len(peak_terms) > 0:
-            loss_peak = torch.stack(peak_terms).mean()
+        neg_inf = torch.finfo(logits.dtype).min
+        masked_logits = logits.masked_fill(~mask_bool, neg_inf)
+        centre_removed = masked_logits.masked_fill(pos_mask, neg_inf)
+        max_neighbor = F.max_pool3d(
+            centre_removed,
+            kernel_size=(2 * prt + 1, 2 * prh + 1, 2 * prw + 1),
+            stride=1,
+            padding=(prt, prh, prw),
+        )
+        valid = pos_mask & (max_neighbor > neg_inf / 2)
+        if valid.any():
+            loss_peak = F.relu(
+                max_neighbor[valid] - logits[valid] + peak_margin
+            ).mean()
 
     # 4) NEW: prevent multiple nearby spikes
     # Sum probability mass in the tolerance neighborhood around each true spike.
@@ -231,12 +231,12 @@ def tolerant_spike_loss(
         for idx in pos_idx:
             b, _, t, h, w = idx.tolist()
 
-            t0 = max(0, t - radius_t)
-            t1 = min(T, t + radius_t + 1)
-            h0 = max(0, h - radius_h)
-            h1 = min(H, h + radius_h + 1)
-            w0 = max(0, w - radius_w)
-            w1 = min(W, w + radius_w + 1)
+            t0 = max(0, t - prt)
+            t1 = min(T, t + prt + 1)
+            h0 = max(0, h - prh)
+            h1 = min(H, h + prh + 1)
+            w0 = max(0, w - prw)
+            w1 = min(W, w + prw + 1)
 
             patch_probs = probs[b, 0, t0:t1, h0:h1, w0:w1]
             patch_valid = mask_bool[b, 0, t0:t1, h0:h1, w0:w1]
