@@ -53,9 +53,11 @@ from .training import (
     train_motif_prior_mgit,
     train_maskgit_activity_prior,
     train_activity_prior_with_frozen_motif,
-    configure_stage3c_event_calibration,
+    configure_stage4c_event_calibration,
 )
-from .training.stage3_activity import token_frequency_for_batch
+from .training.stage4_activity import token_frequency_for_batch
+from .training.stage2b_flatten import run_stage2b_flatten
+from .training.stage3_lct import run_stage3_lct
 from .training.train_prior import (
     _batch_to_device,
     _make_activity_in_from_codes,
@@ -101,13 +103,18 @@ from .utils.constants import (
 # User configuration
 # =============================================================================
 
-# Run any subset sequentially. Examples:
-#   (1,)       -> train context-agnostic VQVAE only
-#   (2,)       -> load stage-1 ckpt, learn exact continuous hull decoding + context
-#   (1, 2, 3)  -> run the whole pipeline sequentially
-#   (0,)     -> run spatial-map pretraining only
-TRAIN_STAGES = (3,)        # 0,1,2,3
-EVAL_STAGES  = ()   # 0,1,2,3
+# Pipeline stages. Run any subset sequentially.
+#
+#   1   gct mapper      -- CtxEmbed + spatial_map_prior pretraining
+#   2   VQ-VAE          -- 2a hierarchical training, 2b flatten + dedupe
+#   3   lct mapper      -- standalone local-context trunk (needs 2b)
+#   4   prior           -- MaskGIT, phases 4a/4b/4c (needs 1, 2b, 3)
+#
+# Examples:
+#   (2,)          -> train the VQ-VAE and flatten its codebook
+#   (1, 2, 3, 4)  -> run the whole pipeline sequentially
+TRAIN_STAGES = (4,)        # 1,2,3,4
+EVAL_STAGES  = ()          # 1,2,3,4
 
 # Stage-2 continuous quantization.
 #
@@ -132,94 +139,41 @@ EVAL_STAGES  = ()   # 0,1,2,3
 #   children-per-parent count. Residuals depend solely on the encoder and z1, so
 #   this is well posed and leaves every z1-level Stage 1A result intact. Used to
 #   widen the child hull without paying for a full Stage 1A retrain.
-STAGE1_PHASES = ("1a",)
-
 STAGE2_PHASES = ("2a", "2b")
+
+# ---- Stage 3: standalone lct mapper ----
+STAGE3_EPOCHS = 300
+STAGE3_BATCHES_PER_EPOCH = 120
+STAGE3_NUM_TEXTONS = 128
+# Descriptor space, not decoder space: z1 carries reusable motif identity while
+# z2/z3 carry exactness detail lct cannot predict. Measured z1 > z12 > flat.
+STAGE3_TEXTON_BASIS = "z1"
+
 
 # Independently evaluate any saved Stage-2 substages. Evaluation order is
 # always 2A -> 2B, regardless of tuple order.
-STAGE2_EVAL_PHASES = ("2a", "2b")
 
-STAGE2A_EPOCHS = 150
-STAGE2B_EPOCHS = 50
 
-# Hide a subset of latent tokens from the decoder during Stage 2B.
-#
-# OFF, and it should stay off while counterfactual conditioning is on.
-# Masking and counterfactual conditioning solve the same problem by different
-# routes -- masking makes the context INFORMATIVE, counterfactual requests
-# make it CONTROLLING -- and stacking them is actively harmful: hiding ~49%
-# of active latents leaves the decode systematically under-dense relative to
-# the requested log_mean_firing_density, so ctx_loss_soft is dominated by a
-# large, content-independent "raise every logit" gradient.  The first run of
-# this stage learned exactly that: BCE effect +0.30 with context specificity
-# 0.00000, and reconstruction AUPRC_tol halved from 0.133 to 0.069.
-STAGE2B_MASK_LATENTS = False
-
-# Hole size for plain "recon" samples, which carry no mask_spec hole.
-STAGE2B_LATENT_RECON_DROP_P = 0.5
-
-# ---- counterfactual context conditioning ----
-# Weight on the controllability loss: decode the same latents a second time
-# under a perturbed context request and require the output's measured
-# statistics to follow the request.  This is the only term that puts the
-# context in tension with the codes, and therefore the only one that trains
-# the local context head.
-# The decoder backbone is frozen, so reconstruction quality is a CEILING the
-# context branch can only damage, never improve.  Any weight that lets the
-# context terms visibly pull AUPRC down is too high.
-STAGE2B_LAMBDA_CTX_CF = 0.25
-STAGE2B_CTX_CF_SIGMA_START = 0.25
-STAGE2B_CTX_CF_SIGMA_END = 0.40
-
-# Fraction of counterfactual requests that swap the whole (global, local)
-# pair to another assay rather than resampling a local within the current
-# assay.  Paired swaps give the large, still-plausible displacements;
-# within-assay draws test fine-grained steering.  Both are modes
-# sample_context.py supports.
-STAGE2B_CTX_CF_PAIR_P = 0.5
-STAGE2A_CTX_START_EPOCH = 0
-STAGE2A_CTX_WARMUP_EPOCHS = 20
-
-STAGE2B_CTX_START_EPOCH = 0
-STAGE2B_CTX_WARMUP_EPOCHS = 10
-STAGE2B_CFG_CTX_START_EPOCH = 5
-STAGE2B_CFG_CTX_WARMUP_EPOCHS = 10
-
-STAGE2B_CTX_CF_START_EPOCH = 0
-STAGE2B_CTX_CF_WARMUP_EPOCHS = 10
-
-# Checkpointing starts only after every warm-up has finished. Until then the
-# objective is still changing shape, so an early score is not comparable to a
-# converged one and must not be allowed to set the selection bar. Derived from
-# the schedules above rather than hard-coded, so the two cannot drift apart.
-STAGE2A_SAVE_START_EPOCH = STAGE2A_CTX_START_EPOCH + STAGE2A_CTX_WARMUP_EPOCHS
-STAGE2B_SAVE_START_EPOCH = max(
-    STAGE2B_CTX_START_EPOCH + STAGE2B_CTX_WARMUP_EPOCHS,
-    STAGE2B_CTX_CF_START_EPOCH + STAGE2B_CTX_CF_WARMUP_EPOCHS,
-    STAGE2B_CFG_CTX_START_EPOCH + STAGE2B_CFG_CTX_WARMUP_EPOCHS,
-)
-
-# Stage-3 training substages. Any subset of ("3a", "3b", "3c") is valid;
+# Stage-4 training substages. Any subset of ("4a", "4b", "4c") is valid;
 # execution order remains 3A -> 3B -> 3C. Missing prerequisites are loaded
 # from their best checkpoints.
-STAGE3_PHASES = ("3a",)
+STAGE4_PHASES = ("4a",)
 # Warm-start 3A from ckpts/motif_prior_warmstart.pt when present. The z1 trunk
 # from the previous run reached 0.288 top-1; retraining from scratch would spend
 # ~400 epochs re-earning it. strict=False because the alpha head is now a
 # Dirichlet concentration head (same shape, new interpretation).
-STAGE3A_WARM_START = True
+STAGE4A_WARM_START = True
 # Literal path: CKPT_DIR is defined further down in this config block.
-STAGE3A_WARM_START_PATH = Path("ckpts") / "motif_prior_warmstart.pt"
-STAGE3A_EPOCHS = 600
-STAGE3B_EPOCHS = 200
-STAGE3C_EPOCHS = 100
+STAGE4A_WARM_START_PATH = Path("ckpts") / "motif_prior_warmstart.pt"
+STAGE4A_EPOCHS = 600
+STAGE4B_EPOCHS = 200
+STAGE4C_EPOCHS = 100
 
-# Stage 3B/3C activity-coordinate parameterization. Use "factorized" for the
+# Stage 4B/3C activity-coordinate parameterization. Use "factorized" for the
 # original axis-head ablation or "joint_dense" for one categorical THW head.
-STAGE3_COORDINATE_MODE = "joint_dense"
+STAGE4_COORDINATE_MODE = "joint_dense"
 
-# Stage 3B activity-prior architecture.
+# Stage 4B activity-prior architecture.
 #   "sparse_region" : SparseRegionActivityPrior. Visible-active tokens enter a
 #                     sparse-memory encoder (no mean pool), Kmax queries
 #                     cross-attend to that memory with region anchors, and the
@@ -227,24 +181,24 @@ STAGE3_COORDINATE_MODE = "joint_dense"
 # Activity placement is scored exactly. In token space a +/-1-token tolerance is
 # not a near miss: one token is 6 frames x 15 rows x 14 cols, the dilated target
 # covers ~49% of the grid, and a uniform ROI draw scores ~0.49 for free.
-STAGE3_HARD_TOLERANCE = (0, 0, 0)
+STAGE4_HARD_TOLERANCE = (0, 0, 0)
 
-STAGE3B_REGION_GRID = None        # None = derive from the token grid (region extent ~4
+STAGE4B_REGION_GRID = None        # None = derive from the token grid (region extent ~4
                                   # tokens/axis). (8,8,16) -> (2,2,4) = 16 regions of 64,
                                   # identical to the hand-picked value. Pin a tuple only to
                                   # override; it must tile the token grid exactly.
-STAGE3B_DECODER_LAYERS = 4
+STAGE4B_DECODER_LAYERS = 4
 # Ablation: False replaces the region/within factorization with a flat Ntok-way
 # grid head, isolating the region head from the sparse-memory encoder.
-STAGE3B_REGION_FACTORIZATION = True
+STAGE4B_REGION_FACTORIZATION = True
 # Per-assay adjacency target for the 3B structural loss, keyed by global_ctx --
 # the same statistic Stage 0 supervised the global embedder on.
-STAGE3B_USE_TOKEN_ADJ_BANK = False
-STAGE3B_TOKEN_ADJ_VARIANT = "token"
+STAGE4B_USE_TOKEN_ADJ_BANK = False
+STAGE4B_TOKEN_ADJ_VARIANT = "token"
 
 # Depth of the per-cell readout decoder.
-STAGE3B_MASKGIT_LAYERS = 3
-STAGE3B_MASKGIT_HYPERPARAMETERS = {
+STAGE4B_MASKGIT_LAYERS = 3
+STAGE4B_MASKGIT_HYPERPARAMETERS = {
     "lr": 3e-4,
     "epochs": 120,
     "lambda_bce": 1.0,
@@ -277,12 +231,12 @@ STAGE3B_MASKGIT_HYPERPARAMETERS = {
 # temperature and holding noise longer fixes it.
 # Selected on VALIDATION (reports/evaluation_report_3B_sampler_sweep_VAL.json);
 # test is measured once at this setting and never used for selection.
-STAGE3B_SAMPLE_STEPS = 10
-STAGE3B_SAMPLE_TEMPERATURE = 1.5
-STAGE3B_SAMPLE_GUMBEL = 4.0
+STAGE4B_SAMPLE_STEPS = 10
+STAGE4B_SAMPLE_TEMPERATURE = 1.5
+STAGE4B_SAMPLE_GUMBEL = 4.0
 
-# Stage 3B is selected by a deterministic, hard expected-count top-K metric.
-STAGE3B_HYPERPARAMETERS = {
+# Stage 4B is selected by a deterministic, hard expected-count top-K metric.
+STAGE4B_HYPERPARAMETERS = {
     "lr": 2e-4,
     "lambda_count": 1.0,
     "lambda_count_neighbor": 0.25,
@@ -307,10 +261,10 @@ STAGE3B_HYPERPARAMETERS = {
     "save_start_epoch": 60,
 }
 
-# Stage 3C is a low-LR event-placement calibration, not a second activity-prior
+# Stage 4C is a low-LR event-placement calibration, not a second activity-prior
 # training stage. Its true-generation validation is deliberately limited to a
 # fixed subset because every validation pass runs iterative MaskGIT + decoding.
-STAGE3C_HYPERPARAMETERS = {
+STAGE4C_HYPERPARAMETERS = {
     "lr": 1e-5,
     "lambda_activity": 1.0,
     "lambda_count": 1.0,
@@ -323,9 +277,9 @@ STAGE3C_HYPERPARAMETERS = {
     "auxiliary_ramp_epochs": 10,
     # No candidate accepted or tracked until the auxiliary losses finish ramping.
     "save_start_epoch": 10,
-    # Raised from a hard-coded 20. Stage 3C moves 1.2% of parameters at 1e-5, so
+    # Raised from a hard-coded 20. Stage 4C moves 1.2% of parameters at 1e-5, so
     # twenty epochs is very little actual movement and "no improvement" is weaker
-    # evidence of convergence here than the same count would be in Stage 3B.
+    # evidence of convergence here than the same count would be in Stage 4B.
     "early_stop_patience": 45,
     "generation_val_max_batches": 4,
     "generation_motif_steps": 12,
@@ -335,25 +289,25 @@ STAGE3C_HYPERPARAMETERS = {
 
 # Reuse saved Kmax metadata when possible so independently rerun substages use
 # the same activity-head shape. Set True only when the data/token grid changed.
-STAGE3_RECOMPUTE_KMAX = False
-STAGE3_KMAX_PASSES = 5
-STAGE3_KMAX_MARGIN = 1.25
+STAGE4_RECOMPUTE_KMAX = False
+STAGE4_KMAX_PASSES = 5
+STAGE4_KMAX_MARGIN = 1.25
 
-# Independently evaluate any saved Stage-3 substages. Evaluation order is
+# Independently evaluate any saved Stage-4 substages. Evaluation order is
 # always 3A -> 3B -> 3C, regardless of tuple order.
 #
 # 3A: held-out teacher-forced activity / masked motif prediction metrics.
 # 3B: held-out activity-count and coordinate metrics.
 # 3C: held-out refined activity metrics.
-STAGE3_EVAL_PHASES = ("3c",)
+STAGE4_EVAL_PHASES = ("4c",)
 
 # Stable Stage-3A evaluation starts from a fully masked motif ROI. Set this to
 # 0.15 to reproduce the mixed masking regime used during training validation.
-STAGE3A_EVAL_FULL_MASK_PROB = 1.0
+STAGE4A_EVAL_FULL_MASK_PROB = 1.0
 
 # For selected 3B/3C evaluation phases, also run the expensive decoded
 # generation evaluations. Set False to evaluate only the prior heads.
-RUN_STAGE3_GENERATION_EVAL = True
+RUN_STAGE4_GENERATION_EVAL = True
 
 # --- Null-baseline / leakage-audit entry points (opt-in; default path unchanged) ---
 #
@@ -370,7 +324,7 @@ RUN_MOTIF_NULL_EVAL = False
 
 NULL_BASELINE_PATH = Path("ckpts/null_baselines.pkl")
 
-# Populated in main() when the file exists. Stage 3B/3C read this so their
+# Populated in main() when the file exists. Stage 4B/3C read this so their
 # hard-activity reports carry matched-null reference scores.
 _NULL_BASELINES = None
 
@@ -389,32 +343,33 @@ CKPT_DIR = Path("ckpts")
 CKPT_DIR.mkdir(parents=True, exist_ok=True)
 
 CKPTS = {
-    "stage1_best": CKPT_DIR / "vqvae_stage1_best.pt",
-    "stage1_last": CKPT_DIR / "vqvae_stage1_last.pt",
-    "stage2a_best": CKPT_DIR / "vqvae_stage2a_convex_best.pt",
-    "stage2a_last": CKPT_DIR / "vqvae_stage2a_convex_last.pt",
-    "stage2_best": CKPT_DIR / "vqvae_stage2_convex_best.pt",
-    "stage2_last": CKPT_DIR / "vqvae_stage2_convex_last.pt",
-    
+    # --- Stage 2A: hierarchical VQ-VAE ---
+    "stage2a_best": CKPT_DIR / "vqvae_stage2a_best.pt",
+    "stage2a_last": CKPT_DIR / "vqvae_stage2a_last.pt",
+
+    # --- Stage 2B: flattened + deduped codebook ---
+    "stage2b_flat": CKPT_DIR / "stage2b_flat_codebook.pt",
+
+    # --- Stage 3: standalone lct mapper ---
+    "stage3_lct": CKPT_DIR / "stage3_lct_mapper.pt",
+
+    # --- Stage 4: prior ---
     "motif_prior_best": CKPT_DIR / "motif_prior_best.pt",
-    # Legacy alias retained for external scripts. New Stage 3B runs write this
+    # Legacy alias retained for external scripts. New Stage 4B runs write this
     # alias from the generation-aligned hard-metric checkpoint.
     "activity_prior_best": CKPT_DIR / "activity_prior_best.pt",
     "activity_prior_best_loss": CKPT_DIR / "activity_prior_best_loss.pt",
     "activity_prior_best_hard_metric": CKPT_DIR / "activity_prior_best_hard_metric.pt",
     "activity_prior_refined_best": CKPT_DIR / "activity_prior_refined_best.pt",
 
-    # Standalone context mappers consumed by the prior prefix.
-    "stage3_lct": CKPT_DIR / "stage1c_lct_final.pt",
 }
 
 REPORTS = {
-    "stage1": Path("reports/training_report_vqvae_stage1.json"),
-    "stage1b": Path("reports/training_report_vqvae_stage1b.json"),
-    "stage2a": Path("reports/training_report_vqvae_stage2a_convex.json"),
-    "stage2": Path("reports/training_report_vqvae_stage2b_convex.json"),
-    "stage2a_eval": Path("reports/evaluation_report_vqvae_stage2a_convex.json"),
-    "stage2b_eval": Path("reports/evaluation_report_vqvae_stage2b_convex.json"),
+    "stage1_gct": Path("reports/training_report_stage1_gct.json"),
+    "stage2a": Path("reports/training_report_vqvae_stage2a.json"),
+    "stage2a_eval": Path("reports/evaluation_report_vqvae_stage2a.json"),
+    "stage2b": Path("reports/analysis_stage2b_flatten.json"),
+    "stage3_lct": Path("reports/analysis_stage3_lct.json"),
 
     "prior_motif": Path("reports/training_report_prior_3A_motif.json"),
     "prior_motif_eval": Path("reports/evaluation_report_prior_3A_motif.json"),
@@ -432,14 +387,9 @@ REPORTS = {
 MOTIF_NULL_BASELINE_PATH = Path("ckpts/motif_null_baselines.pkl")
 
 VIZ_ROOTS = {
-    1: Path("../viz_out_vqvae/vqvae_stage1"),
-    2: Path("../viz_out_vqvae/vqvae_stage2"),
+    2: Path("../viz_out_vqvae/vqvae_stage2a"),
 }
 
-STAGE2_VIZ_ROOTS = {
-    "2a": Path("../viz_out_vqvae/vqvae_stage2/stage2a"),
-    "2b": Path("../viz_out_vqvae/vqvae_stage2/stage2b"),
-}
 
 # Data
 patch_size = (6, 15, 14)
@@ -459,11 +409,27 @@ cache_max_gb = 80
 cache_write_prob = 1.0
 
 # Model
-num_codes = (32, 8)
-# Number of VQ levels. Must equal len(num_codes). Set to 1 with num_codes=(32,)
-# for the single-level ablation: 1A learns z1 only, and Stage 1B creates level 2
-# from scratch by fitting the residual hull.
-num_quantizers = 2
+#
+# THREE codebook levels with a full tolerance ladder:
+#   z1 (1,1,1)  coarse
+#   z2 (0,1,1)  spatial-only tolerance
+#   z3 (0,0,0)  exact
+#
+# The levels exist to PRODUCE centroids under the ladder. Stage 2B sums them
+# into one flat entry per token, so the deliverable is a single discrete
+# codebook, not a hierarchy at inference time.
+#
+# Alphabet 32*8*4 = 1024 nominal (935 observed after dedupe). Storage is
+# 32 + 256 + 1024 = 1312 vectors; the binding constraint is occupancy, not
+# memory. Watch the vq_l3 dead fractions: if the tail dies, drop to (16,8,4)
+# or (32,4,4) rather than raising K3.
+#
+# These are the values every shipped checkpoint was trained with. They used to
+# live only in a scratch config, which meant a plain `python main.py` built a
+# two-level model that could not load its own checkpoints.
+num_codes = (32, 8, 4)
+# Number of VQ levels. Must equal len(num_codes).
+num_quantizers = 3
 
 
 
@@ -655,30 +621,35 @@ def set_all_trainable(model: nn.Module, flag: bool):
         p.requires_grad = bool(flag)
 
 
-def freeze_for_stage(model: nn.Module, stage: float):
+def freeze_for_stage(model: nn.Module, stage: int):
     """
     Centralized stage policy.
 
-    Stage 1: context-agnostic motif learning.
+    Stage 1: gct mapper.
+      - Train global_embedder + spatial_map_prior only.
+      - The rest of the VQ-VAE is untouched.
+
+    Stage 2: hierarchical VQ-VAE (2a; 2b is a deterministic flatten, no grads).
       - Train stem/encoder/to_code/VQ/decoder.
-      - Freeze context embedders and spatial map.
-      - Decoder cross-attn OFF.
+      - Freeze the Stage-1 gct pair.
 
-    Stage 2A: context-free continuous decoder calibration.
-      - Train the decoder on the exact geometric convex projection.
-      - Keep decoder cross-attention and context branches disabled/frozen.
-      - Keep encoder, to_code, and hierarchical EMA codebooks fixed.
-      - Keep the optional amortized alpha adapter frozen.
-      - Keep the pretrained global embedder and spatial map fixed.
+    Stage 3: lct mapper.
+      - Nothing in the VQ-VAE trains; the standalone trunk owns its own
+        optimizer. The model is frozen and in eval so the encoder pass that
+        produces the targets is deterministic.
 
-    Stage 3: prior learning.
-      - Freeze VQVAE completely.
+    Stage 4: prior learning.
+      - Freeze the VQ-VAE completely.
     """
     set_all_trainable(model, False)
 
     if stage == 1:
-        for name in ["stem", "patch_embed", "sparse_encoder", "to_code", "vq", "code_to_dec",
-                     "dec_blocks", "dec_norm", "patch_renderer"]:
+        set_requires_grad(getattr(model, "global_embedder", None), True)
+        set_requires_grad(getattr(model, "spatial_map_prior", None), True)
+
+    elif stage == 2:
+        for name in ["stem", "patch_embed", "sparse_encoder", "to_code", "vq",
+                     "code_to_dec", "dec_blocks", "dec_norm", "patch_renderer"]:
             set_requires_grad(getattr(model, name, None), True)
 
         if hasattr(model, "activity_type_offset"):
@@ -687,59 +658,20 @@ def freeze_for_stage(model: nn.Module, stage: float):
         # The Stage-1 gct pair stays frozen here.
         set_requires_grad(getattr(model, "global_embedder", None), False)
         set_requires_grad(getattr(model, "spatial_map_prior", None), False)
-        
+
         model.vq.freeze_codebook_updates = False
-        
+
         # EMA codebook entries are updated manually, not by AdamW.
         # Keep blank_token trainable; freeze only hierarchical codebook tensors.
         if hasattr(model, "vq") and hasattr(model.vq, "tree_embeds"):
             for p in model.vq.tree_embeds:
                 p.requires_grad = False
 
-    elif stage == 2:
-        # Stage 2A decoder components. The decoder is dense: context never
-        # enters it, only the output-space ctx loss shapes it.
-        for name in [
-            "dec_blocks",
-            "dec_norm",
-            "patch_renderer",
-        ]:
-            set_requires_grad(
-                getattr(model, name, None),
-                True,
-            )
-    
-        # The first linear code-space interface adapts with the decoder.
-        # The codebook ladder geometry itself stays fixed.
-        set_requires_grad(
-            getattr(model, "code_to_dec", None),
-            True,
-        )
-
-        set_requires_grad(
-            getattr(model, "global_embedder", None),
-            False,
-        )
-        set_requires_grad(
-            getattr(model, "spatial_map_prior", None),
-            False,
-        )
-    
-        if hasattr(model, "activity_type_offset"):
-            model.activity_type_offset.requires_grad = False
-    
-        # Freeze the complete Stage-1 codebook geometry.  Continuousness is
-        # introduced between quantization and decoding, not by moving centroids.
-        for p in model.vq.tree_embeds:
-            p.requires_grad = False
-
+    elif stage in (3, 4):
+        set_all_trainable(model, False)
         model.vq.freeze_codebook_updates = True
         model.vq.dead_code_restart_every = 0
         model.vq.duplicate_restart_every = 0
-
-    elif stage == 3:
-        # Prior training: the VQVAE is completely frozen.
-        set_all_trainable(model, False)
         model.eval()
 
     else:
@@ -748,8 +680,6 @@ def freeze_for_stage(model: nn.Module, stage: float):
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     n_total = sum(p.numel() for p in model.parameters())
     print(f"Stage {stage}: trainable params = {n_trainable:,} / {n_total:,}")
-
-
 
 
 def make_optimizer(model: nn.Module, lr: float, weight_decay: float):
@@ -814,10 +744,10 @@ def load_spatial_pretrain_if_available(model: nn.Module):
     print(f"Loaded spatial pretrain: {SPATIAL_CKPT}")
 
 
-def load_stage0_memories_for_eval(model):
+def load_stage1_gct_for_eval(model):
     if not SPATIAL_CKPT.exists():
         raise FileNotFoundError(
-            f"Stage 3 global metrics require {SPATIAL_CKPT}"
+            f"Stage 4 global metrics require {SPATIAL_CKPT}"
         )
 
     ckpt = torch.load(SPATIAL_CKPT, map_location="cpu")
@@ -866,7 +796,7 @@ def load_stage0_memories_for_eval(model):
                 f"{tuple(value.shape)} != {expected_pix}"
             )
 
-def run_stage0_spatial_pretrain(model, train_loader, device):
+def run_stage1_gct_pretrain(model, train_loader, device):
     if model.spatial_map_prior is None:
         raise RuntimeError("Cannot run stage 0 because model.spatial_map_prior is None.")
 
@@ -931,15 +861,11 @@ def common_fit_kwargs(model):
         sp_pixel_warmup_epochs=60,
     )
 
-def select_ckpt(stage: int, prefer_best: bool = True) -> Path:
-    if stage == 1:
-        best = CKPTS["stage1_best"]
-        last = CKPTS["stage1_last"]
-    elif stage == 2:
-        best = CKPTS["stage2_best"]
-        last = CKPTS["stage2_last"]
-    else:
+def select_ckpt(stage: int = 2, prefer_best: bool = True) -> Path:
+    if stage != 2:
         raise ValueError(f"No VQVAE checkpoint defined for stage={stage}")
+    best = CKPTS["stage2a_best"]
+    last = CKPTS["stage2a_last"]
 
     if prefer_best and best.exists():
         return best
@@ -947,17 +873,6 @@ def select_ckpt(stage: int, prefer_best: bool = True) -> Path:
         return last
     if best.exists():
         return best
-
-    # Earlier Stage-2 phases remain valid fallbacks when later phases have not
-    # run. Prefer the most advanced available phase.
-    if stage == 2:
-        if prefer_best and CKPTS["stage2a_best"].exists():
-            return CKPTS["stage2a_best"]
-        if CKPTS["stage2a_last"].exists():
-            return CKPTS["stage2a_last"]
-        if CKPTS["stage2a_best"].exists():
-            return CKPTS["stage2a_best"]
-
     raise FileNotFoundError(f"No checkpoint found for stage {stage}: {best} or {last}")
 
 
@@ -969,43 +884,6 @@ def _normalize_substage_phases(phases, allowed, *, name):
     if len(set(normalized)) != len(normalized):
         raise ValueError(f"{name} contains duplicates: {normalized}")
     return tuple(phase for phase in allowed if phase in normalized)
-
-
-def _select_stage2_phase_ckpt(phase: str, *, prefer_best: bool = True) -> Path:
-    phase = str(phase).lower()
-    mapping = {
-        "2a": (CKPTS["stage2a_best"], CKPTS["stage2a_last"]),
-        "2b": (CKPTS["stage2_best"], CKPTS["stage2_last"]),
-    }
-    if phase not in mapping:
-        raise ValueError(f"Unsupported Stage-2 phase={phase!r}")
-
-    best, last = mapping[phase]
-    if prefer_best and best.exists():
-        return best
-    if last.exists():
-        return last
-    if best.exists():
-        return best
-    raise FileNotFoundError(
-        f"No checkpoint found for Stage {phase.upper()}: {best} or {last}"
-    )
-
-
-def _stage2_phase_report(phase: str) -> Path:
-    phase = str(phase).lower()
-    return {
-        "2a": REPORTS["stage2a"],
-        "2b": REPORTS["stage2"],
-    }[phase]
-
-
-def _stage2_phase_eval_report(phase: str) -> Path:
-    phase = str(phase).lower()
-    return {
-        "2a": REPORTS["stage2a_eval"],
-        "2b": REPORTS["stage2b_eval"],
-    }[phase]
 
 
 def _json_safe(value):
@@ -1040,34 +918,34 @@ def save_json_report(obj, path: Path):
 # only, and ctx_loss_soft backprops into the encoder and codebook in Stage 1,
 # so the learned motifs carry that bias.
 #
-# STAGE1_BALANCED_CTX turns on 1/var per-dim weighting.  lambda is rescaled by
+# STAGE2_BALANCED_CTX turns on 1/var per-dim weighting.  lambda is rescaled by
 # the measured weighted/unweighted ratio (0.036) so the regularizer keeps the
 # same TOTAL share of the objective (~0.68%) and only its internal
 # distribution changes -- otherwise the run would confound two edits.
-STAGE1_BALANCED_CTX = False
-STAGE1_LAMBDA_CTX = 1e-1
-STAGE1_LAMBDA_CTX_BALANCED = 2.80
+STAGE2_BALANCED_CTX = True
+STAGE2_LAMBDA_CTX = 1e-1
+STAGE2_LAMBDA_CTX_BALANCED = 2.80
 
-# Epochs actually run.  STAGE1_SCHED_T_MAX stays at the full 300 so a
+# Epochs actually run.  STAGE2_SCHED_T_MAX stays at the full 300 so a
 # truncated probe follows the SAME cosine LR trajectory as the stored
 # 300-epoch run -- shortening T_max would compress the schedule and make
 # matched-epoch comparison meaningless.
-STAGE1_EPOCHS = 300
-STAGE1_SCHED_T_MAX = 300
-STAGE1_SAVE_START_EPOCH = 125
+STAGE2_EPOCHS = 300
+STAGE2_SCHED_T_MAX = 300
+STAGE2_SAVE_START_EPOCH = 125
 
 
-def run_stage1(model, train_loader, val_loader, blank_logit_threshold):
-    stage1_ctx_weights = None
-    if STAGE1_BALANCED_CTX:
+def run_stage2a(model, train_loader, val_loader, blank_logit_threshold):
+    stage2_ctx_weights = None
+    if STAGE2_BALANCED_CTX:
         _, _, _norm = build_local_ctx_bank(train_loader)
-        stage1_ctx_weights = (
+        stage2_ctx_weights = (
             1.0 / _norm[1].pow(2).clamp_min(1e-12)
         ).to(next(model.parameters()).device)
-        globals()["STAGE1_LAMBDA_CTX"] = STAGE1_LAMBDA_CTX_BALANCED
+        globals()["STAGE2_LAMBDA_CTX"] = STAGE2_LAMBDA_CTX_BALANCED
         print(
             f"Stage 1 balanced ctx weighting ON, lambda_ctx="
-            f"{STAGE1_LAMBDA_CTX_BALANCED} (rescaled from 0.1 by the measured "
+            f"{STAGE2_LAMBDA_CTX_BALANCED} (rescaled from 0.1 by the measured "
             f"weighted/unweighted ratio 0.036)"
         )
 
@@ -1075,17 +953,17 @@ def run_stage1(model, train_loader, val_loader, blank_logit_threshold):
     print("STAGE 1: context-agnostic VQVAE motif learning")
     print("=" * 80)
 
-    freeze_for_stage(model, 1)
+    freeze_for_stage(model, 2)
 
     # Fixed surrogate boundary for all threshold-aware training losses.
     # Validation Best-F1 thresholds are recorded but never fed back.
     model._set_training_prob_threshold(0.5)
 
-    n_epoch = int(STAGE1_EPOCHS)
+    n_epoch = int(STAGE2_EPOCHS)
 
     optimizer = make_optimizer(model, lr=1e-3, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=int(STAGE1_SCHED_T_MAX), eta_min=1e-5
+        optimizer, T_max=int(STAGE2_SCHED_T_MAX), eta_min=1e-5
     )
 
     report = fit_vqvae(
@@ -1095,8 +973,8 @@ def run_stage1(model, train_loader, val_loader, blank_logit_threshold):
         optimizer,
         scheduler,
         epochs=n_epoch,
-        ckpt_best_path=str(CKPTS["stage1_best"]),
-        ckpt_last_path=str(CKPTS["stage1_last"]),
+        ckpt_best_path=str(CKPTS["stage2a_best"]),
+        ckpt_last_path=str(CKPTS["stage2a_last"]),
         early_stop_patience=40,
         val_metric_name="AUPRC_tol_cond",
         val_metric_goal="max",
@@ -1105,8 +983,8 @@ def run_stage1(model, train_loader, val_loader, blank_logit_threshold):
         # Stage 1: context loss ON, decoder context injection OFF.
         # This lets ctx losses shape encoder/codebook/decoder motifs,
         # without allowing cross-attention shortcuts.
-        lambda_ctx=float(STAGE1_LAMBDA_CTX),
-        ctx_dim_weights=stage1_ctx_weights,
+        lambda_ctx=float(STAGE2_LAMBDA_CTX),
+        ctx_dim_weights=stage2_ctx_weights,
         lambda_ctx_field=5e-2,
         ctx_start_epoch=5,
         ctx_warmup_epochs=15,
@@ -1138,11 +1016,11 @@ def run_stage1(model, train_loader, val_loader, blank_logit_threshold):
         pos_weight_end=1.0,
         pos_decay_epochs=100,
 
-        save_start_epoch = int(STAGE1_SAVE_START_EPOCH),
+        save_start_epoch = int(STAGE2_SAVE_START_EPOCH),
         **common_fit_kwargs(model),
     )
 
-    with open(REPORTS["stage1"], "w") as f:
+    with open(REPORTS["stage2a"], "w") as f:
         json.dump(report, f, indent=4)
     print(f"Saved report: {REPORTS['stage1']}")
     return report
@@ -1249,148 +1127,7 @@ def build_local_ctx_bank(loader, max_batches=None):
     return bank, std, (pooled_mean, pooled_std.clamp_min(1e-6))
 
 
-def _stage2_ctx_schedule():
-    return {
-        0: 1,   # log_mean_firing_density
-        7: 1,   # active_site_ratio
-        1: 5,   # var_x
-        2: 5,   # var_y
-        3: 5,   # var_t
-        8: 10,  # temporal_trend
-        4: 5,   # cov_xy
-        5: 5,   # cov_xt
-        6: 5,   # cov_yt
-    }
-
-def _make_stage2_scheduler(optimizer, n_epoch):
-    def multiplier(epoch):
-        progress = min(
-            1.0,
-            max(0.0, epoch / float(max(1, n_epoch))),
-        )
-        cosine = 0.5 * (
-            1.0 + math.cos(math.pi * progress)
-        )
-        return 0.10 + 0.90 * cosine
-
-    return torch.optim.lr_scheduler.LambdaLR(
-        optimizer,
-        lr_lambda=[
-            multiplier
-            for _ in optimizer.param_groups
-        ],
-    )
-
-
-def run_stage2a(model, train_loader, val_loader, blank_logit_threshold):
-    print("\n" + "=" * 80)
-    print("STAGE 2A: decoder calibration on the frozen discrete ladder")
-    print("=" * 80)
-
-    map_location = next(model.parameters()).device
-    stage1_best_ckpt = select_ckpt(1, prefer_best=True)
-    model.load_checkpoint(
-        str(stage1_best_ckpt),
-        map_location=map_location,
-    )
-    model._set_training_prob_threshold(0.5)
-    freeze_for_stage(model, 2)
-
-    print(
-        f"Loaded Stage 1 best weights from: {stage1_best_ckpt}\n"
-        "Encoder, to_code, and the codebook ladder are frozen; the decoder "
-        "adapts to the fixed discrete geometry."
-    )
-
-    n_epoch = int(STAGE2A_EPOCHS)
-    stage2a_params = [
-        parameter
-        for parameter in model.parameters()
-        if parameter.requires_grad
-    ]
-    if not stage2a_params:
-        raise RuntimeError("Stage 2A has no trainable decoder parameters.")
-
-    optimizer = torch.optim.AdamW(
-        [
-            {
-                "params": stage2a_params,
-                "lr": 1e-5,
-                "weight_decay": 1e-4,
-            },
-        ]
-    )
-    scheduler = _make_stage2_scheduler(optimizer, n_epoch)
-
-    report = fit_vqvae(
-        model,
-        train_loader,
-        val_loader,
-        optimizer,
-        scheduler,
-        epochs=n_epoch,
-        ckpt_best_path=str(CKPTS["stage2a_best"]),
-        ckpt_last_path=str(CKPTS["stage2a_last"]),
-        early_stop_patience=30,
-        val_metric_name="AUPRC_tol_cond",
-        val_metric_goal="max",
-        use_ROI_mask=False,
-        lambda_vq=0.0,
-        lambda_ctx=1e-1,
-        lambda_ctx_field=1e-2,
-        ctx_start_epoch=STAGE2A_CTX_START_EPOCH,
-        ctx_warmup_epochs=STAGE2A_CTX_WARMUP_EPOCHS,
-        ctx_epoch_schedule=_stage2_ctx_schedule(),
-        cfg_ctx_drop_start=0.0,
-        cfg_ctx_drop_end=0.0,
-        cfg_ctx_start_epoch=10**9,
-        cfg_ctx_warmup_epochs=1,
-        pos_weight_start=1.0,
-        pos_weight_end=1.0,
-        pos_decay_epochs=1,
-        blank_logit_margin=blank_logit_threshold,
-        continuous_gumbel_tau_start=1.0,
-        continuous_gumbel_tau_end=1.0,
-        continuous_posterior_temperature=0.35,
-        save_start_epoch=STAGE2A_SAVE_START_EPOCH,
-        **{
-            **common_fit_kwargs(model),
-            "lambda_isi": 1e-1,
-            "lambda_sp_pixel": 1e-3,
-            "lambda_enc_var": 0.0,
-            "lambda_code_norm": 0.0,
-            "level2_start_epoch": 1,
-            "level2_full_loss_epoch": 1,
-        },
-    )
-
-    save_json_report(report, REPORTS["stage2a"])
-    return report
-
-
-def _select_stage2a_ckpt():
-    for path in (
-        CKPTS["stage2a_best"],
-        CKPTS["stage2a_last"],
-    ):
-        if path.exists():
-            return path
-
-    raise FileNotFoundError(
-        "The exact-convex Stage 2A checkpoint is missing. Run with "
-        "STAGE2_PHASES=('2a', '2b') first. Old decoder-defined Stage-2 "
-        "checkpoints are intentionally not reused for this geometry."
-    )
-
-
-
-
-def run_stage2(model, train_loader, val_loader, blank_logit_threshold):
-    return {"2a": run_stage2a(model, train_loader, val_loader, blank_logit_threshold)}
-
-
-@torch.no_grad()
-def measure_stage3_active_token_counts(
+def measure_stage4_active_token_counts(
     model,
     loader,
     device,
@@ -1463,7 +1200,7 @@ def measure_stage3_active_token_counts(
         ).numpy()
 
         print(
-            f"Stage 3 Kmax estimation pass "
+            f"Stage 4 Kmax estimation pass "
             f"{pass_idx + 1}/{num_passes}: "
             f"n={pass_counts_np.size}, "
             f"mean={pass_counts_np.mean():.2f}, "
@@ -1472,7 +1209,7 @@ def measure_stage3_active_token_counts(
 
     if not all_counts:
         raise RuntimeError(
-            "Cannot determine Stage 3 Kmax: "
+            "Cannot determine Stage 4 Kmax: "
             "the training loader produced no samples."
         )
 
@@ -1497,7 +1234,7 @@ def measure_stage3_active_token_counts(
     }
 
     print(
-        "Stage 3 active-token count statistics:"
+        "Stage 4 active-token count statistics:"
     )
     print(
         json.dumps(
@@ -1518,7 +1255,7 @@ def build_context_mappers(model, device):
               copy for spatial_map_prior, but SPATIAL_CKPT is the source of
               truth, so the prior loads from disk rather than from whatever
               stage happens to be resident in `model`.
-      lct  -- LctMapper, a Stage-3 artifact trained with the encoder frozen.
+      lct  -- LctMapper, a Stage-4 artifact trained with the encoder frozen.
               It was never part of the VQ-VAE.
 
     Both are returned in eval() with requires_grad False: the prefix must be a
@@ -1586,9 +1323,9 @@ def build_prior_from_model(
     )
     activity_prior = MaskGITActivityPrior(
         **activity_kwargs,
-        region_grid=STAGE3B_REGION_GRID,
-        n_decoder_layer=STAGE3B_DECODER_LAYERS,
-        n_maskgit_layer=STAGE3B_MASKGIT_LAYERS,
+        region_grid=STAGE4B_REGION_GRID,
+        n_decoder_layer=STAGE4B_DECODER_LAYERS,
+        n_maskgit_layer=STAGE4B_MASKGIT_LAYERS,
     ).to(device)
 
     motif_prior = MaskGITMotifPrior(
@@ -1616,14 +1353,14 @@ def build_prior_from_model(
         motif_prior=motif_prior,
     ).to(device)
 
-def _stage3_token_grid(model):
+def _stage4_token_grid(model):
     return tuple(
         int(model.img_size[i] // model.patch_size[i])
         for i in range(3)
     )
 
 
-def _read_stage3_activity_metadata(path, model):
+def _read_stage4_activity_metadata(path, model):
     path = Path(path)
     meta = torch.load(path, map_location="cpu")
 
@@ -1633,12 +1370,12 @@ def _read_stage3_activity_metadata(path, model):
         )
 
     saved_grid = tuple(map(int, meta["token_grid"]))
-    expected_grid = _stage3_token_grid(model)
+    expected_grid = _stage4_token_grid(model)
     if saved_grid != expected_grid:
         raise RuntimeError(
             f"Activity checkpoint token grid {saved_grid} does not match "
             f"the current VQ-VAE token grid {expected_grid}. Set "
-            "STAGE3_RECOMPUTE_KMAX=True and retrain 3B."
+            "STAGE4_RECOMPUTE_KMAX=True and retrain 3B."
         )
 
     state = _activity_state_from_checkpoint(meta)
@@ -1686,7 +1423,7 @@ def _read_stage3_activity_metadata(path, model):
     }
 
 
-def _best_stage3b_checkpoint_path():
+def _best_stage4b_checkpoint_path():
     hard_path = CKPTS["activity_prior_best_hard_metric"]
     if hard_path.exists():
         return hard_path
@@ -1731,7 +1468,7 @@ def _load_activity_state_compat(
         if not allow_coordinate_partial:
             raise RuntimeError(
                 f"Cannot load {checkpoint_mode!r} activity coordinates into a "
-                f"{model_mode!r} model from {path}. Stage 3B must be retrained."
+                f"{model_mode!r} model from {path}. Stage 4B must be retrained."
             )
         skipped_prefixes = ("grid_head.", "t_head.", "h_head.", "w_head.")
         state = {
@@ -1742,7 +1479,7 @@ def _load_activity_state_compat(
         print(
             "PARTIAL LOAD: compatible activity backbone/count/event weights were "
             "loaded, while coordinate heads remain newly initialized. This is "
-            "not a trained coordinate model; retrain Stage 3B before evaluation."
+            "not a trained coordinate model; retrain Stage 4B before evaluation."
         )
     incompatible = activity_prior.load_state_dict(state, strict=False)
     allowed_missing = {
@@ -1770,13 +1507,13 @@ def _load_activity_state_compat(
         print(
             f"Loaded legacy activity checkpoint {path} without {sorted(missing)}. "
             "The new count-to-event FiLM remains at its zero-initialized identity. "
-            "Retrain Stage 3B before treating this as a calibrated checkpoint."
+            "Retrain Stage 4B before treating this as a calibrated checkpoint."
         )
     else:
         print(f"Loaded activity checkpoint weights: {path}")
 
 
-def _print_stage3_startup(label, hyperparameters, module, *, checkpoint_paths=()):
+def _print_stage4_startup(label, hyperparameters, module, *, checkpoint_paths=()):
     trainable = [
         (name, int(parameter.numel()))
         for name, parameter in module.named_parameters()
@@ -1831,71 +1568,71 @@ def _print_stage3_startup(label, hyperparameters, module, *, checkpoint_paths=()
     print(f"  hard activity mode: {hyperparameters.get('hard_activity_mode', 'n/a')}")
 
 
-def _resolve_stage3_kmax(model, train_loader, device):
-    if not STAGE3_RECOMPUTE_KMAX:
+def _resolve_stage4_kmax(model, train_loader, device):
+    if not STAGE4_RECOMPUTE_KMAX:
         for path in (
             CKPTS["activity_prior_best_hard_metric"],
             CKPTS["activity_prior_best"],
             CKPTS["activity_prior_refined_best"],
         ):
             if path.exists():
-                meta = _read_stage3_activity_metadata(path, model)
+                meta = _read_stage4_activity_metadata(path, model)
                 print(
-                    f"Reusing Stage 3 Kmax={meta['Kmax']} from {path}. "
+                    f"Reusing Stage 4 Kmax={meta['Kmax']} from {path}. "
                     "Only metadata is reused; activity weights are not loaded."
                 )
                 return int(meta["Kmax"])
 
-    count_stats = measure_stage3_active_token_counts(
+    count_stats = measure_stage4_active_token_counts(
         model=model,
         loader=train_loader,
         device=device,
-        num_passes=int(STAGE3_KMAX_PASSES),
+        num_passes=int(STAGE4_KMAX_PASSES),
     )
 
-    token_grid = _stage3_token_grid(model)
+    token_grid = _stage4_token_grid(model)
     Ntok = int(np.prod(token_grid))
     observed_max = int(count_stats["maximum"])
-    stage3_kmax = min(
+    stage4_kmax = min(
         Ntok,
         max(
             1,
-            int(np.ceil(float(STAGE3_KMAX_MARGIN) * observed_max)),
+            int(np.ceil(float(STAGE4_KMAX_MARGIN) * observed_max)),
         ),
     )
 
     print(
-        "Selected Stage 3 Kmax:\n"
+        "Selected Stage 4 Kmax:\n"
         f"  estimation passes = {count_stats['num_passes']}\n"
         f"  observed maximum = {observed_max}\n"
-        f"  safety multiplier = {float(STAGE3_KMAX_MARGIN):.2f}\n"
-        f"  selected Kmax = {stage3_kmax}\n"
+        f"  safety multiplier = {float(STAGE4_KMAX_MARGIN):.2f}\n"
+        f"  selected Kmax = {stage4_kmax}\n"
         f"  Ntok = {Ntok}\n"
-        f"  capacity ratio = {stage3_kmax / Ntok:.6f}"
+        f"  capacity ratio = {stage4_kmax / Ntok:.6f}"
     )
-    return int(stage3_kmax)
+    return int(stage4_kmax)
 
 
-def _load_stage3_motif_best(prior, device):
+def _load_stage4_motif_best(prior, device):
     path = CKPTS["motif_prior_best"]
     if not path.exists():
         raise FileNotFoundError(
-            f"Missing Stage 3A checkpoint: {path}. Run with "
-            "STAGE3_PHASES=('3a',) first."
+            f"Missing Stage 4A checkpoint: {path}. Run with "
+            "STAGE4_PHASES=('4a',) first."
         )
     ckpt = torch.load(path, map_location=device)
     prior.motif_prior.load_state_dict(ckpt["model"], strict=True)
-    print(f"Loaded Stage 3A motif checkpoint: {path}")
+    print(f"Loaded Stage 4A motif checkpoint: {path}")
 
 
-def _load_stage3_activity_best(prior, model, device):
-    path = _best_stage3b_checkpoint_path()
+def _load_stage4_activity_best(prior, model, device):
+    path = _best_stage4b_checkpoint_path()
     if not path.exists():
         raise FileNotFoundError(
-            f"Missing Stage 3B checkpoint: {path}. Run with "
-            "STAGE3_PHASES=('3b',) first."
+            f"Missing Stage 4B checkpoint: {path}. Run with "
+            "STAGE4_PHASES=('4b',) first."
         )
-    meta = _read_stage3_activity_metadata(path, model)
+    meta = _read_stage4_activity_metadata(path, model)
     if int(meta["Kmax"]) != int(prior.activity_prior.Kmax):
         raise RuntimeError(
             f"Built activity prior Kmax={prior.activity_prior.Kmax}, but "
@@ -1908,19 +1645,19 @@ def _load_stage3_activity_best(prior, model, device):
         path=path,
         state_key="model",
     )
-    print(f"Loaded Stage 3B hard-metric activity checkpoint: {path}")
+    print(f"Loaded Stage 4B hard-metric activity checkpoint: {path}")
 
 
-def run_stage3a(prior, model, train_loader, val_loader, device):
+def run_stage4a(prior, model, train_loader, val_loader, device):
     print("[3A] Training motif prior.")
 
-    if STAGE3A_WARM_START and STAGE3A_WARM_START_PATH.exists():
-        warm = torch.load(str(STAGE3A_WARM_START_PATH), map_location=device)
+    if STAGE4A_WARM_START and STAGE4A_WARM_START_PATH.exists():
+        warm = torch.load(str(STAGE4A_WARM_START_PATH), map_location=device)
         missing, unexpected = prior.motif_prior.load_state_dict(
             warm.get("model", warm), strict=False
         )
         print(
-            f"[3A] warm start from {STAGE3A_WARM_START_PATH} "
+            f"[3A] warm start from {STAGE4A_WARM_START_PATH} "
             f"(epoch {warm.get('epoch', '?')}); "
             f"missing={len(missing)} unexpected={len(unexpected)}"
         )
@@ -1936,7 +1673,7 @@ def run_stage3a(prior, model, train_loader, val_loader, device):
         opt=opt_motif,
         train_loader=train_loader,
         val_loader=val_loader,
-        epochs=int(STAGE3A_EPOCHS),
+        epochs=int(STAGE4A_EPOCHS),
         grad_clip=1.0,
         ckpt_out=str(CKPTS["motif_prior_best"]),
         # Was 30. Both train and val z1 accuracy were still climbing at the old
@@ -1965,7 +1702,7 @@ def run_stage3a(prior, model, train_loader, val_loader, device):
         topk=(5, 2),
 
         # Voxel-domain auxiliary losses reduced from 1.0 so the motif objective
-        # dominates while z1 is still improving. Stage 3C performs the
+        # dominates while z1 is still improving. Stage 4C performs the
         # inference-aligned statistical calibration; 3A's job is motif identity.
         lambda_ctx=0.25,
         lambda_ctx_field=0.05,
@@ -1979,16 +1716,16 @@ def run_stage3a(prior, model, train_loader, val_loader, device):
         isi_max_gap=max_gap_from_bins(gap_bins),
     )
     save_json_report(history, REPORTS["prior_motif"])
-    _load_stage3_motif_best(prior, device)
+    _load_stage4_motif_best(prior, device)
     return history
 
 
-def run_stage3b(prior, model, train_loader, val_loader, device):
+def run_stage4b(prior, model, train_loader, val_loader, device):
     print("[3B] Training activity prior.")
     for parameter in prior.activity_prior.parameters():
         parameter.requires_grad_(True)
 
-    config = dict(STAGE3B_HYPERPARAMETERS)
+    config = dict(STAGE4B_HYPERPARAMETERS)
     config.update({
         "coordinate_mode": prior.activity_prior.coordinate_mode,
         "token_grid": [
@@ -2008,8 +1745,8 @@ def run_stage3b(prior, model, train_loader, val_loader, device):
         lr=float(config["lr"]),
         weight_decay=0.01,
     )
-    _print_stage3_startup(
-        "Stage 3B",
+    _print_stage4_startup(
+        "Stage 4B",
         config,
         prior.activity_prior,
         checkpoint_paths=(
@@ -2021,22 +1758,22 @@ def run_stage3b(prior, model, train_loader, val_loader, device):
 
     token_adj_bank = None
     _tab = Path("ckpts/token_adjacency_bank.pt")
-    if STAGE3B_USE_TOKEN_ADJ_BANK and _tab.exists():
+    if STAGE4B_USE_TOKEN_ADJ_BANK and _tab.exists():
         from .model.spatial_map import GlobalContextAdjacencyBank
         _p = torch.load(str(_tab), map_location="cpu")
         token_adj_bank = GlobalContextAdjacencyBank()
-        token_adj_bank.load_state_dict(_p[STAGE3B_TOKEN_ADJ_VARIANT])
+        token_adj_bank.load_state_dict(_p[STAGE4B_TOKEN_ADJ_VARIANT])
         print(
-            f"[3B] token adjacency bank: {_tab} variant={STAGE3B_TOKEN_ADJ_VARIANT} "
+            f"[3B] token adjacency bank: {_tab} variant={STAGE4B_TOKEN_ADJ_VARIANT} "
             f"bands={token_adj_bank.gap_bins} assays={len(token_adj_bank._num)}"
         )
-    elif STAGE3B_USE_TOKEN_ADJ_BANK:
+    elif STAGE4B_USE_TOKEN_ADJ_BANK:
         raise FileNotFoundError(f"{_tab} missing; build it before enabling the bank.")
 
     # Selected on NLL rather than F1:
     # F1 is maximized by emitting the mode, which is the wrong target for a
     # checkpoint that exists to be sampled.
-    dcfg = dict(STAGE3B_MASKGIT_HYPERPARAMETERS)
+    dcfg = dict(STAGE4B_MASKGIT_HYPERPARAMETERS)
     history = train_maskgit_activity_prior(
         activity_prior=prior.activity_prior,
         vqvae=model,
@@ -2062,14 +1799,14 @@ def run_stage3b(prior, model, train_loader, val_loader, device):
         ckpt_out=str(CKPTS["activity_prior_best_hard_metric"]),
     )
     save_json_report(history, REPORTS["prior_activity"])
-    _load_stage3_activity_best(prior, model, device)
+    _load_stage4_activity_best(prior, model, device)
     return history
 
 
 
-def run_stage3c(prior, model, train_loader, val_loader, device):
+def run_stage4c(prior, model, train_loader, val_loader, device):
     print("[3C] Training inference-aligned event-placement calibration.")
-    config = dict(STAGE3C_HYPERPARAMETERS)
+    config = dict(STAGE4C_HYPERPARAMETERS)
     config.update({
         "coordinate_mode": prior.activity_prior.coordinate_mode,
         "token_grid": [
@@ -2084,7 +1821,7 @@ def run_stage3c(prior, model, train_loader, val_loader, device):
         "optimizer": "AdamW",
         "amp_dtype": "CUDA autocast default FP16",
     })
-    trainable_names = configure_stage3c_event_calibration(prior.activity_prior)
+    trainable_names = configure_stage4c_event_calibration(prior.activity_prior)
     opt_refine = torch.optim.AdamW(
         [
             parameter
@@ -2094,13 +1831,13 @@ def run_stage3c(prior, model, train_loader, val_loader, device):
         lr=float(config["lr"]),
         weight_decay=0.01,
     )
-    _print_stage3_startup(
-        "Stage 3C",
+    _print_stage4_startup(
+        "Stage 4C",
         config,
         prior.activity_prior,
         checkpoint_paths=(
             CKPTS["motif_prior_best"],
-            _best_stage3b_checkpoint_path(),
+            _best_stage4b_checkpoint_path(),
             CKPTS["activity_prior_refined_best"],
         ),
     )
@@ -2112,7 +1849,7 @@ def run_stage3c(prior, model, train_loader, val_loader, device):
         opt=opt_refine,
         train_loader=train_loader,
         val_loader=val_loader,
-        epochs=int(STAGE3C_EPOCHS),
+        epochs=int(STAGE4C_EPOCHS),
         grad_clip=1.0,
         ckpt_out=str(CKPTS["activity_prior_refined_best"]),
         early_stop_patience=int(config["early_stop_patience"]),
@@ -2140,94 +1877,94 @@ def run_stage3c(prior, model, train_loader, val_loader, device):
         generation_val_max_batches=int(config["generation_val_max_batches"]),
         generation_motif_steps=int(config["generation_motif_steps"]),
         deterministic_val_masks=bool(config["deterministic_validation_masks"]),
-        hard_tolerance=STAGE3_HARD_TOLERANCE,
+        hard_tolerance=STAGE4_HARD_TOLERANCE,
         null_baselines=_NULL_BASELINES,
     )
     save_json_report(history, REPORTS["prior_refine"])
     return history
 
 
-def run_stage3_prior(model, train_loader, val_loader, device):
+def run_stage4_prior(model, train_loader, val_loader, device):
     print("\n" + "=" * 80)
-    print("STAGE 3: staged prior learning")
+    print("STAGE 4: staged prior learning")
     print("=" * 80)
 
     phases = _normalize_substage_phases(
-        STAGE3_PHASES,
-        ("3a", "3b", "3c"),
-        name="STAGE3_PHASES",
+        STAGE4_PHASES,
+        ("4a", "4b", "4c"),
+        name="STAGE4_PHASES",
     )
     if not phases:
-        print("STAGE3_PHASES is empty; no Stage 3 training was requested.")
+        print("STAGE4_PHASES is empty; no Stage 4 training was requested.")
         return {}
 
     ckpt = select_ckpt(2, prefer_best=True)
     model.load_checkpoint(str(ckpt), map_location=device)
-    print(f"Loaded VQVAE checkpoint for Stage 3 prior: {ckpt}")
-    freeze_for_stage(model, 3)
+    print(f"Loaded VQVAE checkpoint for Stage 4 prior: {ckpt}")
+    freeze_for_stage(model, 4)
 
-    stage3_kmax = _resolve_stage3_kmax(model, train_loader, device)
-    stage3_coordinate_mode = STAGE3_COORDINATE_MODE
-    if "3c" in phases and "3b" not in phases:
-        stage3b_path = _best_stage3b_checkpoint_path()
-        stage3b_meta = _read_stage3_activity_metadata(stage3b_path, model)
-        stage3_coordinate_mode = stage3b_meta["coordinate_mode"]
+    stage4_kmax = _resolve_stage4_kmax(model, train_loader, device)
+    stage4_coordinate_mode = STAGE4_COORDINATE_MODE
+    if "4c" in phases and "4b" not in phases:
+        stage4b_path = _best_stage4b_checkpoint_path()
+        stage4b_meta = _read_stage4_activity_metadata(stage4b_path, model)
+        stage4_coordinate_mode = stage4b_meta["coordinate_mode"]
         print(
-            "Stage 3C-only run will use the coordinate mode stored in its "
-            f"Stage 3B checkpoint: {stage3_coordinate_mode!r}."
+            "Stage 4C-only run will use the coordinate mode stored in its "
+            f"Stage 4B checkpoint: {stage4_coordinate_mode!r}."
         )
     prior = build_prior_from_model(
         model,
         device,
-        Kmax=stage3_kmax,
-        coordinate_mode=stage3_coordinate_mode,
+        Kmax=stage4_kmax,
+        coordinate_mode=stage4_coordinate_mode,
     )
 
     reports = {}
 
     # Fixed dependency order, matching Stage 2's phase driver.
-    if "3a" in phases:
-        reports["3a"] = run_stage3a(
+    if "4a" in phases:
+        reports["4a"] = run_stage4a(
             prior, model, train_loader, val_loader, device
         )
 
-    if "3b" in phases:
-        reports["3b"] = run_stage3b(
+    if "4b" in phases:
+        reports["4b"] = run_stage4b(
             prior, model, train_loader, val_loader, device
         )
 
-    if "3c" in phases:
-        if "3a" not in phases:
-            _load_stage3_motif_best(prior, device)
-        if "3b" not in phases:
-            _load_stage3_activity_best(prior, model, device)
-        reports["3c"] = run_stage3c(
+    if "4c" in phases:
+        if "4a" not in phases:
+            _load_stage4_motif_best(prior, device)
+        if "4b" not in phases:
+            _load_stage4_activity_best(prior, model, device)
+        reports["4c"] = run_stage4c(
             prior, model, train_loader, val_loader, device
         )
 
     return reports
 
 
-def _select_stage3_activity_checkpoint(phase: str):
+def _select_stage4_activity_checkpoint(phase: str):
     phase = str(phase).lower()
-    if phase == "3b":
-        path = _best_stage3b_checkpoint_path()
+    if phase == "4b":
+        path = _best_stage4b_checkpoint_path()
         state_key = "model"
-    elif phase == "3c":
+    elif phase == "4c":
         refined_path = CKPTS["activity_prior_refined_best"]
         if refined_path.exists():
             refined = torch.load(refined_path, map_location="cpu")
             if refined.get("accepted", False):
                 return refined_path, "activity_prior"
             print(
-                f"Stage 3C checkpoint {refined_path} was not accepted by the "
-                "hard-generation gate; evaluating the unrefined Stage 3B checkpoint."
+                f"Stage 4C checkpoint {refined_path} was not accepted by the "
+                "hard-generation gate; evaluating the unrefined Stage 4B checkpoint."
             )
-        path = _best_stage3b_checkpoint_path()
+        path = _best_stage4b_checkpoint_path()
         state_key = "model"
     else:
         raise ValueError(
-            f"Stage-3 activity checkpoint phase must be '3b' or '3c', got {phase!r}."
+            f"Stage-4 activity checkpoint phase must be '4b' or '4c', got {phase!r}."
         )
 
     if not path.exists():
@@ -2238,7 +1975,7 @@ def _select_stage3_activity_checkpoint(phase: str):
 
 
 @torch.no_grad()
-def _load_stage3_eval_prior(
+def _load_stage4_eval_prior(
     model,
     device,
     *,
@@ -2247,40 +1984,40 @@ def _load_stage3_eval_prior(
     load_motif: bool = True,
 ):
     phase = str(phase).lower()
-    if phase not in ("3a", "3b", "3c"):
-        raise ValueError(f"Unsupported Stage-3 evaluation phase={phase!r}")
+    if phase not in ("4a", "4b", "4c"):
+        raise ValueError(f"Unsupported Stage-4 evaluation phase={phase!r}")
 
     vq_ckpt = select_ckpt(2, prefer_best=True)
     model.load_checkpoint(str(vq_ckpt), map_location=device)
     if load_generation_memories:
-        load_stage0_memories_for_eval(model)
-    freeze_for_stage(model, 3)
+        load_stage1_gct_for_eval(model)
+    freeze_for_stage(model, 4)
 
-    if phase == "3a":
+    if phase == "4a":
         # The activity branch is unused for 3A predictive evaluation.
-        stage3_kmax = 1
+        stage4_kmax = 1
         activity_ckpt_path = None
         activity_state_key = None
-        activity_coordinate_mode = STAGE3_COORDINATE_MODE
+        activity_coordinate_mode = STAGE4_COORDINATE_MODE
     else:
         activity_ckpt_path, activity_state_key = (
-            _select_stage3_activity_checkpoint(phase)
+            _select_stage4_activity_checkpoint(phase)
         )
-        activity_meta = _read_stage3_activity_metadata(
+        activity_meta = _read_stage4_activity_metadata(
             activity_ckpt_path,
             model,
         )
-        stage3_kmax = int(activity_meta["Kmax"])
+        stage4_kmax = int(activity_meta["Kmax"])
         activity_coordinate_mode = activity_meta["coordinate_mode"]
 
     prior = build_prior_from_model(
         model,
         device,
-        Kmax=stage3_kmax,
+        Kmax=stage4_kmax,
         coordinate_mode=activity_coordinate_mode,
     )
     if load_motif:
-        _load_stage3_motif_best(prior, device)
+        _load_stage4_motif_best(prior, device)
 
     if activity_ckpt_path is not None:
         activity_ckpt = torch.load(
@@ -2305,13 +2042,13 @@ def _load_stage3_eval_prior(
 
 
 @torch.no_grad()
-def load_stage3_prior(model, device, *, activity_phase: str):
+def load_stage4_prior(model, device, *, activity_phase: str):
     activity_phase = str(activity_phase).lower()
-    if activity_phase not in ("3b", "3c"):
+    if activity_phase not in ("4b", "4c"):
         raise ValueError(
-            "Complete hierarchical generation requires activity_phase='3b' or '3c'."
+            "Complete hierarchical generation requires activity_phase='4b' or '4c'."
         )
-    return _load_stage3_eval_prior(
+    return _load_stage4_eval_prior(
         model,
         device,
         phase=activity_phase,
@@ -2321,11 +2058,11 @@ def load_stage3_prior(model, device, *, activity_phase: str):
 
 
 @torch.no_grad()
-def evaluate_stage3a_predictive(model, test_loader, device, train_loader=None):
-    prior = _load_stage3_eval_prior(
+def evaluate_stage4a_predictive(model, test_loader, device, train_loader=None):
+    prior = _load_stage4_eval_prior(
         model,
         device,
-        phase="3a",
+        phase="4a",
         load_generation_memories=False,
         load_motif=True,
     )
@@ -2413,7 +2150,7 @@ def evaluate_stage3a_predictive(model, test_loader, device, train_loader=None):
             motif_prior.corrupt_inputs_from_targets(
                 targets,
                 ensure_at_least_one_mask=True,
-                full_mask_prob=float(STAGE3A_EVAL_FULL_MASK_PROB),
+                full_mask_prob=float(STAGE4A_EVAL_FULL_MASK_PROB),
             )
         )
         targets["z1_teacher_prob"] = 0.0
@@ -2534,7 +2271,7 @@ def evaluate_stage3a_predictive(model, test_loader, device, train_loader=None):
     z1_den = max(totals["z1_tokens"], 1.0)
     alpha_den = max(totals["alpha_tokens"], 1.0)
     report = {
-        "phase": "3a",
+        "phase": "4a",
         "loss_total": totals["loss_total"] / sample_den,
         "loss_motif_objective": totals["loss_motif_objective"] / sample_den,
         "loss_z1": totals["loss_z1"] / z1_den,
@@ -2551,7 +2288,7 @@ def evaluate_stage3a_predictive(model, test_loader, device, train_loader=None):
         "supervised_z1_tokens": int(totals["z1_tokens"]),
         "supervised_alpha_tokens": int(totals["alpha_tokens"]),
         "samples": int(totals["samples"]),
-        "full_mask_prob": float(STAGE3A_EVAL_FULL_MASK_PROB),
+        "full_mask_prob": float(STAGE4A_EVAL_FULL_MASK_PROB),
     }
 
     if null_payload is not None:
@@ -2574,7 +2311,7 @@ def evaluate_stage3a_predictive(model, test_loader, device, train_loader=None):
         )
 
     save_json_report(report, REPORTS["prior_motif_eval"])
-    print("Stage 3A held-out predictive evaluation:", report)
+    print("Stage 4A held-out predictive evaluation:", report)
     return report
 
 
@@ -2728,13 +2465,13 @@ def collect_generation_diagnostics(
 
 
 @torch.no_grad()
-def evaluate_stage3_prior(
+def evaluate_stage4_prior(
     model,
     test_loader,
     device,
     *,
-    activity_phase="3c",
-    out_dir="../viz_out_vqvae/vqvae_stage3/stage3_prior_gen",
+    activity_phase="4c",
+    out_dir="../viz_out_vqvae/vqvae_stage4/stage4_prior_gen",
     max_batches=20,
     samples_per_context=4,
     steps=12,
@@ -2743,7 +2480,7 @@ def evaluate_stage3_prior(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    prior = load_stage3_prior(model, device, activity_phase=activity_phase)
+    prior = load_stage4_prior(model, device, activity_phase=activity_phase)
 
     model.eval()
     prior.eval()
@@ -2759,7 +2496,7 @@ def evaluate_stage3_prior(
         lct = batch["local_ctx"].to(device).float()
 
         # Each real test video provides only the requested global/local context.
-        # Stage 3 then performs complete task-0 generation over all tokens.
+        # Stage 4 then performs complete task-0 generation over all tokens.
         B = x.shape[0]
 
         gct_rep = gct.repeat_interleave(
@@ -2880,7 +2617,7 @@ def evaluate_stage3_prior(
         batch_rows = save_generated_batch_outputs(
             x_gen=x_gen,
             out_dir=out_dir,
-            prefix=f"stage3_testctx_b{bidx:04d}",
+            prefix=f"stage4_testctx_b{bidx:04d}",
             intended_local_ctx=lct_rep,
             fps=30,
         )
@@ -2975,23 +2712,23 @@ def evaluate_stage3_prior(
         #         "task_id": task_id.detach().cpu(),
         #         "grid": tuple(map(int, grid)),
         #     },
-        #     out_dir / f"stage3_gen_batch_{bidx:04d}.pt",
+        #     out_dir / f"stage4_gen_batch_{bidx:04d}.pt",
         # )
 
-    with open(out_dir / "stage3_generation_metrics.json", "w") as f:
+    with open(out_dir / "stage4_generation_metrics.json", "w") as f:
         json.dump(rows, f, indent=2)
 
-    print(f"Saved Stage 3 generated samples/metrics to: {out_dir}")
+    print(f"Saved Stage 4 generated samples/metrics to: {out_dir}")
     return rows
 
 @torch.no_grad()
-def evaluate_stage3_prior_sampled_contexts(
+def evaluate_stage4_prior_sampled_contexts(
     model,
     ref_loader,
     device,
     *,
-    activity_phase="3c",
-    out_dir="../viz_out_vqvae/vqvae_stage3/stage3_prior_sampled_ctx",
+    activity_phase="4c",
+    out_dir="../viz_out_vqvae/vqvae_stage4/stage4_prior_sampled_ctx",
     context_bank_path="ckpts/context_prior.pkl",
     mode="random_full",
     fixed_global_ctx=None,
@@ -3006,7 +2743,7 @@ def evaluate_stage3_prior_sampled_contexts(
     ctx_temperature=0.05,
 ):
     """
-    Stage-3 free-generation eval with controllable context sampling.
+    Stage-4 free-generation eval with controllable context sampling.
 
     Modes:
       random_full:
@@ -3024,7 +2761,7 @@ def evaluate_stage3_prior_sampled_contexts(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    prior = load_stage3_prior(model, device, activity_phase=activity_phase)
+    prior = load_stage4_prior(model, device, activity_phase=activity_phase)
     model.eval()
     prior.eval()
 
@@ -3308,7 +3045,7 @@ def evaluate_stage3_prior_sampled_contexts(
     save_generation_metrics_json(rows, out_dir /  f"{mode}_generation_metrics.json")
 
 
-    print(f"Saved sampled-context Stage 3 generations to: {out_dir} | mode={mode}")
+    print(f"Saved sampled-context Stage 4 generations to: {out_dir} | mode={mode}")
     return rows
 
 
@@ -3359,9 +3096,7 @@ def evaluate_existing_checkpoints_on_temporal_split(model, test_loader, device):
 
     rows = {}
     for stage_label, checkpoint in (
-        ("stage1", CKPTS["stage1_best"]),
-        ("stage2a", CKPTS["stage2a_best"]),
-        ("stage2b", CKPTS["stage2_best"]),
+        ("stage1", CKPTS["stage2a_best"]),
     ):
         if not checkpoint.exists():
             print(f"  [{stage_label}] missing {checkpoint}; skipped.")
@@ -3414,7 +3149,7 @@ def evaluate_count_nulls(model, test_loader, device, null_baselines):
     print("COUNT NULLS: activity count head vs trivial predictors")
     print("=" * 80)
 
-    prior = load_stage3_prior(model, device, activity_phase="3c")
+    prior = load_stage4_prior(model, device, activity_phase="4c")
     activity_prior = prior.activity_prior
     activity_prior.eval()
     model.eval()
@@ -3542,7 +3277,7 @@ def evaluate_generation_baselines(model, test_loader, device, null_baselines,
     print("GENERATION BASELINES: model vs independent-rate surrogate")
     print("=" * 80)
 
-    prior = load_stage3_prior(model, device, activity_phase="3c")
+    prior = load_stage4_prior(model, device, activity_phase="4c")
     model.eval()
     prior.eval()
 
@@ -3638,7 +3373,7 @@ def evaluate_generation_baselines(model, test_loader, device, null_baselines,
 
 def _generation_row(x_gen, x_target, requested_ctx, model):
     """Shared metric row so model and surrogate are scored by identical code."""
-    from .training.stage3_activity import _activity_ctx_torch, _hard_gap_rates
+    from .training.stage4_activity import _activity_ctx_torch, _hard_gap_rates
 
     _, _, t_dec, h_dec, w_dec = x_gen.shape
     target = x_target[:, :1, :t_dec, :h_dec, :w_dec]
@@ -3680,7 +3415,7 @@ def evaluate_motif_nulls(model, train_loader, test_loader, device, *, rebuild: b
     """Motif prior vs empirical motif nulls, in the prior's most favourable regime.
 
     Activity is teacher-forced from ground truth and every active ROI motif is
-    masked, matching STAGE3A_EVAL_FULL_MASK_PROB=1.0. The model additionally
+    masked, matching STAGE4A_EVAL_FULL_MASK_PROB=1.0. The model additionally
     sees true motifs at visible (non-ROI) positions, which the nulls do not, so
     the comparison is conservative in the model's favour.
 
@@ -3692,7 +3427,7 @@ def evaluate_motif_nulls(model, train_loader, test_loader, device, *, rebuild: b
                          both absolutely and relative to substituting the blank
                          token, as a scale reference
     """
-    prior = load_stage3_prior(model, device, activity_phase="3c")
+    prior = load_stage4_prior(model, device, activity_phase="4c")
     motif_prior = prior.motif_prior
     motif_prior.eval()
     model.eval()
@@ -3815,20 +3550,12 @@ def evaluate_and_visualize(
     stage: int,
     assay_indices,
     assay_codebook,
-    *,
-    stage2_phase: Optional[str] = None,
 ):
-    if stage not in (1, 2):
+    if stage != 2:
         return
-    
+
     try:
-        if stage == 2:
-            if stage2_phase is None:
-                raise ValueError("stage2_phase is required when evaluating Stage 2.")
-            stage2_phase = str(stage2_phase).lower()
-            ckpt = _select_stage2_phase_ckpt(stage2_phase, prefer_best=True)
-        else:
-            ckpt = select_ckpt(stage, prefer_best=True)
+        ckpt = select_ckpt(2, prefer_best=True)
     except FileNotFoundError as e:
         if RUN_SKIP_MISSING_EVAL:
             print(f"Skipping eval/viz: {e}")
@@ -3840,44 +3567,19 @@ def evaluate_and_visualize(
 
 
     if RUN_EVAL:
-        eval_label = stage2_phase.upper() if stage == 2 else str(stage)
-        print(f"Evaluating VQVAE stage {eval_label} using {ckpt} ...")
-        # Stage 2B is scored under the same latent masking it trained with;
-        # under full autoencoding the context has nothing to contribute and
-        # the conditional/unconditional comparison is uninformative.
-        eval_masked = bool(using_stage2b_context and STAGE2B_MASK_LATENTS)
+        print(f"Evaluating VQVAE stage {stage} using {ckpt} ...")
         test_metrics = evaluate_vqvae(
             model,
             test_loader,
             pos_weight=2.0,
             use_amp=True,
             use_ROI_mask=False,
-            mask_latents=eval_masked,
-            latent_recon_drop_p=float(STAGE2B_LATENT_RECON_DROP_P),
-            eval_ctx_shuffle=bool(using_stage2b_context),
         )
-        if using_stage2b_context:
-            test_metrics["ctx_effect_bce"] = (
-                test_metrics["val_loss_BCE_uncond"]
-                - test_metrics["val_loss_BCE_cond"]
-            )
-            test_metrics["ctx_effect_auprc_tol"] = (
-                test_metrics["AUPRC_tol_cond"]
-                - test_metrics["AUPRC_tol_uncond"]
-            )
-        print(f"TEST stage {eval_label}:", test_metrics)
-        if stage == 2:
-            save_json_report(
-                _json_safe(test_metrics),
-                _stage2_phase_eval_report(stage2_phase),
-            )
+        print(f"TEST stage {stage}:", test_metrics)
+        save_json_report(_json_safe(test_metrics), REPORTS["stage2a_eval"])
 
     if RUN_VIZ:
-        out_root = (
-            STAGE2_VIZ_ROOTS[stage2_phase]
-            if stage == 2
-            else VIZ_ROOTS[stage]
-        )
+        out_root = VIZ_ROOTS[stage]
         out_root.mkdir(parents=True, exist_ok=True)
         viz_loader = make_viz_loader(test_loader)
         
@@ -3898,10 +3600,7 @@ def evaluate_and_visualize(
             )
             
         if RUN_PLOTTER:
-            if stage == 1:
-                report_path = REPORTS["stage1"]
-            else:
-                report_path = _stage2_phase_report(stage2_phase)
+            report_path = REPORTS["stage2a"]
             if report_path.exists():
                 run_plotter(
                     train_report=str(report_path),
@@ -4182,21 +3881,21 @@ def run_stage_evaluation(
     print("=" * 80)
 
     # ============================================================
-    # Stage 0
+    # Stage 1: gct mapper
     # ============================================================
-    if stage == 0:
+    if stage == 1:
         if not RUN_VIZ:
-            print("Skipping Stage 0 visualization because RUN_VIZ=False.")
+            print("Skipping Stage 1 visualization because RUN_VIZ=False.")
             return
 
         if model.spatial_map_prior is None:
             print(
-                "Skipping Stage 0 evaluation/visualization: "
+                "Skipping Stage 1 evaluation/visualization: "
                 "model has no spatial_map_prior."
             )
             return
 
-        # Always evaluate the best saved Stage 0 checkpoint,
+        # Always evaluate the best saved Stage 1 checkpoint,
         # not the final in-memory early-stopping epoch.
         load_spatial_pretrain_if_available(model)
 
@@ -4246,13 +3945,13 @@ def run_stage_evaluation(
         return
 
     # ============================================================
-    # Stage 1
+    # Stage 2: hierarchical VQ-VAE
     # ============================================================
-    if stage == 1:
+    if stage == 2:
         evaluate_and_visualize(
             model,
             test_loader,
-            stage=1,
+            stage=2,
             assay_indices=assay_indices,
             assay_codebook=(
                 test_loader.dataset.dataset.assay_codebook
@@ -4260,7 +3959,7 @@ def run_stage_evaluation(
         )
 
         if RUN_CODEBOOK_DEBUG:
-            out_root = VIZ_ROOTS[1]
+            out_root = VIZ_ROOTS[2]
             debug_vq_codebooks(
                 model,
                 save_txt_path=str(out_root / "codebook_debug.txt"),
@@ -4269,57 +3968,21 @@ def run_stage_evaluation(
         return
 
     # ============================================================
-    # Stage 2 substages
+    # Stage 4 substages
     # ============================================================
-    if stage == 2:
+    if stage == 4:
         eval_phases = _normalize_substage_phases(
-            STAGE2_EVAL_PHASES,
-            ("2a", "2b"),
-            name="STAGE2_EVAL_PHASES",
+            STAGE4_EVAL_PHASES,
+            ("4a", "4b", "4c"),
+            name="STAGE4_EVAL_PHASES",
         )
         if not eval_phases:
-            print("STAGE2_EVAL_PHASES is empty; skipping Stage 2 evaluation.")
+            print("STAGE4_EVAL_PHASES is empty; skipping Stage 4 evaluation.")
             return
 
-        for phase in eval_phases:
-            evaluated = evaluate_and_visualize(
-                model,
-                test_loader,
-                stage=2,
-                stage2_phase=phase,
-                assay_indices=assay_indices,
-                assay_codebook=(
-                    test_loader.dataset.dataset.assay_codebook
-                ),
-            )
-            if evaluated is None:
-                continue
-
-            if RUN_CODEBOOK_DEBUG:
-                out_root = STAGE2_VIZ_ROOTS[phase]
-                debug_vq_codebooks(
-                    model,
-                    save_txt_path=str(out_root / "codebook_debug.txt"),
-                    save_json_path=str(out_root / "codebook_debug.json"),
-                )
-        return
-
-    # ============================================================
-    # Stage 3 substages
-    # ============================================================
-    if stage == 3:
-        eval_phases = _normalize_substage_phases(
-            STAGE3_EVAL_PHASES,
-            ("3a", "3b", "3c"),
-            name="STAGE3_EVAL_PHASES",
-        )
-        if not eval_phases:
-            print("STAGE3_EVAL_PHASES is empty; skipping Stage 3 evaluation.")
-            return
-
-        if "3a" in eval_phases:
+        if "4a" in eval_phases:
             try:
-                evaluate_stage3a_predictive(
+                evaluate_stage4a_predictive(
                     model,
                     test_loader,
                     device,
@@ -4327,16 +3990,16 @@ def run_stage_evaluation(
                 )
             except FileNotFoundError as exc:
                 if RUN_SKIP_MISSING_EVAL:
-                    print(f"Skipping Stage 3A evaluation: {exc}")
+                    print(f"Skipping Stage 4A evaluation: {exc}")
                 else:
                     raise
 
-        for phase in ("3b", "3c"):
+        for phase in ("4b", "4c"):
             if phase not in eval_phases:
                 continue
 
             # The old predictive evaluator went with the set-prediction
-            # readout it scored. Stage 3B is now scored by NLL/AUPRC during
+            # readout it scored. Stage 4B is now scored by NLL/AUPRC during
             # training and by sample-based generative metrics afterwards.
             try:
                 pass
@@ -4346,20 +4009,20 @@ def run_stage_evaluation(
                     continue
                 raise
 
-            if not RUN_STAGE3_GENERATION_EVAL:
+            if not RUN_STAGE4_GENERATION_EVAL:
                 continue
 
             phase_root = Path(
-                "../viz_out_vqvae/vqvae_stage3"
+                "../viz_out_vqvae/vqvae_stage4"
             ) / phase
 
             # A. Held-out exact-context generation.
-            evaluate_stage3_prior(
+            evaluate_stage4_prior(
                 model,
                 test_loader,
                 device,
                 activity_phase=phase,
-                out_dir=str(phase_root / "stage3_prior_test_ctx"),
+                out_dir=str(phase_root / "stage4_prior_test_ctx"),
                 max_batches=20,
                 samples_per_context=4,
                 steps=12,
@@ -4370,34 +4033,34 @@ def run_stage_evaluation(
             fixed_gctx = ref_batch["global_ctx"][0:1]
             fixed_assay_id = int(ref_batch["assay_idx"][0].item())
 
-            evaluate_stage3_prior_sampled_contexts(
+            evaluate_stage4_prior_sampled_contexts(
                 model,
                 test_loader,
                 device,
                 activity_phase=phase,
-                out_dir=str(phase_root / "stage3_prior_random_full"),
+                out_dir=str(phase_root / "stage4_prior_random_full"),
                 context_bank_path="ckpts/context_prior.pkl",
                 mode="random_full",
                 max_samples=64,
             )
-            evaluate_stage3_prior_sampled_contexts(
+            evaluate_stage4_prior_sampled_contexts(
                 model,
                 test_loader,
                 device,
                 activity_phase=phase,
-                out_dir=str(phase_root / "stage3_prior_fixed_global"),
+                out_dir=str(phase_root / "stage4_prior_fixed_global"),
                 context_bank_path="ckpts/context_prior.pkl",
                 mode="fixed_global",
                 fixed_global_ctx=fixed_gctx,
                 assay_id=fixed_assay_id,
                 max_samples=64,
             )
-            evaluate_stage3_prior_sampled_contexts(
+            evaluate_stage4_prior_sampled_contexts(
                 model,
                 test_loader,
                 device,
                 activity_phase=phase,
-                out_dir=str(phase_root / "stage3_prior_partial_local"),
+                out_dir=str(phase_root / "stage4_prior_partial_local"),
                 context_bank_path="ckpts/context_prior.pkl",
                 mode="partial_local",
                 partial_local={
@@ -4406,13 +4069,13 @@ def run_stage_evaluation(
                 },
                 max_samples=64,
             )
-            evaluate_stage3_prior_sampled_contexts(
+            evaluate_stage4_prior_sampled_contexts(
                 model,
                 test_loader,
                 device,
                 activity_phase=phase,
                 out_dir=str(
-                    phase_root / "stage3_prior_fixed_global_partial_local"
+                    phase_root / "stage4_prior_fixed_global_partial_local"
                 ),
                 context_bank_path="ckpts/context_prior.pkl",
                 mode="fixed_global_partial_local",
@@ -4488,20 +4151,14 @@ def main():
     
     evaluated_stages = set()
     
-    # When Stage 0 is not being retrained, load its saved state before
+    # When Stage 1 is not being retrained, load its saved state before
     # any downstream VQVAE/prior training begins.
     needs_spatial_pretrain = (
-        any(
-            stage in TRAIN_STAGES
-            for stage in (1, 2, 3)
-        )
-        or any(
-            stage in EVAL_STAGES
-            for stage in (0, 1, 2, 3)
-        )
+        any(stage in TRAIN_STAGES for stage in (2, 3, 4))
+        or any(stage in EVAL_STAGES for stage in (1, 2, 3, 4))
     )
     
-    if 0 not in TRAIN_STAGES and needs_spatial_pretrain:
+    if 1 not in TRAIN_STAGES and needs_spatial_pretrain:
         load_spatial_pretrain_if_available(model)
 
     # ============================================================
@@ -4548,18 +4205,18 @@ def main():
         # Train one stage
         # ========================================================
     
-        if stage == 0:
-            run_stage0_spatial_pretrain(
+        if stage == 1:
+            run_stage1_gct_pretrain(
                 model,
                 train_loader,
                 device,
             )
     
-            # Restore the best Stage 0 checkpoint rather than using
+            # Restore the best Stage 1 checkpoint rather than using
             # the final early-stopping epoch.
             load_spatial_pretrain_if_available(model)
     
-            # Build the retrieval bank using the best Stage 0
+            # Build the retrieval bank using the best Stage 1
             # global-context embedding.
             _, _lct_mapper = build_context_mappers(model, device)
             build_context_prior(
@@ -4571,30 +4228,54 @@ def main():
                 lct_mapper=_lct_mapper,
             )
     
-        elif stage == 1:
+        elif stage == 2:
             phases = _normalize_substage_phases(
-                STAGE1_PHASES,
-                ("1a", "1b"),
-                name="STAGE1_PHASES",
+                STAGE2_PHASES,
+                ("2a", "2b"),
+                name="STAGE2_PHASES",
             )
-            if "1a" in phases:
-                run_stage1(
+            if "2a" in phases:
+                run_stage2a(
                     model,
                     train_loader,
                     val_loader,
                     blank_logit_threshold=1.05*logit_baseline
                 )
-    
-        elif stage == 2:
-            run_stage2(
-                model,
-                train_loader,
-                val_loader,
-                blank_logit_threshold=1.05*logit_baseline
-            )
+            if "2b" in phases:
+                model.load_checkpoint(
+                    str(select_ckpt(2, prefer_best=True)), map_location=device
+                )
+                run_stage2b_flatten(
+                    model,
+                    train_loader,
+                    device,
+                    batch_to_device=_batch_to_device,
+                    out_path=CKPTS["stage2b_flat"],
+                    report_path=REPORTS["stage2b"],
+                    source_ckpt=select_ckpt(2, prefer_best=True),
+                )
     
         elif stage == 3:
-            run_stage3_prior(
+            model.load_checkpoint(
+                str(select_ckpt(2, prefer_best=True)), map_location=device
+            )
+            run_stage3_lct(
+                model,
+                train_loader,
+                test_loader,
+                device,
+                batch_to_device=_batch_to_device,
+                flat_codebook_path=CKPTS["stage2b_flat"],
+                out_path=CKPTS["stage3_lct"],
+                report_path=REPORTS["stage3_lct"],
+                epochs=STAGE3_EPOCHS,
+                batches_per_epoch=STAGE3_BATCHES_PER_EPOCH,
+                n_textons=STAGE3_NUM_TEXTONS,
+                tex_basis=STAGE3_TEXTON_BASIS,
+            )
+    
+        elif stage == 4:
+            run_stage4_prior(
                 model,
                 train_loader,
                 val_loader,
@@ -4648,43 +4329,6 @@ def main():
             test_loader=test_loader,
             device=device,
             assay_indices=assay_indices,
-        )
-
-    # ============================================================
-    # Combined Stage 1 → Stage 2 plots/reports
-    # ============================================================
-    
-    stage2_report_for_plots = (
-        REPORTS["stage2"]
-        if REPORTS["stage2"].exists()
-        else REPORTS["stage2a"]
-    )
-
-    if REPORTS["stage1"].exists() and stage2_report_for_plots.exists():
-        plot_base_then_finetune(
-            report_base_path=str(REPORTS["stage1"]),
-            report_ft_path=str(stage2_report_for_plots),
-            out_dir="../viz_out_vqvae/plots_stage1_stage2_overlays",
-            mode="shared",                 # use "union" if you want every metric possible
-            truncate_base_at_best=False,    # shows full stage 1 curve
-            save_pdf=True,
-            base_label="Stage 1: context-agnostic VQVAE",
-            ft_label="Stage 2: context-conditioned decoder",
-            base_eval_roots=[str(VIZ_ROOTS[1])],
-            ft_eval_roots=[str(VIZ_ROOTS[2])],
-        )
-    
-        export_base_finetune_flat_xlsx(
-            report_base_path=str(REPORTS["stage1"]),
-            report_ft_path=str(stage2_report_for_plots),
-            out_xlsx="reports/training_report_stage1_stage2_flat.xlsx",
-            shift_finetune_by="best",
-        )
-        
-        export_viz_quant_tables(
-            eval_roots=[str(VIZ_ROOTS[1]), str(VIZ_ROOTS[2])],
-            stage_names=["stage1", "stage2"],
-            out_dir="../viz_out_vqvae/quant_tables_ctx_adj",
         )
 
 if __name__ == "__main__":

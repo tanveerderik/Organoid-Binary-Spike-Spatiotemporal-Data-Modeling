@@ -10,9 +10,9 @@ Created on Fri Mar 13 12:08:19 2026
 
 from .train_vqvae import fit_vqvae
 from .train_prior import train_motif_prior_mgit
-from .stage3_activity import (
-    configure_stage3c_event_calibration,
-    evaluate_true_stage3_generation,
+from .stage4_activity import (
+    configure_stage4c_event_calibration,
+    evaluate_true_stage4_generation,
     train_maskgit_activity_prior,
     train_activity_prior_with_frozen_motif,
 )
@@ -34,8 +34,8 @@ __all__ = [
     "train_motif_prior_mgit",
     "train_maskgit_activity_prior",
     "train_activity_prior_with_frozen_motif",
-    "configure_stage3c_event_calibration",
-    "evaluate_true_stage3_generation",
+    "configure_stage4c_event_calibration",
+    "evaluate_true_stage4_generation",
     "evaluate_vqvae",
     "build_context_prior",
     "load_context_prior",

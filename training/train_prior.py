@@ -325,7 +325,7 @@ def train_motif_prior_mgit(
     memory_adj_conf_den_scale: float = 100.0,
 ):
     """
-    Stage 3A.
+    Stage 4A.
 
     Trains MaskGITMotifPrior only:
         teacher-forced activity + masked z1/z2 -> z1/z2
@@ -529,7 +529,7 @@ def train_motif_prior_mgit(
                         
                             if target_vol.shape != logits_vol.shape:
                                 raise RuntimeError(
-                                    "Stage 3A local field target/decoder shape mismatch: "
+                                    "Stage 4A local field target/decoder shape mismatch: "
                                     f"target={tuple(target_vol.shape)}, "
                                     f"logits={tuple(logits_vol.shape)}"
                                 )
@@ -738,7 +738,7 @@ def train_motif_prior_mgit(
                         
                             if target_vol.shape != logits_vol.shape:
                                 raise RuntimeError(
-                                    "Stage 3A validation local field target/decoder "
+                                    "Stage 4A validation local field target/decoder "
                                     "shape mismatch: "
                                     f"target={tuple(target_vol.shape)}, "
                                     f"logits={tuple(logits_vol.shape)}"
@@ -1024,7 +1024,7 @@ def train_motif_prior_mgit(
             torch.save(
                 {
                     # Key must be "model" to match the loss-selected checkpoint
-                    # and main._load_stage3_motif_best, which reads ckpt["model"].
+                    # and main._load_stage4_motif_best, which reads ckpt["model"].
                     "model": motif_prior.state_dict(),
                     "epoch": ep,
                     "best_val_z1_acc": best_val_z1_acc,
@@ -1061,6 +1061,6 @@ def train_motif_prior_mgit(
 
 
 
-# Stage 3A and the shared encoding helpers live in this module. Stage 3B/3C are
-# in stage3_activity.py and are imported from there directly; the backward-compat
+# Stage 4A and the shared encoding helpers live in this module. Stage 4B/3C are
+# in stage4_activity.py and are imported from there directly; the backward-compat
 # shims that used to re-export them here went with the DETR implementations.
