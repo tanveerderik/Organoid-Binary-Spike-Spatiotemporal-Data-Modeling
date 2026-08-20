@@ -1,8 +1,16 @@
 # analysis/
 
-Post-hoc artifacts for defending the Stage 4 generation composite. Neither
-script trains anything or touches the GPU; both run against real data or
-against a training report that already exists.
+Post-hoc artifacts for defending the Stage 4 generation composite. Nothing here
+trains anything.
+
+| script | needs GPU | answers |
+|---|---|---|
+| `generation_metric_reference.py` | no | what does a score of 0.63 mean? |
+| `generation_weight_sensitivity.py` | no | do the hand-set weights matter? |
+| `generation_seed_spread.py` | **yes** | how much of a difference is just sampling noise? |
+
+The first two are model-free and safe to run against a busy GPU. The third runs
+the real sampling path.
 
 ## generation_metric_reference.py
 
@@ -58,3 +66,37 @@ does not depend on the exact weights.
         --report reports/training_report_prior_4B.json
 
 Run both once 4B and 4C have finished.
+
+## generation_seed_spread.py
+
+The composite is scored by *sampling* over a capped number of validation
+batches, so it carries stochastic noise of its own. Two checkpoints separated by
+less than that noise are indistinguishable, and any claim that one beat another
+needs this number attached.
+
+Scores one fixed checkpoint repeatedly, varying only the sampling seed.
+Validation masks stay deterministic, so the measured spread is MaskGIT decoding
+noise alone -- not data variation, not mask variation.
+
+    python analysis/generation_seed_spread.py --phase 4b --seeds 8
+
+`--activity-ckpt` / `--motif-ckpt` override checkpoint selection, for scoring a
+specific candidate rather than whichever one the phase would pick.
+
+Judge the result against the reference ladder above: if the seed spread is
+comparable to the real-vs-real ceiling spread (sd 0.0239 on the distribution
+subscore), the metric is at its resolution limit and finer comparisons are not
+supportable. Report both numbers together.
+
+**Needs the GPU** -- it runs activity -> MaskGIT -> VQ-VAE for real. Defaults are
+deliberately small; raise `--batches` only when the GPU is free.
+
+## Suggested order, once 4B and 4C have finished
+
+    python analysis/generation_metric_reference.py --split test
+    python analysis/generation_weight_sensitivity.py --report reports/training_report_prior_4B.json
+    python analysis/generation_seed_spread.py --phase 4b --seeds 8
+    python analysis/generation_seed_spread.py --phase 4c --seeds 8
+
+The first is already run; its output is in
+`reports/generation_metric_reference.json`.
