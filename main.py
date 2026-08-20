@@ -2182,6 +2182,34 @@ def load_stage4_prior(model, device, *, activity_phase: str):
 
 
 @torch.no_grad()
+def _rank_stats(rank_chunks, prefix):
+    """Rank-based summaries of a predictive ranking over the flat alphabet.
+
+    Accuracy answers "was it first?" and cross-entropy answers "how much mass
+    was on it?"; neither says where the truth sat when it was not first. These
+    do, and they are what makes a model-vs-null comparison interpretable on an
+    alphabet this wide.
+
+    Reported together because they disagree informatively: MRR is bounded per
+    token so it tracks typical behaviour, while the mean is dominated by the
+    right tail. A large gap between mean and median is the signature of a model
+    that is usually confident and occasionally lost.
+    """
+    import numpy as _np
+    if not rank_chunks:
+        return {}
+    r = _np.concatenate([_np.asarray(c, dtype=_np.float64) for c in rank_chunks])
+    if r.size == 0:
+        return {}
+    return {
+        f"{prefix}_mrr": float((1.0 / r).mean()),
+        f"{prefix}_mean_rank": float(r.mean()),
+        f"{prefix}_median_rank": float(_np.median(r)),
+        f"{prefix}_rank_le10": float((r <= 10).mean()),
+        f"{prefix}_rank_p90": float(_np.percentile(r, 90)),
+    }
+
+
 def evaluate_stage4a_predictive(model, test_loader, device, train_loader=None):
     prior = _load_stage4_eval_prior(
         model,
@@ -2247,6 +2275,11 @@ def evaluate_stage4a_predictive(model, test_loader, device, train_loader=None):
     null_totals = {
         lvl: {"correct": 0.0, "top5": 0.0, "ce": 0.0} for lvl in null_levels
     }
+    # Per-token ranks, kept rather than summed: the rank distribution is heavily
+    # right-tailed, so the mean alone misrepresents it and the median is the
+    # more honest summary. ~14k tokens per level costs nothing to hold.
+    model_ranks = []
+    null_ranks = {lvl: [] for lvl in null_levels}
 
     for batch in test_loader:
         x, gct, lct, task_id, mask_spec = _batch_to_device(
@@ -2323,6 +2356,18 @@ def evaluate_stage4a_predictive(model, test_loader, device, train_loader=None):
             totals["z1_correct"] += float(
                 z1_logits.argmax(dim=-1).eq(z1_target).sum().item()
             )
+            # Mid-rank of the true entry: strictly-better count plus half the
+            # tied block. Ties are measure-zero in float logits, so for the
+            # model this equals the strict rank and stays comparable with the
+            # training-loop MRR -- but the nulls below are heavily tied
+            # (smoothing gives every unobserved entry the same mass), and a
+            # strict rank there would score uniform at rank 1 for every token.
+            _tl = z1_logits.gather(1, z1_target.unsqueeze(1))
+            _gt = (z1_logits > _tl).sum(dim=-1).double()
+            _eq = (z1_logits == _tl).sum(dim=-1).double()
+            _rank = _gt + (_eq + 1.0) / 2.0
+            model_ranks.append(_rank.detach().cpu().numpy())
+
             z1_top5 = z1_logits.topk(
                 min(5, z1_logits.shape[-1]),
                 dim=-1,
@@ -2357,6 +2402,9 @@ def evaluate_stage4a_predictive(model, test_loader, device, train_loader=None):
                     null_totals[lvl]["ce"] += float(
                         -_np.log(_np.clip(p_true, 1e-12, None)).sum()
                     )
+                    _gt = (z1_prob > p_true[:, None]).sum(axis=1)
+                    _eq = (z1_prob == p_true[:, None]).sum(axis=1)
+                    null_ranks[lvl].append(_gt + (_eq + 1.0) / 2.0)
 
     z1_den = max(totals["z1_tokens"], 1.0)
     sample_den = max(totals["samples"], 1.0)
@@ -2369,6 +2417,7 @@ def evaluate_stage4a_predictive(model, test_loader, device, train_loader=None):
         "loss_flat_expected_distance": totals["loss_z1_expected_distance"] / sample_den,
         "flat_acc": totals["z1_correct"] / z1_den,
         "flat_top5_acc": totals["z1_top5_correct"] / z1_den,
+        **_rank_stats(model_ranks, "flat"),
         "supervised_flat_tokens": int(totals["z1_tokens"]),
         "samples": int(totals["samples"]),
         "full_mask_prob": float(STAGE4A_EVAL_FULL_MASK_PROB),
@@ -2382,6 +2431,17 @@ def evaluate_stage4a_predictive(model, test_loader, device, train_loader=None):
             report[f"null_{lvl}_z1_acc"] = acc
             report[f"null_{lvl}_z1_top5_acc"] = top5
             report[f"null_{lvl}_z1_ce"] = ce
+            report.update(_rank_stats(null_ranks[lvl], f"null_{lvl}_z1"))
+            for _stat in ("mrr", "mean_rank", "median_rank", "rank_le10"):
+                _mk, _nk = f"flat_{_stat}", f"null_{lvl}_z1_{_stat}"
+                if _mk in report and _nk in report:
+                    # For rank statistics lower is better, so the margin is
+                    # flipped relative to accuracy.
+                    report[f"null_{lvl}_z1_{_stat}_margin"] = (
+                        (report[_mk] - report[_nk])
+                        if _stat in ("mrr", "rank_le10")
+                        else (report[_nk] - report[_mk])
+                    )
             report[f"null_{lvl}_z1_acc_margin"] = report["flat_acc"] - acc
             report[f"null_{lvl}_z1_top5_margin"] = report["flat_top5_acc"] - top5
             report[f"null_{lvl}_z1_ce_margin"] = ce - report["loss_flat"]
