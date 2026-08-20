@@ -1,118 +1,180 @@
 # Organoid-Binary-Spike-Spatiotemporal-Data-Modeling
-Context-conditioned hierarchical VQ-VAE for ultra-sparse binary neural spike data (x,y,t). Learns discrete spatiotemporal motifs using multi-level codebooks, with biologically constrained reconstruction and context-aware generation for downstream generative modeling (e.g., MAGVIT-style priors).
 
-# Context-Conditioned Hierarchical VQ-VAE for Sparse Neural Spike Modeling
+Context-conditioned hierarchical VQ-VAE plus a MaskGIT-style discrete prior for
+ultra-sparse binary neural spike data (x, y, t). The VQ-VAE learns discrete
+spatiotemporal motifs on a three-level codebook ladder; the prior learns to
+generate those motifs conditioned on assay and activity context.
+
+---
 
 ## Overview
-This repository implements a **context-conditioned hierarchical Vector Quantized Variational Autoencoder (VQ-VAE)** for modeling **ultra-sparse binary neural spike data** represented as spatiotemporal volumes \((x, y, t)\). The data originates from electrophysiological recordings of neural cultures, where spike activity is rare, structured, and governed by biological constraints.
 
-The goal is to learn a **discrete latent representation of neural activity motifs** that supports accurate reconstruction and controlled generation, while remaining consistent with both spatial and temporal dynamics.
+The data comes from electrophysiological recordings of neural cultures and
+organoids, represented as **binary spatiotemporal volumes** where a voxel is 1
+if a spike occurred at that electrode and time bin. Spike density is on the
+order of **1e-4**, so almost every voxel is zero.
 
----
+The pipeline has two halves:
 
-## Motivation
-Neural spike data presents several key challenges:
-- **Extreme sparsity** (dominance of zero-valued regions)
-- **Stochastic spike placement**
-- **Strong spatial and temporal dependencies**
-
-Naïve models tend to:
-- Collapse to all-zero outputs, or  
-- Overproduce spikes that violate biological realism  
-
-This project addresses these issues through:
-- Hierarchical latent discretization  
-- Context-aware conditioning  
-- Carefully designed loss functions and constraints  
+1. **A hierarchical VQ-VAE** that compresses a volume into a grid of discrete
+   motif tokens and reconstructs it under biological constraints.
+2. **A MaskGIT-style prior** over those tokens, which makes the model
+   generative rather than merely compressive.
 
 ---
 
-## Key Features
+## Data representation
 
-### Hierarchical VQ-VAE Architecture
-- Multi-level codebooks (VQ-VAE2-style)
-- Coarse-to-fine representation learning
-- Residual refinement for precise spike placement
+| | |
+|---|---|
+| Input volume | `48 x 120 x 224` (t, h, w) after temporal pooling of a 6000-sample crop by 120 |
+| Patch size | `6 x 15 x 14` |
+| Token grid | `8 x 8 x 16` = **1024 token positions** |
+| Spike voxel probability | ~1.2e-4 |
 
-### Context Conditioning
-- **Global context**: assay or experimental identifiers  
-- **Local context**: activity features (density, variability, heterogeneity, etc.)  
-- Decoder cross-attention for controlled generation  
-
-### Sparse Data Handling
-- Loss balancing to prevent all-zero collapse  
-- Spike-sensitive reconstruction objectives  
-- Separation of active vs. blank regions  
-
-### Biological Constraints
-- Temporal adjacency / short-gap (ISI) regularization  
-- Spatial support constraints (token-level and pixel-level)  
-- Activity statistics alignment  
-
-### Memory Bank Priors
-- Assay-wise spatial support maps  
-- Temporal adjacency distributions  
-- Used for pretraining global context embeddings  
+Splits are **temporal within assay** (a clip's later time range is held out from
+its own earlier range), not random, so held-out clips are never interleaved with
+training clips from the same recording.
 
 ---
 
-## Training Pipeline
+## Architecture
 
-The model is trained in multiple stages:
+**Encoder / decoder** — transformer, embed dim 64, depth 2, 4 heads, code dim
+64. The decoder is **dense**: it reconstructs the full volume from `z_q` plus a
+blank-token embedding, with temporal-causal decoder attention.
 
-### Stage 0: Global Context (GCT) Embedding Pretraining
-- Learns assay-specific embeddings  
-- Uses memory banks:
-  - Tokenwise spatial support  
-  - Pixelwise spatial support  
-  - Temporal adjacency statistics  
+**Quantizer** — a **three-level residual ladder** with `(32, 8, 4)` codes per
+level. Level 1 picks a coarse motif, levels 2 and 3 refine it. The ladder spans
+`32 x 8 x 4 = 1024` nominal combinations. (This equals the token-grid size by
+coincidence; they are unrelated quantities.)
 
-### Stage 1: Context-Agnostic VQ-VAE Training
-- Encoder and codebooks learn spike motifs  
-- No context conditioning  
-- Focus on robust latent representation  
+**Context** enters in two distinct ways, and *not* through decoder
+cross-attention:
 
-### Stage 2: Context-Conditioned Decoder Training
-- Encoder and codebooks are frozen  
-- Decoder learns to use context via cross-attention  
-- Enables controlled and biologically consistent generation  
+- **Global context (gct)** — a 64-dim assay descriptor mapped to 32 dims,
+  pretrained against memory-bank priors (tokenwise and pixelwise spatial support,
+  temporal adjacency statistics).
+- **Local context (lct)** — 9 clip-level activity features mapped to 32 dims by
+  a trained MLP trunk.
 
-### (Planned) Stage 3: Token Prior Learning
-- MAGVIT / MaskGIT-style prior over codebook tokens  
-- Enables full generative modeling  
+Inside the VQ-VAE, context adherence is produced by `ctx_loss_soft`, an
+**output-space** loss that reads context features back out of the reconstructed
+logits volume. In the prior, gct and lct enter as **prefix tokens**.
 
----
-
-## Model Design Highlights
-
-- **Encoder**: Sparse-aware, processes primarily active regions  
-- **Codebooks**: Discrete latent representations of spike motifs  
-- **Decoder**: Dense reconstruction with optional context conditioning  
-- **Type Embedding**: Separates blank vs. active patches  
-- **Loss Design**:
-  - Weighted reconstruction loss  
-  - Tolerant spike matching  
-  - Spatial violation penalties  
-  - Temporal adjacency constraints  
-  - Codebook regularization  
+> **Note on removed machinery.** Earlier versions used decoder cross-attention
+> and a continuous residual projector. Both were removed: cross-attention was
+> measurably inert (gate pinned at init, conditional and unconditional outputs
+> identical to five decimals), and the continuous residual was superseded by the
+> three-level discrete ladder. They survive in the codebase only as key filters
+> that strip those entries when loading older checkpoints.
 
 ---
 
-## Applications
-- Neural activity modeling and simulation  
-- Electrophysiology data generation  
-- Spike motif discovery  
-- Organoid intelligence research  
-- Context-aware neural signal synthesis  
+## Training pipeline
+
+Stages are selected by `TRAIN_STAGES` / `STAGE2_PHASES` / `STAGE4_PHASES` in
+`main.py`.
+
+### Stage 1 — Global context pretraining
+Learns the assay embedding against memory banks (spatial support maps, temporal
+adjacency distributions). Writes `ckpts/spatial_bias_pretrain.pt`, which is the
+sole source of the gct mapper downstream.
+
+### Stage 2A — Hierarchical VQ-VAE
+Trains encoder, three-level codebook ladder, and decoder. Levels are activated
+by a **staged loss-weight warm-up** rather than by scaling the levels, because a
+level scale != 1 biases the EMA target.
+
+### Stage 2B — Flatten the ladder
+Sums each `(z1, z2, z3)` triple into a single embedding so the prior can predict
+**one categorical** instead of three coupled ones, then **merges duplicates**.
+
+The merge criterion is pairwise-relative, matching what Stage 2A already uses
+for duplicate restarts:
+
+```
+rel = ||e_i - e_j|| / (0.5 * (||e_i|| + ||e_j||))  <  0.05
+```
+
+Relative rather than absolute because `tree_embed = ema_weight / ema_count`, so
+rarely-used entries have small denominators and inflated norms — a single global
+distance scale would be meaningless. Result: **1024 nominal -> 961 rows, 63
+merges**, with no frequency filtering and no out-of-alphabet bin.
+
+### Stage 3 — Local context mapper
+Trains the lct trunk (9 -> 256 -> 256 -> 32) on frozen codes, scored as dNLL
+against the marginal in nats/token. gct dominates on flat-code identity while
+**lct dominates on textons** — that inversion is what justifies lct as a separate
+stream rather than a weaker copy of gct.
+
+### Stage 4 — Discrete prior
+- **4A — motif prior.** MaskGIT-style masked prediction over the 961-entry flat
+  alphabet, conditioned on gct, lct, and a task token.
+- **4B — activity prior.** Predicts which token positions are active and their
+  counts. Selected on **NLL, not F1**, because F1 is maximised by emitting the
+  mode.
+- **4C — refinement.** Refines with the motif prior frozen, and runs the only
+  end-to-end generation validation in the pipeline
+  (`iterative_unmask_motif_given_activity` -> `decode_flat_ids_to_xgen`).
 
 ---
 
-## Project Status
-⚠️ Active research project  
-- Architecture and training strategies are under continuous development  
-- Designed for extensibility toward generative priors and foundation models  
+## Evaluation discipline
+
+Accuracy against a ~1000-way alphabet means nothing on its own, so Stage 4A is
+always scored against a **null ladder** fitted on the training split only:
+
+| level | what it predicts |
+|---|---|
+| `uniform` | uniform over the alphabet |
+| `global` | the global marginal code frequency |
+| `assay` | the per-assay marginal |
+| `assay_position` | per (assay, token position), hierarchically smoothed |
+
+`assay_position` is the bar: it is a memorised lookup table of "what motif
+usually occupies this latent location in this preparation". Smoothing toward the
+assay and global levels is load-bearing — the per-cell table averages ~2.5
+observations, so unsmoothed counts are noise.
+
+Model and nulls are always scored **in a single process on the identical
+supervised token set**. Null tables from different runs are not comparable,
+because the supervised token set differs.
+
+Other conventions:
+
+- **Report tolerant and exact AUPRC together.** Tolerant matching grants a
+  27-voxel slack, which systematically favours blurred predictions.
+- **Do not weight the classification loss by class frequency.** The flat
+  marginal has perplexity ~525 of 961 and a most/median ratio of ~12x — it is
+  not long-tailed, and weighting moves the minimiser to `q ~ w*p`, which is
+  wrong for a sampled prior.
+
+---
+
+## Repository layout
+
+```
+main.py               stage dispatch, model/prior construction, evaluation
+model/                vqvae.py, prior.py, base.py
+training/             per-stage training loops, stage2b_flatten.py, baselines.py
+inference/            sample_prior.py, decode.py, metrics_gen.py
+utils/                losses, memory banks
+dataset.py            assay discovery, splits, loaders
+ckpts/ reports/       checkpoints and JSON training/evaluation reports
+```
+
+---
+
+## Project status
+
+Active research project. Stages 1 through 3 are complete; Stage 4 is in
+progress. Architecture and training strategy are under continuous development.
 
 ---
 
 ## Keywords
-VQ-VAE, neural spikes, sparse data, electrophysiology, generative modeling, transformers, context conditioning, MAGVIT, MaskGIT, computational neuroscience
+
+VQ-VAE, MaskGIT, neural spikes, sparse binary data, electrophysiology, organoid
+intelligence, discrete representation learning, generative priors,
+computational neuroscience
