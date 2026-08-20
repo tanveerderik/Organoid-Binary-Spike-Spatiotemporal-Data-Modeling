@@ -49,8 +49,7 @@ level. Level 1 picks a coarse motif, levels 2 and 3 refine it. The ladder spans
 `32 x 8 x 4 = 1024` nominal combinations. (This equals the token-grid size by
 coincidence; they are unrelated quantities.)
 
-**Context** enters in two distinct ways, and *not* through decoder
-cross-attention:
+**Context** enters in two distinct ways:
 
 - **Global context (gct)** — a 64-dim assay descriptor mapped to 32 dims,
   pretrained against memory-bank priors (tokenwise and pixelwise spatial support,
@@ -61,13 +60,6 @@ cross-attention:
 Inside the VQ-VAE, context adherence is produced by `ctx_loss_soft`, an
 **output-space** loss that reads context features back out of the reconstructed
 logits volume. In the prior, gct and lct enter as **prefix tokens**.
-
-> **Note on removed machinery.** Earlier versions used decoder cross-attention
-> and a continuous residual projector. Both were removed: cross-attention was
-> measurably inert (gate pinned at init, conditional and unconditional outputs
-> identical to five decimals), and the continuous residual was superseded by the
-> three-level discrete ladder. They survive in the codebase only as key filters
-> that strip those entries when loading older checkpoints.
 
 ---
 
