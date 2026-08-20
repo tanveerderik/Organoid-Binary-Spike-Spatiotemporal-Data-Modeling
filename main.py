@@ -39,6 +39,7 @@ except RuntimeError:
 
 from .dataset import make_loaders_for_assays, burst_collate
 from .model import TransformerVQVAE, MaskGITActivityPrior, MaskGITMotifPrior, HierarchicalCodebookPrior
+from .model.base import CtxEmbed, LctMapper
 from .model.prior import (
     build_activity_targets_from_codes,
     maskgit_activity_loss,
@@ -402,6 +403,9 @@ CKPTS = {
     "activity_prior_best_loss": CKPT_DIR / "activity_prior_best_loss.pt",
     "activity_prior_best_hard_metric": CKPT_DIR / "activity_prior_best_hard_metric.pt",
     "activity_prior_refined_best": CKPT_DIR / "activity_prior_refined_best.pt",
+
+    # Standalone context mappers consumed by the prior prefix.
+    "stage3_lct": CKPT_DIR / "stage1c_lct_final.pt",
 }
 
 REPORTS = {
@@ -1505,6 +1509,54 @@ def measure_stage3_active_token_counts(
     return stats
 
 
+def build_context_mappers(model, device):
+    """Rebuild the two context mappers as standalone frozen modules.
+
+    Neither lives inside the VQ-VAE any more:
+
+      gct  -- CtxEmbed, half of the Stage-1 gct pair. The VQ-VAE still owns a
+              copy for spatial_map_prior, but SPATIAL_CKPT is the source of
+              truth, so the prior loads from disk rather than from whatever
+              stage happens to be resident in `model`.
+      lct  -- LctMapper, a Stage-3 artifact trained with the encoder frozen.
+              It was never part of the VQ-VAE.
+
+    Both are returned in eval() with requires_grad False: the prefix must be a
+    fixed function of the request, not something prior training can drift.
+    """
+    gct_mapper = CtxEmbed(
+        int(model.global_ctx_in_dim),
+        int(model.global_emb_dim),
+        mlp_ratio=2.0,
+        drop=0.0,
+        alpha_init=0.1,
+    )
+    if not SPATIAL_CKPT.exists():
+        raise FileNotFoundError(
+            f"gct mapper source missing: {SPATIAL_CKPT}. Run stage 1 first."
+        )
+    gct_state = torch.load(str(SPATIAL_CKPT), map_location="cpu")["global_embedder"]
+    gct_mapper.load_state_dict(gct_state, strict=True)
+
+    lct_path = Path(CKPTS["stage3_lct"])
+    if not lct_path.exists():
+        raise FileNotFoundError(
+            f"lct mapper source missing: {lct_path}. Run stage 3 first."
+        )
+    lct_mapper = LctMapper.from_stage3_checkpoint(lct_path, map_location="cpu")
+
+    for mapper in (gct_mapper, lct_mapper):
+        mapper.to(device).eval()
+        for parameter in mapper.parameters():
+            parameter.requires_grad = False
+
+    print(
+        f"context mappers: gct {model.global_ctx_in_dim}->{model.global_emb_dim} "
+        f"from {SPATIAL_CKPT.name} | lct 9->{lct_mapper.out_dim} from {lct_path.name}"
+    )
+    return gct_mapper, lct_mapper
+
+
 def build_prior_from_model(
     model,
     device,
@@ -1512,8 +1564,7 @@ def build_prior_from_model(
     Kmax,
     coordinate_mode=None,
 ):
-    gct_mapper = copy.deepcopy(model.global_embedder).eval()
-    lct_mapper = copy.deepcopy(model.local_embedder).eval()
+    gct_mapper, lct_mapper = build_context_mappers(model, device)
 
     K1 = int(model.vq.num_codes_per_level[0])
     K2 = int(model.vq.num_codes_per_level[1])
@@ -1547,7 +1598,7 @@ def build_prior_from_model(
         gct_mapper=gct_mapper,
         lct_mapper=lct_mapper,
         gct_latent_dim=model.global_emb_dim,
-        lct_latent_dim=model.local_emb_dim,
+        lct_latent_dim=lct_mapper.out_dim,
         d_model=128,
         n_layer=4,
         n_head=4,
@@ -4510,12 +4561,14 @@ def main():
     
             # Build the retrieval bank using the best Stage 0
             # global-context embedding.
+            _, _lct_mapper = build_context_mappers(model, device)
             build_context_prior(
                 train_loader,
                 save_path="ckpts/context_prior.pkl",
                 model=model,
                 device=device,
                 feature_names=ACTIVITY_CTX_NAMES,
+                lct_mapper=_lct_mapper,
             )
     
         elif stage == 1:

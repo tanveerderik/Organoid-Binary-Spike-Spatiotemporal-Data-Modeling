@@ -49,6 +49,66 @@ class CtxEmbed(nn.Module):
         return self.ln(h)
     
     
+class LctMapper(nn.Module):
+    """Stage-3 local-context mapper: 9 activity features -> 32-d prefix latent.
+
+    Trained standalone against flat-code, texton and temporal targets with the
+    encoder and codebook frozen.  Only the trunk is the artifact: the per-target
+    heads exist to shape it and are discarded.
+
+    The normalization buffers travel with the module so the prefix the prior
+    sees is byte-identical to what the trunk was trained on, rather than
+    depending on a caller remembering to standardize.
+    """
+
+    def __init__(self, in_dim: int = 9, hidden: int = 256, out_dim: int = 32,
+                 drop: float = 0.1):
+        super().__init__()
+        # Indices 0/3/6 are the Linear layers; the checkpoint keys depend on it.
+        self.trunk = nn.Sequential(
+            nn.Linear(in_dim, hidden), nn.GELU(), nn.Dropout(drop),
+            nn.Linear(hidden, hidden), nn.GELU(), nn.Dropout(drop),
+            nn.Linear(hidden, out_dim),
+        )
+        self.register_buffer("ctx_mean", torch.zeros(in_dim), persistent=True)
+        self.register_buffer("ctx_scale", torch.ones(in_dim), persistent=True)
+        self.out_dim = int(out_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = (x - self.ctx_mean.to(x)) / self.ctx_scale.to(x).clamp_min(1e-6)
+        return self.trunk(x)
+
+    @classmethod
+    def from_stage3_checkpoint(cls, path, map_location="cpu", arm: str = "lct"):
+        """Rebuild from a Stage-3 checkpoint, taking one arm's trunk only."""
+        ckpt = torch.load(str(path), map_location=map_location)
+        arms = ckpt["arms"]
+        prefix = f"{arm}.trunk."
+        trunk_sd = {
+            k[len(prefix):]: v for k, v in arms.items() if k.startswith(prefix)
+        }
+        if not trunk_sd:
+            raise KeyError(
+                f"No '{arm}' trunk in {path}; found arms "
+                f"{sorted({k.split('.')[0] for k in arms})}"
+            )
+        in_dim = int(trunk_sd["0.weight"].shape[1])
+        hidden = int(trunk_sd["0.weight"].shape[0])
+        out_dim = int(trunk_sd["6.weight"].shape[0])
+        module = cls(in_dim=in_dim, hidden=hidden, out_dim=out_dim)
+        module.trunk.load_state_dict(trunk_sd, strict=True)
+        if "local_ctx_mean" in ckpt:
+            module.ctx_mean.copy_(
+                torch.as_tensor(ckpt["local_ctx_mean"], dtype=torch.float32).reshape(-1)
+            )
+        if "local_ctx_scale" in ckpt:
+            module.ctx_scale.copy_(
+                torch.as_tensor(ckpt["local_ctx_scale"], dtype=torch.float32)
+                .reshape(-1).clamp_min(1e-6)
+            )
+        return module
+
+
 class HierarchicalVectorQuantizerEMA(nn.Module):
     def __init__(
         self,

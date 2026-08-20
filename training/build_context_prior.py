@@ -144,9 +144,20 @@ def embed_context_arrays(
     *,
     device,
     batch_size: int = 512,
+    lct_mapper=None,
 ) -> Tuple[np.ndarray, np.ndarray]:
+    """Embed the collected context arrays.
+
+    The gct embedder still lives on the model (Stage-1 pair). The lct mapper is
+    a standalone Stage-3 artifact and must be passed in explicitly; there is no
+    model.local_embedder any more.
+    """
     if model is None:
         raise ValueError("model is required to build embedding-space context prior.")
+    if lct_mapper is None:
+        raise ValueError(
+            "lct_mapper is required: build it with main.build_context_mappers()."
+        )
 
     model.eval()
 
@@ -158,7 +169,7 @@ def embed_context_arrays(
         l = torch.from_numpy(local_all[i:i + batch_size]).float().to(device)
 
         ge = model.global_embedder(g)
-        le = model.local_embedder(l)
+        le = lct_mapper(l)
 
         g_embs.append(ge.detach().cpu().numpy().astype(np.float32))
         l_embs.append(le.detach().cpu().numpy().astype(np.float32))
@@ -192,6 +203,7 @@ def build_context_prior(
     feature_names: Optional[Sequence[str]] = None,
     verbose: bool = True,
     num_passes: int = 1,
+    lct_mapper=None,
 ) -> Dict[str, Any]:
     global_all, local_all, assay_all = collect_context_arrays(
         loader,
@@ -220,6 +232,7 @@ def build_context_prior(
         local_all,
         device=device,
         batch_size=embed_batch_size,
+        lct_mapper=lct_mapper,
     )
 
     global_emb_norm, global_emb_mean, global_emb_std = normalize_bank(global_emb_all)
@@ -275,7 +288,7 @@ def build_context_prior(
         "config": {
             "uses_pretrained_context_heads": True,
             "global_embedder": "model.global_embedder",
-            "local_embedder": "model.local_embedder",
+            "local_embedder": "stage-3 LctMapper (standalone)",
             "embed_batch_size": int(embed_batch_size),
             "max_batches": max_batches,
             "num_passes": int(num_passes),
