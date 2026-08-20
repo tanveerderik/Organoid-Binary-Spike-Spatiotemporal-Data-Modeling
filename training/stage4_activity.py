@@ -18,6 +18,7 @@ from ..model.prior import (
 )
 from ..inference.decode import (
     decode_codes_to_xgen,
+    decode_flat_ids_to_xgen,
     decode_motif_logits_soft_given_activity,
 )
 from ..inference.metrics_gen import evaluate_generation_global_metrics
@@ -40,7 +41,7 @@ from .train_prior import (
     _batch_to_device,
     _freeze_module,
     _make_activity_in_from_codes,
-    _vq_codes_alpha_and_pmask,
+    _vq_codes_and_pmask_for_prior,
     _vq_codes_and_pmask,
 )
 
@@ -750,44 +751,24 @@ def _build_inference_aligned_motif_inputs(
     visible_active = (~roi) & gt_active
     batch_size, token_count = roi.shape
 
-    z1_in = torch.full(
+    f_in = torch.full(
         (batch_size, token_count),
-        int(motif_prior.z1_null_id),
+        int(motif_prior.f_null_id),
         device=roi.device,
         dtype=torch.long,
     )
-    z2_in = torch.full(
-        (batch_size, token_count),
-        int(motif_prior.z2_null_id),
-        device=roi.device,
-        dtype=torch.long,
-    )
-    alpha_in = torch.zeros(
-        (batch_size, token_count, int(motif_prior.K2)),
-        device=roi.device,
-        dtype=motif_targets["alpha"].dtype,
-    )
 
-    z1_in[visible_active] = motif_targets["z1"][visible_active].long()
-    z2_in[visible_active] = motif_targets["z2"][visible_active].long()
-    alpha_in[visible_active] = motif_targets["alpha"][visible_active]
-
-    z1_in[pred_active] = int(motif_prior.z1_mask_id)
-    z2_in[pred_active] = int(motif_prior.z2_mask_id)
-    alpha_in[pred_active] = 0.0
+    f_in[visible_active] = motif_targets["f"][visible_active].long()
+    f_in[pred_active] = int(motif_prior.f_mask_id)
 
     decode_targets = dict(motif_targets)
     decode_targets["decode_motif_mask"] = pred_active
     decode_targets["visible_motif_mask"] = visible_active
-    decode_targets["z1_loss_mask"] = roi & gt_active
-    decode_targets["z2_loss_mask"] = roi & gt_active
-    decode_targets["alpha_loss_mask"] = roi & gt_active
+    decode_targets["f_loss_mask"] = roi & gt_active
     decode_targets["z_loss_mask"] = roi & gt_active
 
     return {
-        "z1_in": z1_in,
-        "z2_in": z2_in,
-        "alpha_in": alpha_in,
+        "f_in": f_in,
         "pred_active": pred_active,
         "visible_active": visible_active,
         "targets": decode_targets,
@@ -855,8 +836,7 @@ def evaluate_true_stage4_generation(
     max_batches: int = 4,
     motif_steps: int = 12,
     motif_temperature: float = 1.0,
-    motif_alpha_temperature: float = 1.0,
-    motif_z1_top_k: int = 5,
+    motif_top_k: int = 5,
     hard_tolerance=(0, 0, 0),
     # Optional matched-null reference. Pass the payload from
     # training.baselines.build_null_baselines to score null0/null1/null2
@@ -900,7 +880,7 @@ def evaluate_true_stage4_generation(
                     batch, x, device
                 )
 
-            codes, alpha_target, predict_mask, grid = _vq_codes_alpha_and_pmask(
+            codes, predict_mask, grid = _vq_codes_and_pmask_for_prior(
                 vqvae,
                 x,
                 global_ctx,
@@ -957,16 +937,14 @@ def evaluate_true_stage4_generation(
                 task_id=task_id,
                 roi_mask=roi,
                 visible_codes=codes,
-                visible_alpha=alpha_target,
                 steps=int(motif_steps),
                 temperature=float(motif_temperature),
-                alpha_temperature=float(motif_alpha_temperature),
-                z1_top_k=int(motif_z1_top_k),
+                top_k=int(motif_top_k),
             )
-            generated = decode_codes_to_xgen(
+            generated = decode_flat_ids_to_xgen(
                 vqvae,
-                motif_sample["codes"],
-                alpha=motif_sample["alpha"],
+                motif_sample["flat_ids"],
+                flat_codebook=motif_prior.flat_codebook,
                 grid=token_grid,
                 global_ctx=global_ctx,
                 local_ctx=local_ctx,
@@ -1431,7 +1409,7 @@ def train_activity_prior_with_frozen_motif(
                 )
 
             with torch.no_grad():
-                codes, alpha_target, predict_mask, grid = _vq_codes_alpha_and_pmask(
+                codes, predict_mask, grid = _vq_codes_and_pmask_for_prior(
                     vqvae,
                     x,
                     global_ctx,
@@ -1450,7 +1428,6 @@ def train_activity_prior_with_frozen_motif(
                     codes=codes,
                     predict_mask=predict_mask,
                     blank_code=blank_code,
-                    alpha=alpha_target,
                 )
                 activity_input = _make_activity_in_from_codes(
                     codes,
@@ -1527,19 +1504,18 @@ def train_activity_prior_with_frozen_motif(
                         hard_roi,
                     )
                     motif_logits = motif_prior.forward_with_activity_prob(
-                        z1_in=motif_inputs["z1_in"],
-                        z2_in=motif_inputs["z2_in"],
+                        f_in=motif_inputs["f_in"],
                         activity_prob=activity_full_st,
                         global_ctx=global_ctx,
                         local_ctx=local_ctx,
                         task_id=task_id,
                         roi_mask=predict_mask,
-                        alpha_in=motif_inputs["alpha_in"],
                     )
                     decoded = decode_motif_logits_soft_given_activity(
                         model=vqvae,
                         logits=motif_logits,
                         targets=motif_inputs["targets"],
+                        motif_prior=motif_prior,
                         activity_prob=activity_full_st,
                         grid=grid,
                         global_ctx=global_ctx,

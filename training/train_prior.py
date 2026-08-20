@@ -123,8 +123,10 @@ def _vq_codes_and_pmask(vqvae, x, gct, lct, mask_spec, device):
 
 
 @torch.no_grad()
-def _vq_codes_alpha_and_pmask(vqvae, x, gct, lct, mask_spec, device):
-    """Encode codes plus exact convex alpha targets from corrected Stage 2."""
+def _vq_codes_and_pmask_for_prior(vqvae, x, gct, lct, mask_spec, device):
+    """Encode ladder codes and the predict mask. No alpha: the prior speaks the
+    flat Stage-2B alphabet, and make_targets_from_codes does the (a,b,c) -> flat
+    mapping through merge_map."""
     try:
         out = vqvae(
             x,
@@ -145,26 +147,7 @@ def _vq_codes_alpha_and_pmask(vqvae, x, gct, lct, mask_spec, device):
             pmask = pmask.squeeze(-1)
         pmask = pmask.to(device=device, dtype=torch.float32)
 
-    # TODO(step5): the continuous alpha target is removed with the hull path;
-    # the prior now predicts a flat 935-entry code id directly.
-    aux = out.get("continuous_residual_aux", None)
-    if aux is None or aux.get("alpha_target", None) is None:
-        raise RuntimeError(
-            "Continuous alpha targets are no longer produced by the VQ-VAE. "
-            "This path is superseded by the flat-alphabet prior."
-        )
-
-    K2 = int(vqvae.vq.num_codes_per_level[1])
-    active = codes[..., 0].ne(getattr(vqvae.vq, "blank_code", -1))
-    alpha = torch.zeros((*codes.shape[:2], K2), device=device, dtype=torch.float32)
-    alpha_active = aux["alpha_target"].to(device=device, dtype=torch.float32)
-    if alpha_active.shape[0] != int(active.sum().item()):
-        raise RuntimeError(
-            f"alpha_target count {alpha_active.shape[0]} does not match "
-            f"active token count {int(active.sum().item())}."
-        )
-    alpha[active] = alpha_active
-    return codes, alpha, pmask, out.get("grid", None)
+    return codes, pmask, out.get("grid", None)
 
 
 def expected_code_distance_loss(logits, target, mask, distance_matrix):
@@ -301,9 +284,6 @@ def train_motif_prior_mgit(
     lambda_z1_neighbor_ce: float = 0.25,
     z1_neighbor_tau: float = 0.25,
     
-    z1_teacher_prob_start: float = 1.0,
-    z1_teacher_prob_end: float = 0.0,
-    z1_teacher_decay_epochs: int = 50,
     
     lambda_ctx: float = 1.0,
     lambda_ctx_field: float = 0.05,
@@ -372,24 +352,19 @@ def train_motif_prior_mgit(
         topk_z1 = int(topk)
         topk_z2 = int(topk)
 
-    def _make_motif_io(codes, alpha, pmask):
+    def _make_motif_io(codes, pmask):
         targets = motif_prior.make_targets_from_codes(
             codes=codes,
             predict_mask=pmask,
             blank_code=blank_code,
-            alpha=alpha,
         )
-        
-        a_in, z1_in, z2_in, alpha_in, targets = motif_prior.corrupt_inputs_from_targets(
+
+        a_in, f_in, targets = motif_prior.corrupt_inputs_from_targets(
             targets,
             ensure_at_least_one_mask=ensure_at_least_one_mask,
             full_mask_prob=full_mask_prob,
         )
-        # Permanent teacher forcing for the ALPHA branch only; the z1 head
-        # is still trained against its own predictions via its CE loss.
-        targets["z1_teacher_prob"] = 1.0
-
-        return a_in, z1_in, z2_in, alpha_in, targets
+        return a_in, f_in, targets
 
     def _run_epoch(loader, train: bool):
         motif_prior.train(train)
@@ -429,15 +404,10 @@ def train_motif_prior_mgit(
             x, gct, lct, task_id, mask_spec = _batch_to_device(batch, device)
 
             with torch.no_grad():
-                codes, alpha_target, pmask, grid = _vq_codes_alpha_and_pmask(
+                codes, pmask, grid = _vq_codes_and_pmask_for_prior(
                     vqvae, x, gct, lct, mask_spec, device
                 )
-                a_in, z1_in, z2_in, alpha_in, targets = _make_motif_io(
-                    codes, alpha_target, pmask
-                )
-                
-                if not train:
-                    targets["z1_teacher_prob"] = 0.0
+                a_in, f_in, targets = _make_motif_io(codes, pmask)
 
             if train:
                 if (it - 1) % grad_accum_steps == 0:
@@ -446,9 +416,7 @@ def train_motif_prior_mgit(
                 with torch.cuda.amp.autocast(enabled=amp_enabled):
                     logits, loss_ce, aux = motif_prior(
                         a_in,
-                        z1_in,
-                        z2_in,
-                        alpha_in=alpha_in,
+                        f_in,
                         global_ctx=gct,
                         local_ctx=lct,
                         task_id=task_id,
@@ -458,24 +426,26 @@ def train_motif_prior_mgit(
                     
                     loss_ce_raw = loss_ce
 
+                    # Distance-weighted auxiliaries now run on the flat
+                    # alphabet. The OOV logit is dropped: it has no codebook
+                    # entry, so it has no distance to anything.
+                    flat_logits_nooov = logits["flat"][..., : motif_prior.V]
+                    flat_valid = targets["f_loss_mask"] & targets["f"].lt(motif_prior.V)
                     loss_topk_z1 = distance_neighborhood_ce_loss(
-                        logits["z1"],
-                        targets["z1"],
-                        targets["z1_loss_mask"],
-                        motif_prior.z1_distance_matrix,
+                        flat_logits_nooov,
+                        targets["f"].clamp(0, motif_prior.V - 1),
+                        flat_valid,
+                        motif_prior.flat_distance_matrix,
                         k=topk_z1,
                         tau=z1_neighbor_tau,
                     )
                     loss_z1_distance = expected_code_distance_loss(
-                        logits["z1"],
-                        targets["z1"],
-                        targets["z1_loss_mask"],
-                        motif_prior.z1_distance_matrix,
+                        flat_logits_nooov,
+                        targets["f"].clamp(0, motif_prior.V - 1),
+                        flat_valid,
+                        motif_prior.flat_distance_matrix,
                     )
-                    
-                    # z2 is continuous alpha now; its stochastic logistic-normal
-                    # loss is already included in loss_ce_raw by motif_prior.
-                    loss_topk_z2 = logits["alpha_concentration"].sum() * 0.0
+                    loss_topk_z2 = logits["flat"].sum() * 0.0
                     loss_topk = (
                         float(lambda_z1_neighbor_ce) * loss_topk_z1
                         + float(lambda_z1_distance) * loss_z1_distance
@@ -494,6 +464,7 @@ def train_motif_prior_mgit(
                             model=vqvae,
                             logits=logits,
                             targets=targets,
+                            motif_prior=motif_prior,
                             activity_ids=targets["a"],
                             grid=grid,
                             global_ctx=gct,
@@ -656,9 +627,7 @@ def train_motif_prior_mgit(
                 with torch.no_grad():
                     logits, loss_ce, aux = motif_prior(
                         a_in,
-                        z1_in,
-                        z2_in,
-                        alpha_in=alpha_in,
+                        f_in,
                         global_ctx=gct,
                         local_ctx=lct,
                         task_id=task_id,
@@ -668,24 +637,26 @@ def train_motif_prior_mgit(
                     
                     loss_ce_raw = loss_ce
                     
+                    # Distance-weighted auxiliaries now run on the flat
+                    # alphabet. The OOV logit is dropped: it has no codebook
+                    # entry, so it has no distance to anything.
+                    flat_logits_nooov = logits["flat"][..., : motif_prior.V]
+                    flat_valid = targets["f_loss_mask"] & targets["f"].lt(motif_prior.V)
                     loss_topk_z1 = distance_neighborhood_ce_loss(
-                        logits["z1"],
-                        targets["z1"],
-                        targets["z1_loss_mask"],
-                        motif_prior.z1_distance_matrix,
+                        flat_logits_nooov,
+                        targets["f"].clamp(0, motif_prior.V - 1),
+                        flat_valid,
+                        motif_prior.flat_distance_matrix,
                         k=topk_z1,
                         tau=z1_neighbor_tau,
                     )
                     loss_z1_distance = expected_code_distance_loss(
-                        logits["z1"],
-                        targets["z1"],
-                        targets["z1_loss_mask"],
-                        motif_prior.z1_distance_matrix,
+                        flat_logits_nooov,
+                        targets["f"].clamp(0, motif_prior.V - 1),
+                        flat_valid,
+                        motif_prior.flat_distance_matrix,
                     )
-                    
-                    # z2 is continuous alpha now; its stochastic logistic-normal
-                    # loss is already included in loss_ce_raw by motif_prior.
-                    loss_topk_z2 = logits["alpha_concentration"].sum() * 0.0
+                    loss_topk_z2 = logits["flat"].sum() * 0.0
                     loss_topk = (
                         float(lambda_z1_neighbor_ce) * loss_topk_z1
                         + float(lambda_z1_distance) * loss_z1_distance
@@ -703,6 +674,7 @@ def train_motif_prior_mgit(
                             model=vqvae,
                             logits=logits,
                             targets=targets,
+                            motif_prior=motif_prior,
                             activity_ids=targets["a"],
                             grid=grid,
                             global_ctx=gct,
@@ -847,28 +819,22 @@ def train_motif_prior_mgit(
                         + float(lambda_spatial) * loss_spatial
                     )
 
-            z1_mask = targets["z1_loss_mask"].bool()
-            z2_mask = targets["z2_loss_mask"].bool()
+            z1_mask = targets["f_loss_mask"].bool()
+            z2_mask = z1_mask
 
             n_z1 = float(z1_mask.sum().item())
-            n_z2 = float(z2_mask.sum().item())
+            n_z2 = n_z1
 
+            # One stream now: both metric slots report the flat alphabet, so
+            # existing report keys keep working.
             mz1 = _masked_cls_metrics(
-                logits["z1"],
-                targets["z1"],
+                logits["flat"],
+                targets["f"],
                 z1_mask,
-                motif_prior.K1,
+                motif_prior.V + 1,
                 topk=topk_z1,
             )
-            # Log of the Dirichlet mean, so softmax() inside the metric
-            # recovers the mean exactly and both argmax and entropy stay valid.
-            mz2 = _masked_cls_metrics(
-                logits["alpha_mean"].clamp_min(1e-8).log(),
-                targets["alpha"].argmax(dim=-1),
-                z2_mask,
-                motif_prior.K2,
-                topk=max(1, topk_z2),
-            )
+            mz2 = mz1
 
             B = x.size(0)
 
@@ -975,15 +941,9 @@ def train_motif_prior_mgit(
 
     for ep in range(1, epochs + 1):
         
-        if z1_teacher_decay_epochs <= 0:
-            z1_teacher_prob = float(z1_teacher_prob_end)
-        else:
-            alpha = min(1.0, max(0.0, (ep - 1) / float(z1_teacher_decay_epochs)))
-            z1_teacher_prob = (
-                (1.0 - alpha) * float(z1_teacher_prob_start)
-                + alpha * float(z1_teacher_prob_end)
-            )
-        
+        # No teacher-forcing schedule: there is no second cascade stage to
+        # condition on a committed parent. One flat head, trained against its
+        # own predictions throughout.
         train_m = _run_epoch(train_loader, train=True)
         val_m = _run_epoch(val_loader, train=False) if val_loader is not None else train_m
 

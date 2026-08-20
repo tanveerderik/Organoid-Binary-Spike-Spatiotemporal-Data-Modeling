@@ -19,6 +19,7 @@ from .metrics_gen import (
 
 from .decode import (
     decode_motif_logits_soft_given_activity,
+    decode_flat_ids_to_xgen,
     decode_codes_to_xgen,
     save_generated_batch_outputs,
     save_generation_metrics_json,
@@ -28,6 +29,7 @@ __all__ = [
     "sample_hierarchical_roi",
     "ContextBankSampler",
     "decode_motif_logits_soft_given_activity",
+    "decode_flat_ids_to_xgen",
     "decode_codes_to_xgen",
     "save_generated_batch_outputs",
     "save_generation_metrics_json",

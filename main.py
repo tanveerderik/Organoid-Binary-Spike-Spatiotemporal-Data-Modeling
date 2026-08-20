@@ -61,7 +61,7 @@ from .training.stage3_lct import run_stage3_lct
 from .training.train_prior import (
     _batch_to_device,
     _make_activity_in_from_codes,
-    _vq_codes_alpha_and_pmask,
+    _vq_codes_and_pmask_for_prior,
     _vq_codes_and_pmask,
     distance_neighborhood_ce_loss,
     expected_code_distance_loss,
@@ -69,6 +69,7 @@ from .training.train_prior import (
 from .inference import (
     ContextBankSampler,
     decode_codes_to_xgen,
+    decode_flat_ids_to_xgen,
     generate_rate_surrogate,
     evaluate_generation_global_metrics,
     save_generated_batch_outputs,
@@ -1328,9 +1329,17 @@ def build_prior_from_model(
         n_maskgit_layer=STAGE4B_MASKGIT_LAYERS,
     ).to(device)
 
+    flat_path = Path(CKPTS["stage2b_flat"])
+    if not flat_path.exists():
+        raise FileNotFoundError(
+            f"Stage-2B flat codebook missing: {flat_path}. Run stage 2 phase 2b."
+        )
+    flat_cb = torch.load(str(flat_path), map_location="cpu")
+
     motif_prior = MaskGITMotifPrior(
-        K1=K1,
-        K2=K2,
+        flat_codebook=flat_cb["embed"],
+        merge_map=flat_cb["merge_map"],
+        token_grid=token_grid,
         num_tasks=4,
         gct_mapper=gct_mapper,
         lct_mapper=lct_mapper,
@@ -1339,13 +1348,7 @@ def build_prior_from_model(
         d_model=128,
         n_layer=4,
         n_head=4,
-        max_len=token_grid[0] * token_grid[1] * token_grid[2],
         dropout=0.1,
-        z1_codebook=model.vq.tree_embeds[0],
-        z2_codebook=model.vq.tree_embeds[1],
-        z1_scale=float(model.vq.level_scales[0]),
-        z2_scale=float(model.vq.level_scales[1]),
-        hull_margin_fraction=1.10 - 1.0,  # TODO(step5): removed with alpha path
     ).to(device)
 
     return HierarchicalCodebookPrior(
@@ -2080,12 +2083,6 @@ def evaluate_stage4a_predictive(model, test_loader, device, train_loader=None):
         "z1_correct": 0.0,
         "z1_top5_correct": 0.0,
         "z1_tokens": 0.0,
-        "alpha_argmax_correct": 0.0,
-        "alpha_top2_correct": 0.0,
-        "alpha_mae_sum": 0.0,
-        "alpha_target_entropy_sum": 0.0,
-        "alpha_pred_entropy_sum": 0.0,
-        "alpha_tokens": 0.0,
         "samples": 0.0,
     }
 
@@ -2100,10 +2097,15 @@ def evaluate_stage4a_predictive(model, test_loader, device, train_loader=None):
     #
     # Fit on TRAINING data only.  The tables are keyed to codebook identity,
     # so they must be rebuilt whenever Stage 1 is retrained.
-    null_levels = ("uniform", "global", "assay", "assay_position")
+    # NOTE: the null ladder was fitted over the 32-way z1 alphabet. The prior
+    # now predicts a 935-way flat code, so the cached tables are not
+    # comparable and must be rebuilt against flat ids before this ladder means
+    # anything. Disabled rather than silently reported against the wrong
+    # alphabet.
+    null_levels = ()
     null_payload = None
-    if train_loader is not None:
-        K1, K2 = int(motif_prior.K1), int(motif_prior.K2)
+    if False:
+        K1 = int(motif_prior.V)
         if MOTIF_NULL_BASELINE_PATH.exists():
             null_payload = load_motif_null_baselines(str(MOTIF_NULL_BASELINE_PATH))
             if int(null_payload.get("K1", -1)) != K1:
@@ -2131,7 +2133,7 @@ def evaluate_stage4a_predictive(model, test_loader, device, train_loader=None):
             device,
         )
         assay_idx_batch = batch.get("assay_idx", None)
-        codes, alpha_target, pmask, _ = _vq_codes_alpha_and_pmask(
+        codes, pmask, _ = _vq_codes_and_pmask_for_prior(
             model,
             x,
             gct,
@@ -2144,42 +2146,39 @@ def evaluate_stage4a_predictive(model, test_loader, device, train_loader=None):
             codes=codes,
             predict_mask=pmask,
             blank_code=blank_code,
-            alpha=alpha_target,
         )
-        a_in, z1_in, z2_in, alpha_in, targets = (
-            motif_prior.corrupt_inputs_from_targets(
-                targets,
-                ensure_at_least_one_mask=True,
-                full_mask_prob=float(STAGE4A_EVAL_FULL_MASK_PROB),
-            )
+        a_in, f_in, targets = motif_prior.corrupt_inputs_from_targets(
+            targets,
+            ensure_at_least_one_mask=True,
+            full_mask_prob=float(STAGE4A_EVAL_FULL_MASK_PROB),
         )
-        targets["z1_teacher_prob"] = 0.0
 
         logits, motif_loss, aux = motif_prior(
             a_in,
-            z1_in,
-            z2_in,
-            alpha_in=alpha_in,
+            f_in,
             global_ctx=gct,
             local_ctx=lct,
             task_id=task_id,
             targets=targets,
-            loss_weights=(1.0, 1.0),
+            loss_weights=(1.0,),
         )
 
+        flat_logits_nooov = logits["flat"][..., : motif_prior.V]
+        flat_valid = targets["f_loss_mask"] & targets["f"].lt(motif_prior.V)
+        flat_tgt = targets["f"].clamp(0, motif_prior.V - 1)
         neighbor_loss = distance_neighborhood_ce_loss(
-            logits["z1"],
-            targets["z1"],
-            targets["z1_loss_mask"],
-            motif_prior.z1_distance_matrix,
+            flat_logits_nooov,
+            flat_tgt,
+            flat_valid,
+            motif_prior.flat_distance_matrix,
             k=5,
             tau=0.25,
         )
         distance_loss = expected_code_distance_loss(
-            logits["z1"],
-            targets["z1"],
-            targets["z1_loss_mask"],
-            motif_prior.z1_distance_matrix,
+            flat_logits_nooov,
+            flat_tgt,
+            flat_valid,
+            motif_prior.flat_distance_matrix,
         )
         total_loss = (
             motif_loss
@@ -2194,12 +2193,12 @@ def evaluate_stage4a_predictive(model, test_loader, device, train_loader=None):
         totals["loss_z1_neighbor_ce"] += float(neighbor_loss.item()) * batch_size_current
         totals["loss_z1_expected_distance"] += float(distance_loss.item()) * batch_size_current
 
-        z1_mask = targets["z1_loss_mask"].bool()
+        z1_mask = targets["f_loss_mask"].bool()
         n_z1 = float(z1_mask.sum().item())
         if n_z1 > 0:
-            z1_logits = logits["z1"][z1_mask]
-            z1_target = targets["z1"][z1_mask].long()
-            totals["loss_z1"] += float(aux["loss_z1"].item()) * n_z1
+            z1_logits = logits["flat"][z1_mask]
+            z1_target = targets["f"][z1_mask].long()
+            totals["loss_z1"] += float(aux["loss_flat"].item()) * n_z1
             totals["z1_tokens"] += n_z1
             totals["z1_correct"] += float(
                 z1_logits.argmax(dim=-1).eq(z1_target).sum().item()
@@ -2239,54 +2238,17 @@ def evaluate_stage4a_predictive(model, test_loader, device, train_loader=None):
                         -_np.log(_np.clip(p_true, 1e-12, None)).sum()
                     )
 
-        alpha_mask = targets["alpha_loss_mask"].bool()
-        n_alpha = float(alpha_mask.sum().item())
-        if n_alpha > 0:
-            alpha_pred = logits["alpha_mean"][alpha_mask]
-            alpha_true = targets["alpha"][alpha_mask]
-            alpha_true_idx = alpha_true.argmax(dim=-1)
-            totals["loss_alpha"] += float(aux["loss_alpha"].item()) * n_alpha
-            totals["alpha_tokens"] += n_alpha
-            totals["alpha_argmax_correct"] += float(
-                alpha_pred.argmax(dim=-1).eq(alpha_true_idx).sum().item()
-            )
-            alpha_top2 = alpha_pred.topk(
-                min(2, alpha_pred.shape[-1]),
-                dim=-1,
-            ).indices
-            totals["alpha_top2_correct"] += float(
-                alpha_top2.eq(alpha_true_idx.unsqueeze(-1)).any(dim=-1).sum().item()
-            )
-            totals["alpha_mae_sum"] += float(
-                (alpha_pred - alpha_true).abs().mean(dim=-1).sum().item()
-            )
-            totals["alpha_target_entropy_sum"] += float(
-                (-(alpha_true * alpha_true.clamp_min(1e-12).log()).sum(dim=-1)).sum().item()
-            )
-            totals["alpha_pred_entropy_sum"] += float(
-                (-(alpha_pred * alpha_pred.clamp_min(1e-12).log()).sum(dim=-1)).sum().item()
-            )
-
-    sample_den = max(totals["samples"], 1.0)
     z1_den = max(totals["z1_tokens"], 1.0)
-    alpha_den = max(totals["alpha_tokens"], 1.0)
     report = {
         "phase": "4a",
         "loss_total": totals["loss_total"] / sample_den,
         "loss_motif_objective": totals["loss_motif_objective"] / sample_den,
-        "loss_z1": totals["loss_z1"] / z1_den,
-        "loss_alpha": totals["loss_alpha"] / alpha_den,
-        "loss_z1_neighbor_ce": totals["loss_z1_neighbor_ce"] / sample_den,
-        "loss_z1_expected_distance": totals["loss_z1_expected_distance"] / sample_den,
-        "z1_acc": totals["z1_correct"] / z1_den,
-        "z1_top5_acc": totals["z1_top5_correct"] / z1_den,
-        "alpha_argmax_acc_proxy": totals["alpha_argmax_correct"] / alpha_den,
-        "alpha_argmax_top2_acc_proxy": totals["alpha_top2_correct"] / alpha_den,
-        "alpha_mae": totals["alpha_mae_sum"] / alpha_den,
-        "alpha_target_entropy": totals["alpha_target_entropy_sum"] / alpha_den,
-        "alpha_pred_entropy": totals["alpha_pred_entropy_sum"] / alpha_den,
-        "supervised_z1_tokens": int(totals["z1_tokens"]),
-        "supervised_alpha_tokens": int(totals["alpha_tokens"]),
+        "loss_flat": totals["loss_z1"] / z1_den,
+        "loss_flat_neighbor_ce": totals["loss_z1_neighbor_ce"] / sample_den,
+        "loss_flat_expected_distance": totals["loss_z1_expected_distance"] / sample_den,
+        "flat_acc": totals["z1_correct"] / z1_den,
+        "flat_top5_acc": totals["z1_top5_correct"] / z1_den,
+        "supervised_flat_tokens": int(totals["z1_tokens"]),
         "samples": int(totals["samples"]),
         "full_mask_prob": float(STAGE4A_EVAL_FULL_MASK_PROB),
     }
@@ -2301,13 +2263,13 @@ def evaluate_stage4a_predictive(model, test_loader, device, train_loader=None):
             report[f"null_{lvl}_z1_ce"] = ce
             report[f"null_{lvl}_z1_acc_margin"] = report["z1_acc"] - acc
             report[f"null_{lvl}_z1_top5_margin"] = report["z1_top5_acc"] - top5
-            report[f"null_{lvl}_z1_ce_margin"] = ce - report["loss_z1"]
+            report[f"null_{lvl}_z1_ce_margin"] = ce - report["loss_flat"]
         strongest = max(
             null_levels, key=lambda L: report[f"null_{L}_z1_acc"]
         )
         report["null_strongest_level"] = strongest
         report["beats_strongest_null_acc"] = bool(
-            report["z1_acc"] > report[f"null_{strongest}_z1_acc"]
+            report["flat_acc"] > report[f"null_{strongest}_z1_acc"]
         )
 
     save_json_report(report, REPORTS["prior_motif_eval"])
@@ -2327,7 +2289,7 @@ def collect_generation_diagnostics(
 ):
     activity_out = sampled["activity_out"]
     activity = sampled["activity"].bool()
-    codes = sampled["codes"].long()
+    codes = sampled["flat_ids"].long().unsqueeze(-1)
 
     count_prob = torch.softmax(
         activity_out["count_logits"],
@@ -2581,12 +2543,13 @@ def evaluate_stage4_prior(
         )
 
         # This is a completely generated latent field.
-        codes = sampled["codes"]
+        # Completely generated latent field, in the flat Stage-2B alphabet.
+        flat_ids = sampled["flat_ids"]
 
-        gen = decode_codes_to_xgen(
+        gen = decode_flat_ids_to_xgen(
             model,
-            codes,
-            alpha=sampled.get("alpha", None),
+            flat_ids,
+            flat_codebook=prior.motif_prior.flat_codebook,
             grid=grid,
             global_ctx=gct_rep,
             local_ctx=lct_rep,
@@ -2926,12 +2889,13 @@ def evaluate_stage4_prior_sampled_contexts(
             motif_temperature=temperature,
         )
         
-        codes = sampled["codes"]
+        # Completely generated latent field, in the flat Stage-2B alphabet.
+        flat_ids = sampled["flat_ids"]
 
-        gen = decode_codes_to_xgen(
+        gen = decode_flat_ids_to_xgen(
             model,
-            codes,
-            alpha=sampled.get("alpha", None),
+            flat_ids,
+            flat_codebook=prior.motif_prior.flat_codebook,
             grid=grid,
             global_ctx=ctx_t["global_ctx"],
             local_ctx=ctx_t["local_ctx"],
@@ -3325,8 +3289,9 @@ def evaluate_generation_baselines(model, test_loader, device, null_baselines,
                 motif_steps=12,
                 motif_temperature=1.0,
             )
-            generated = decode_codes_to_xgen(
-                model, sampled["codes"], alpha=sampled["alpha"], grid=grid,
+            generated = decode_flat_ids_to_xgen(
+                model, sampled["flat_ids"],
+                flat_codebook=prior.motif_prior.flat_codebook, grid=grid,
                 global_ctx=gct, local_ctx=context,
                 roi_hw=batch.get("roi_hw", None), pad_hw=batch.get("pad_hw", None),
             )
@@ -3412,136 +3377,28 @@ def _generation_row(x_gen, x_target, requested_ctx, model):
 
 @torch.no_grad()
 def evaluate_motif_nulls(model, train_loader, test_loader, device, *, rebuild: bool = True):
-    """Motif prior vs empirical motif nulls, in the prior's most favourable regime.
+    """Motif prior vs empirical motif nulls.
 
-    Activity is teacher-forced from ground truth and every active ROI motif is
-    masked, matching STAGE4A_EVAL_FULL_MASK_PROB=1.0. The model additionally
-    sees true motifs at visible (non-ROI) positions, which the nulls do not, so
-    the comparison is conservative in the model's favour.
+    NOT MIGRATED to the flat alphabet, deliberately.
 
-    Reported per active ROI token:
-      z1 top-1 / top-5   motif identity (chance = 1/K1)
-      alpha MAE          convex within-motif coefficients
-      latent MSE         || z_pred - z_true ||^2 for z = e_z1 + sum_j alpha_j c_j,
-                         which is what the decoder actually consumes, reported
-                         both absolutely and relative to substituting the blank
-                         token, as a scale reference
+    Every quantity here was defined on the two-level decomposition: z1 top-1/
+    top-5 against chance 1/K1, alpha MAE over the K2 convex coefficients, and a
+    latent MSE built as e_z1 + sum_j alpha_j c_j. The prior now predicts a
+    single 935-way flat code, and ckpts/motif_null_baselines.pkl was fitted over
+    the 32-way z1 alphabet, so scoring the new predictions against the cached
+    tables would silently compare distributions of different dimension.
+
+    To restore this: rebuild the null ladder (uniform / global / assay /
+    assay_position) over flat ids using the Stage-2B merge_map, then score
+    top-1/top-5 against chance 1/V and replace the alpha/latent terms with a
+    single latent MSE ||flat_codebook[f_pred] - flat_codebook[f_true]||^2.
     """
-    prior = load_stage4_prior(model, device, activity_phase="4c")
-    motif_prior = prior.motif_prior
-    motif_prior.eval()
-    model.eval()
-    K1, K2 = int(motif_prior.K1), int(motif_prior.K2)
+    raise NotImplementedError(
+        "evaluate_motif_nulls still speaks the two-level z1/alpha protocol. "
+        "Rebuild ckpts/motif_null_baselines.pkl over the flat Stage-2B "
+        "alphabet before using it; see this function's docstring."
+    )
 
-    if rebuild or not MOTIF_NULL_BASELINE_PATH.exists():
-        payload = build_motif_null_baselines(
-            train_loader, model, K1=K1, K2=K2, device=device,
-            save_path=str(MOTIF_NULL_BASELINE_PATH),
-        )
-    else:
-        payload = load_motif_null_baselines(str(MOTIF_NULL_BASELINE_PATH))
-
-    table0 = model.vq.tree_embeds[0].detach().float()
-    table1 = model.vq.tree_embeds[1].detach().float()
-    scale0 = float(model.vq.level_scales[0])
-    scale1 = float(model.vq.level_scales[1])
-    # TODO(step5): alpha/hull decode is replaced by the flat-alphabet prior.
-    hull = 1.10
-
-    def _latent(z1_ids, alpha):
-        return scale0 * table0[z1_ids] + scale1 * hull * torch.einsum(
-            "mk,mkd->md", alpha, table1[z1_ids]
-        )
-
-    names = ["model", "uniform", "global", "assay", "assay_position"]
-    totals = {n: {"t1": 0.0, "t5": 0.0, "alpha_mae": 0.0, "latent_mse": 0.0} for n in names}
-    n_tokens = 0.0
-    blank_reference = 0.0
-    blank_code = getattr(model.vq, "blank_code", -1)
-
-    for batch in test_loader:
-        x, gct, lct, task_id, mask_spec = _batch_to_device(batch, device)
-        codes, alpha_target, pmask, _ = _vq_codes_alpha_and_pmask(
-            model, x, gct, lct, mask_spec, device
-        )
-        targets = motif_prior.make_targets_from_codes(
-            codes=codes, predict_mask=pmask, blank_code=blank_code, alpha=alpha_target
-        )
-        a_in, z1_in, z2_in, alpha_in, targets = motif_prior.corrupt_inputs_from_targets(
-            targets, ensure_at_least_one_mask=True, full_mask_prob=1.0
-        )
-        logits, _, _ = motif_prior(
-            a_in, z1_in, z2_in, alpha_in=alpha_in,
-            global_ctx=gct, local_ctx=lct, task_id=task_id, targets=None,
-        )
-        selected = targets["z1_loss_mask"].bool()
-        if not bool(selected.any()):
-            continue
-
-        z1_true = targets["z1"][selected].long()
-        alpha_true = targets["alpha"][selected].float()
-        batch_pos, token_pos = torch.nonzero(selected, as_tuple=True)
-        assay_idx = np.asarray(batch["assay_idx"]).reshape(-1)[batch_pos.cpu().numpy()]
-        positions = token_pos.cpu().numpy()
-
-        true_latent = _latent(z1_true, alpha_true)
-        blank_reference += float(
-            (model.vq.blank_token.detach().float().unsqueeze(0) - true_latent)
-            .pow(2).sum().item()
-        )
-
-        predictions = {
-            "model": (
-                logits["z1"][selected].float(),
-                logits["alpha_mean"][selected].float(),
-            )
-        }
-        for level in ("uniform", "global", "assay", "assay_position"):
-            z1_probability, alpha_estimate = motif_null_predictions(
-                payload, assay_idx, positions, level=level
-            )
-            predictions[level] = (
-                torch.from_numpy(np.log(z1_probability + 1e-12)).float().to(device),
-                torch.from_numpy(alpha_estimate).float().to(device),
-            )
-
-        for name, (z1_logits, alpha_estimate) in predictions.items():
-            top_k = z1_logits.topk(min(5, K1), dim=-1).indices
-            totals[name]["t1"] += float((z1_logits.argmax(-1) == z1_true).sum().item())
-            totals[name]["t5"] += float(
-                (top_k == z1_true.unsqueeze(-1)).any(-1).sum().item()
-            )
-            totals[name]["alpha_mae"] += float(
-                (alpha_estimate - alpha_true).abs().mean(-1).sum().item()
-            )
-            totals[name]["latent_mse"] += float(
-                (_latent(z1_logits.argmax(-1), alpha_estimate) - true_latent)
-                .pow(2).sum().item()
-            )
-        n_tokens += float(selected.sum().item())
-
-    denominator = max(n_tokens, 1.0)
-    report = {
-        "active_roi_tokens": int(n_tokens),
-        "chance_z1_top1": 1.0 / K1,
-        "blank_token_latent_mse": blank_reference / denominator,
-        "results": {
-            name: {
-                "z1_top1": values["t1"] / denominator,
-                "z1_top5": values["t5"] / denominator,
-                "alpha_mae": values["alpha_mae"] / denominator,
-                "latent_mse": values["latent_mse"] / denominator,
-                "latent_mse_vs_blank": values["latent_mse"] / max(blank_reference, 1e-9),
-            }
-            for name, values in totals.items()
-        },
-    }
-    for name in names:
-        r = report["results"][name]
-        print(f"  {name:18s} z1_top1={r['z1_top1']:.4f} z1_top5={r['z1_top5']:.4f} "
-              f"alpha_mae={r['alpha_mae']:.4f} latent_mse={r['latent_mse']:.5f}")
-    save_json_report(report, REPORTS["motif_nulls"])
-    return report
 
 
 def evaluate_and_visualize(

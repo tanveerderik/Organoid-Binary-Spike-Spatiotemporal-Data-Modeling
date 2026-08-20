@@ -151,6 +151,7 @@ def decode_motif_logits_soft_given_activity(
     logits,
     targets,
     *,
+    motif_prior,
     activity_prob=None,
     activity_ids=None,
     grid,
@@ -160,19 +161,17 @@ def decode_motif_logits_soft_given_activity(
     roi_hw=None,
     pad_hw=None,
 ):
-    """Decode current z1/convex-alpha outputs with hard-forward z1.
+    """Decode current flat-code outputs with a hard-forward argmax.
 
-    Generated positions use a straight-through z1 argmax plus continuous alpha.
-    Visible active positions retain exact Stage-2 motifs. All other positions
-    use the VQ-VAE blank latent.
+    Generated positions use a straight-through argmax over the flat Stage-2B
+    codebook. Visible active positions retain their exact encoded entry. All
+    other positions use the VQ-VAE blank latent.
     """
-    z1_t = targets["z1"].long()
-    z2_t = targets["z2"].long()
-    B, N = z1_t.shape
-    device = logits["z1"].device
-    dtype = logits["z1"].dtype
-    K1 = int(model.vq.num_codes_per_level[0])
-    K2 = int(model.vq.num_codes_per_level[1])
+    f_t = targets["f"].long()
+    B, N = f_t.shape
+    device = logits["flat"].device
+    dtype = logits["flat"].dtype
+    V = int(motif_prior.V)
 
     if activity_prob is not None:
         p_active = activity_prob.to(device=device, dtype=dtype)
@@ -183,10 +182,7 @@ def decode_motif_logits_soft_given_activity(
     if p_active.shape != (B, N):
         raise ValueError(f"p_active must have shape {(B, N)}, got {tuple(p_active.shape)}")
 
-    fallback = (
-        targets.get("z1_loss_mask", targets["z_loss_mask"]).bool()
-        | targets.get("alpha_loss_mask", targets["z_loss_mask"]).bool()
-    )
+    fallback = targets.get("f_loss_mask", targets["z_loss_mask"]).bool()
     predicted_motif = targets.get("decode_motif_mask", fallback).to(device).bool()
     default_visible = (
         targets.get("active", targets["a"].bool()).bool()
@@ -198,40 +194,20 @@ def decode_motif_logits_soft_given_activity(
     if bool((predicted_motif & visible_motif).any()):
         raise ValueError("Predicted and visible motif masks overlap.")
 
-    alpha_gt = targets.get("alpha", None)
-    if alpha_gt is None:
-        alpha_gt = F.one_hot(z2_t.clamp(0, K2 - 1), num_classes=K2).to(dtype=dtype)
-    else:
-        alpha_gt = alpha_gt.to(device=device, dtype=dtype)
-        alpha_gt = alpha_gt / alpha_gt.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+    # Flat codebook lookup. There is no parent/child split at prior time:
+    # Stage 2B already summed the ladder into one entry per token.
+    E = motif_prior.flat_codebook.detach().to(device=device, dtype=dtype)   # (V,D)
 
-    E0 = model.vq.tree_embeds[0].detach().to(device=device, dtype=dtype)
-    E1 = model.vq.tree_embeds[1].detach().to(device=device, dtype=dtype)
-    scale0 = float(model.vq.level_scales[0])
-    scale1 = float(model.vq.level_scales[1])
-    # TODO(step5): alpha/hull decode is superseded by the flat-alphabet prior.
-    margin = 1.10
     temperature = max(float(tau_z), 1e-6)
+    # The OOV bin has no codebook entry, so it can never be decoded.
+    flat_logits = logits["flat"][..., :V]
+    f_prob = F.softmax(flat_logits / temperature, dim=-1)
+    f_hard = F.one_hot(f_prob.argmax(dim=-1), num_classes=V).to(f_prob.dtype)
+    f_prob_st = f_hard + f_prob - f_prob.detach()
 
-    z1_prob = F.softmax(logits["z1"] / temperature, dim=-1)
-    z1_hard = F.one_hot(z1_prob.argmax(dim=-1), num_classes=K1).to(z1_prob.dtype)
-    z1_prob_st = z1_hard + z1_prob - z1_prob.detach()
-    # Dirichlet mean of the convex coefficients. Temperature no longer applies:
-    # the head outputs a concentration, not logits, and soft decoding wants the
-    # distribution's mean rather than a temperature-sharpened point.
-    alpha_pred = logits.get("alpha_mean", None)
-    if alpha_pred is None:
-        raise KeyError("Motif logits must contain alpha_mean (Dirichlet head).")
+    z_pred = torch.einsum("bnv,vd->bnd", f_prob_st, E)
+    z_gt = E[f_t.clamp(0, V - 1)]
 
-    parent_anchor = torch.einsum("bnk,kd->bnd", z1_prob_st, E0)
-    child_by_parent = torch.einsum("bnr,krd->bnkd", alpha_pred, E1)
-    pred_residual = torch.einsum("bnk,bnkd->bnd", z1_prob_st, child_by_parent)
-    z_pred = scale0 * parent_anchor + scale1 * margin * pred_residual
-
-    z1_gt = z1_t.clamp(0, K1 - 1)
-    z_gt = scale0 * E0[z1_gt] + scale1 * margin * torch.einsum(
-        "bnr,bnrd->bnd", alpha_gt.detach(), E1[z1_gt]
-    )
     blank_token = model.vq.blank_token.detach().to(device=device, dtype=dtype)
     z_blank = blank_token.view(1, 1, -1).expand(B, N, -1)
     z_active = torch.where(visible_motif.unsqueeze(-1), z_gt, z_blank)
@@ -253,8 +229,8 @@ def decode_motif_logits_soft_given_activity(
     )
     logits_vol = model.unpatchify(pred_patches, grid)
     return {
-        "z_q": z_q, "p_active": p_active, "z1_prob_st": z1_prob_st,
-        "alpha_pred": alpha_pred, "predicted_motif_mask": predicted_motif,
+        "z_q": z_q, "p_active": p_active, "flat_prob_st": f_prob_st,
+        "predicted_motif_mask": predicted_motif,
         "visible_motif_mask": visible_motif, "logits_vol": logits_vol,
         "logits_vol_raw": logits_vol_raw, "pred_patches": pred_patches,
         "pred_patches_raw": pred_patches_raw, "spatial_diag": spatial_diag,
@@ -267,11 +243,64 @@ def decode_motif_logits_soft_given_activity(
 
 
 @torch.no_grad()
+def decode_flat_ids_to_xgen(
+    model,
+    flat_ids,
+    *,
+    flat_codebook,
+    grid,
+    global_ctx,
+    local_ctx,
+    threshold: Optional[float] = None,
+    roi_hw=None,
+    pad_hw=None,
+):
+    """Decode generated flat Stage-2B ids straight to a spike volume.
+
+    There is no ladder to walk at inference: the flat entry already IS
+    s0*z1 + s1*z2 + s2*z3. Inactive positions (-1) take the VQ blank token.
+    """
+    device = next(model.parameters()).device
+    flat_ids = flat_ids.to(device=device, dtype=torch.long)
+    B, N = flat_ids.shape
+    V = int(flat_codebook.shape[0])
+
+    E = flat_codebook.detach().to(device=device, dtype=torch.float32)
+    blank = model.vq.blank_token.detach().to(device=device, dtype=torch.float32)
+
+    active = flat_ids.ge(0)
+    z_q = blank.view(1, 1, -1).expand(B, N, -1).clone()
+    z_q[active] = E[flat_ids[active].clamp(0, V - 1)]
+
+    dec = model._decode_quantized_latent(
+        z_q=z_q,
+        active_mask=active,
+        grid=grid,
+        global_ctx=global_ctx,
+        roi_hw=roi_hw,
+        pad_hw=pad_hw,
+    )
+
+    logits = dec["logits_vol"]
+    prob = torch.sigmoid(logits)
+    if threshold is None:
+        threshold = float(model.best_thr_tol.item())
+
+    return {
+        "logits": logits,
+        "prob": prob,
+        "x_gen": (prob >= threshold).float(),
+        "threshold": float(threshold),
+        "z_q": z_q,
+        "active": active,
+    }
+
+
+@torch.no_grad()
 def decode_codes_to_xgen(
     model,
     codes,
     *,
-    alpha=None,
     grid,
     global_ctx,
     local_ctx,
@@ -282,7 +311,6 @@ def decode_codes_to_xgen(
     dec = model.decode_from_codes(
         codes,
         grid=grid,
-        alpha=alpha,
         global_ctx=global_ctx,
         local_ctx=local_ctx,
         roi_hw=roi_hw,

@@ -59,17 +59,21 @@ def iterative_unmask_motif_given_activity(
     task_id,
     roi_mask=None,
     visible_codes=None,
-    visible_alpha=None,
     steps: int = 12,
     temperature: float = 1.0,
-    alpha_temperature: float = 1.0,
-    z1_top_k: int = 5,
+    top_k: int = 5,
 ):
-    """MaskGIT z1 sampling plus stochastic logistic-normal alpha sampling."""
+    """MaskGIT sampling over the flat Stage-2B alphabet.
+
+    One stream, one pass per step. The old two-pass rule existed only because
+    alpha was a distribution over the children of ONE parent, so it had to be
+    re-conditioned on the z1 actually sampled. A flat code has no parent, so
+    that entire dance disappears.
+    """
     device = global_ctx.device
     activity = activity.to(device).long().clamp(0, 1)
     B, N = activity.shape
-    K2 = int(prior.K2)
+    V = int(prior.V)
     steps = int(max(1, steps))
     a = activity
 
@@ -81,102 +85,41 @@ def iterative_unmask_motif_given_activity(
         if roi.shape != (B, N):
             raise ValueError(f"roi_mask must have shape {(B, N)}, got {tuple(roi.shape)}")
 
-    z1 = torch.full((B, N), prior.z1_null_id, device=device, dtype=torch.long)
-    # z2 IDs are retained only as mask/null state and dominant-child summaries
-    # for the transformer input. Final decoding uses the full alpha tensor.
-    z2 = torch.full((B, N), prior.z2_null_id, device=device, dtype=torch.long)
-    alpha = torch.zeros((B, N, K2), device=device, dtype=torch.float32)
+    f = torch.full((B, N), prior.f_null_id, device=device, dtype=torch.long)
 
     active = a.eq(prior.a_active_id)
     if visible_codes is not None:
         visible_codes = visible_codes.to(device=device, dtype=torch.long)
-        if visible_codes.shape != (B, N, 2):
+        if visible_codes.dim() != 3 or visible_codes.size(-1) < 3:
             raise ValueError(
-                f"visible_codes must have shape {(B, N, 2)}, got {tuple(visible_codes.shape)}"
+                f"visible_codes must have shape {(B, N, 3)}, "
+                f"got {tuple(visible_codes.shape)}"
             )
-        visible_active = (
-            visible_codes[..., 0].ge(0)
-            & visible_codes[..., 1].ge(0)
-            & (~roi)
-        )
-        z1[visible_active] = visible_codes[..., 0][visible_active].clamp(0, prior.K1 - 1)
-        z2[visible_active] = visible_codes[..., 1][visible_active].clamp(0, prior.K2 - 1)
-        if visible_alpha is None:
-            alpha[visible_active] = torch.nn.functional.one_hot(
-                z2[visible_active], num_classes=K2
-            ).float()
-        else:
-            visible_alpha = visible_alpha.to(
-                device=device, dtype=alpha.dtype
-            )
-            if visible_alpha.shape != (B, N, K2):
-                raise ValueError(
-                    f"visible_alpha must have shape {(B, N, K2)}, "
-                    f"got {tuple(visible_alpha.shape)}"
-                )
-            normalized_visible_alpha = visible_alpha / visible_alpha.sum(
-                dim=-1, keepdim=True
-            ).clamp_min(1e-8)
-            alpha[visible_active] = normalized_visible_alpha[visible_active]
+        vis_f, vis_active = prior.flat_ids_from_codes(visible_codes)
+        visible_active = vis_active & (~roi)
+        f[visible_active] = vis_f[visible_active]
 
     masked = active & roi
-    z1[masked] = prior.z1_mask_id
-    z2[masked] = prior.z2_mask_id
+    f[masked] = prior.f_mask_id
+
+    def _logits(f_state):
+        out, _, _ = prior(
+            a, f_state,
+            global_ctx=global_ctx,
+            local_ctx=local_ctx,
+            task_id=task_id,
+            roi_mask=roi_mask,
+            targets=None,
+        )
+        # The OOV bin has no codebook entry, so it must never be generated.
+        return out["flat"][..., :V]
 
     for step in range(steps):
         if not masked.any():
             break
-        logits, _, _ = prior(
-            a, z1, z2,
-            alpha_in=alpha,
-            global_ctx=global_ctx,
-            local_ctx=local_ctx,
-            task_id=task_id,
-            roi_mask=roi_mask,
-            targets=None,
-        )
 
-        z1_samp, conf_z1 = _sample_from_logits(
-            logits["z1"],
-            temperature,
-            top_k=z1_top_k,
-        )
-
-        # Second pass: condition alpha on the z1 actually sampled.
-        #
-        # alpha is a distribution over the children of ONE parent. The first
-        # pass conditions it on the soft posterior over all parents, but the
-        # decoder will use E1[z1_samp]. Re-running with alpha_condition_z1 makes
-        # the coefficients belong to the parent they are decoded against.
-        alpha_logits, _, _ = prior(
-            a, z1, z2,
-            alpha_in=alpha,
-            global_ctx=global_ctx,
-            local_ctx=local_ctx,
-            task_id=task_id,
-            roi_mask=roi_mask,
-            targets=None,
-            alpha_condition_z1=z1_samp,
-        )
-        concentration = alpha_logits["alpha_concentration"]
-        alpha_mean = alpha_logits["alpha_mean"]
-
-        if alpha_temperature <= 0:
-            # Deterministic readout: the Dirichlet mean.
-            alpha_samp = alpha_mean
-        else:
-            # Sample the convex coefficients. Temperature scales concentration:
-            # >1 sharpens toward the mean, <1 broadens. This is the step that
-            # makes generated points actually spread over the hull instead of
-            # collapsing to its interior mean.
-            scaled = (concentration / float(alpha_temperature)).clamp_min(1e-4)
-            alpha_samp = torch.distributions.Dirichlet(scaled).sample()
-
-        # Commit order: prefer confident z1 and a concentrated Dirichlet.
-        conf_alpha = alpha_mean.max(dim=-1).values * (
-            1.0 - 1.0 / (1.0 + concentration.sum(dim=-1))
-        )
-        joint_conf = (conf_z1 * conf_alpha).masked_fill(~masked, -1.0)
+        f_samp, conf = _sample_from_logits(_logits(f), temperature, top_k=top_k)
+        conf = conf.masked_fill(~masked, -1.0)
 
         num_left = masked.sum(dim=1)
         keep_ratio = 1.0 - float(step + 1) / float(steps)
@@ -186,48 +129,20 @@ def iterative_unmask_motif_given_activity(
             n_unmask = int(num_left[b].item() - num_keep_masked[b].item())
             if n_unmask <= 0:
                 continue
-            idx = torch.topk(joint_conf[b], k=n_unmask).indices
-            z1[b, idx] = z1_samp[b, idx]
-            alpha[b, idx] = alpha_samp[b, idx]
-            z2[b, idx] = alpha_samp[b, idx].argmax(dim=-1)
+            idx = torch.topk(conf[b], k=n_unmask).indices
+            f[b, idx] = f_samp[b, idx]
             masked[b, idx] = False
 
     if masked.any():
-        logits, _, _ = prior(
-            a, z1, z2,
-            alpha_in=alpha,
-            global_ctx=global_ctx,
-            local_ctx=local_ctx,
-            task_id=task_id,
-            roi_mask=roi_mask,
-            targets=None,
-        )
-        z1_final = logits["z1"].argmax(dim=-1)
-        # Same two-pass rule for the deterministic tail: condition alpha on the
-        # z1 that will actually be committed.
-        final_alpha_logits, _, _ = prior(
-            a, z1, z2,
-            alpha_in=alpha,
-            global_ctx=global_ctx,
-            local_ctx=local_ctx,
-            task_id=task_id,
-            roi_mask=roi_mask,
-            targets=None,
-            alpha_condition_z1=z1_final,
-        )
-        alpha_final = final_alpha_logits["alpha_mean"]
-        z1[masked] = z1_final[masked]
-        alpha[masked] = alpha_final[masked]
-        z2[masked] = alpha_final[masked].argmax(dim=-1)
+        f_final = _logits(f).argmax(dim=-1)
+        f[masked] = f_final[masked]
 
-    z1[~active] = prior.z1_null_id
-    z2[~active] = prior.z2_null_id
-    alpha[~active] = 0.0
+    f[~active] = prior.f_null_id
 
-    codes = torch.full((B, N, 2), -1, device=device, dtype=torch.long)
-    codes[..., 0][active] = z1[active].clamp(0, prior.K1 - 1)
-    codes[..., 1][active] = z2[active].clamp(0, prior.K2 - 1)
-    return {"codes": codes, "alpha": alpha}
+    flat_ids = torch.full((B, N), -1, device=device, dtype=torch.long)
+    flat_ids[active] = f[active].clamp(0, V - 1)
+    return {"flat_ids": flat_ids, "active": active}
+
 
 @torch.no_grad()
 def sample_hierarchical_roi(
@@ -238,15 +153,13 @@ def sample_hierarchical_roi(
     roi_mask,
     *,
     visible_codes=None,
-    visible_alpha=None,
     activity_count_temperature=1.0,
     activity_count_mode="expected",
     activity_count_stochastic_round=False,
     activity_coord_temperature=1.0,
     motif_steps=12,
     motif_temperature=1.0,
-    motif_alpha_temperature=1.0,
-    z1_top_k=5,
+    motif_top_k=5,
 ):
     """
     Generate activity and motif codes inside roi_mask.
@@ -294,9 +207,9 @@ def sample_hierarchical_roi(
             dtype=torch.long,
         )
 
-        if visible_codes.shape != (B, N, 2):
+        if visible_codes.dim() != 3 or visible_codes.size(-1) < 3:
             raise ValueError(
-                f"visible_codes must have shape {(B, N, 2)}, "
+                f"visible_codes must have shape {(B, N, 3)}, "
                 f"got {tuple(visible_codes.shape)}"
             )
 
@@ -343,17 +256,14 @@ def sample_hierarchical_roi(
         task_id=task_id,
         roi_mask=roi,
         visible_codes=visible_codes,
-        visible_alpha=visible_alpha,
         steps=motif_steps,
         temperature=motif_temperature,
-        alpha_temperature=motif_alpha_temperature,
-        z1_top_k=z1_top_k,
+        top_k=motif_top_k,
     )
 
     return {
         "activity": activity,
-        "codes": motif_sample["codes"],
-        "alpha": motif_sample["alpha"],
+        "flat_ids": motif_sample["flat_ids"],
         "activity_input": a_in,
         "activity_out": activity_out,
     }

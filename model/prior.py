@@ -233,182 +233,151 @@ def _soft_coactivation_rate(
 
 class MaskGITMotifPrior(nn.Module):
     """MaskGIT-style codebook motif prior over VQ-VAE latent tokens.
-    
+
+    The three-level ladder (z1, z2, z3) exists only to PRODUCE centroids during
+    Stage 2A. Stage 2B sums them into one flat entry per token, so at prior time
+    there is no hierarchy: each token carries a single discrete id.
+
+    That collapses the old two-stage cascade (predict z1, then a Dirichlet over
+    the K2 convex-hull coefficients of the chosen parent) into one categorical
+    prediction. The alpha branch is gone: its conditional mean sat in the hull
+    interior where no real residual lives, and its own mode was the only
+    priorable part, so a discrete flat code carries the same information without
+    the sampling pathology.
+
     Token structure:
-        a_i  : 0 blank, 1 active
-        z1_i : level-1 code, 0..K1-1, meaningful only if active
-        z2_i : level-2 child code, 0..K2-1, meaningful only if active
-    
+        a_i : 0 blank, 1 active
+        f_i : flat code id, 0..V-1, meaningful only if active
+
     Input special IDs:
-        a_mask_id  = 2
-    
-        z1_mask_id = K1
-        z1_null_id = K1 + 1
-    
-        z2_mask_id = K2
-        z2_null_id = K2 + 1
-    
+        a_mask_id   = 2
+
+        f_oov_id    = V        (nominal (a,b,c) never observed in training)
+        f_mask_id   = V + 1
+        f_null_id   = V + 2
+
     Output:
-        logits["z1"] : (B,N,K1)
-        logits["z2"] : (B,N,K2)
+        logits["flat"] : (B, N, V+1)   -- V codes plus the OOV bin
+
+    OOV is embeddable and scoreable but must never be *generated*: it has no
+    codebook entry to decode. Sampling masks that logit to -inf. Held-out OOV
+    token rate measured at 0.0587%, so it is a guard, not a hot path.
     """
-    
+
     def __init__(
         self,
-        K1: int = 32,
-        K2: int = 8,
+        flat_codebook: Optional[torch.Tensor] = None,
+        merge_map: Optional[torch.Tensor] = None,
+        token_grid: Tuple[int, int, int] = (8, 8, 16),
         num_tasks: int = 4,
         gct_mapper: Optional[nn.Module] = None,
         lct_mapper: Optional[nn.Module] = None,
-        gct_latent_dim: int = 16,
-        lct_latent_dim: int = 16,
+        gct_latent_dim: int = 32,
+        lct_latent_dim: int = 32,
         d_model: int = 128,
         n_layer: int = 4,
         n_head: int = 4,
-        max_len: int = 5040,
         dropout: float = 0.25,
         pad_mask: bool = False,
-        z1_codebook: Optional[torch.Tensor] = None,
-        z2_codebook: Optional[torch.Tensor] = None,
-        z1_scale: float = 1.0,
-        z2_scale: float = 1.0,
-        hull_margin_fraction: float = 0.0,
     ):
         super().__init__()
-    
-        self.K1 = int(K1)
-        self.K2 = int(K2)
+
+        if flat_codebook is None:
+            raise ValueError(
+                "MaskGITMotifPrior requires the frozen Stage-2B flat codebook."
+            )
+        flat_cb = flat_codebook.detach().float().clone()
+        if flat_cb.dim() != 2:
+            raise ValueError(
+                f"flat_codebook must be (V, D), got {tuple(flat_cb.shape)}"
+            )
+
+        self.V = int(flat_cb.shape[0])
         self.num_tasks = int(num_tasks)
         self.d_model = int(d_model)
-        self.max_len = int(max_len)
-        self.z1_scale = float(z1_scale)
-        self.z2_scale = float(z2_scale)
-        self.hull_margin_fraction = float(hull_margin_fraction)
+        self.token_grid = tuple(int(g) for g in token_grid)
+        Tt, Hh, Ww = self.token_grid
+        self.max_len = Tt * Hh * Ww
 
-        if z1_codebook is None or z2_codebook is None:
-            raise ValueError("MaskGITMotifPrior requires frozen z1/z2 codebooks.")
-        z1_cb = z1_codebook.detach().float().clone()
-        z2_cb = z2_codebook.detach().float().clone()
-        if z1_cb.shape[0] != self.K1 or z2_cb.shape[:2] != (self.K1, self.K2):
+        self.register_buffer("flat_codebook", flat_cb, persistent=True)
+
+        if merge_map is None:
             raise ValueError(
-                f"Codebook shape mismatch: z1={tuple(z1_cb.shape)}, "
-                f"z2={tuple(z2_cb.shape)}, expected K1={self.K1}, K2={self.K2}."
+                "MaskGITMotifPrior requires the Stage-2B merge_map to convert "
+                "(z1,z2,z3) code triples into flat ids."
             )
-        self.register_buffer("z1_codebook", z1_cb, persistent=True)
-        self.register_buffer("z2_codebook", z2_cb, persistent=True)
-
-        z1_scaled = self.z1_scale * z1_cb
-        z1_d2 = torch.cdist(z1_scaled, z1_scaled, p=2).pow(2)
-        nonzero = z1_d2[z1_d2 > 0]
-        norm = nonzero.mean() if nonzero.numel() else z1_d2.new_tensor(1.0)
         self.register_buffer(
-            "z1_distance_matrix",
-            z1_d2 / norm.clamp_min(1e-8),
-            persistent=True,
+            "merge_map", merge_map.detach().long().clone(), persistent=True
         )
-    
+
+        # Normalized pairwise squared distances between flat entries, used by
+        # the distance-weighted generation metrics. Same normalization as the
+        # old z1 matrix so reported numbers stay on a comparable scale.
+        flat_d2 = torch.cdist(flat_cb, flat_cb, p=2).pow(2)
+        nonzero = flat_d2[flat_d2 > 0]
+        norm = nonzero.mean() if nonzero.numel() else flat_d2.new_tensor(1.0)
+        self.register_buffer(
+            "flat_distance_matrix", flat_d2 / norm.clamp_min(1e-8), persistent=True
+        )
+
         # activity ids
         self.a_blank_id = 0
         self.a_active_id = 1
         self.a_mask_id = 2
-    
-        # hierarchical code ids
-        self.z1_mask_id = self.K1
-        self.z1_null_id = self.K1 + 1
-    
-        self.z2_mask_id = self.K2
-        self.z2_null_id = self.K2 + 1
-    
+
+        # flat code ids
+        self.f_oov_id = self.V
+        self.f_mask_id = self.V + 1
+        self.f_null_id = self.V + 2
+
         self.ctx_len = 3
         self.use_sparse_motif_encoder = True
         self.pad_mask = bool(pad_mask)
-    
+
         self.gct_mapper = gct_mapper
         self.lct_mapper = lct_mapper
-    
-        if self.gct_mapper is not None:
-            for p in self.gct_mapper.parameters():
-                p.requires_grad_(False)
-            self.gct_mapper.eval()
-    
-        if self.lct_mapper is not None:
-            for p in self.lct_mapper.parameters():
-                p.requires_grad_(False)
-            self.lct_mapper.eval()
-            
+
+        for mapper in (self.gct_mapper, self.lct_mapper):
+            if mapper is not None:
+                for p in mapper.parameters():
+                    p.requires_grad_(False)
+                mapper.eval()
+
         # Input embeddings for transformer input
-        self.a_emb = nn.Embedding(3, d_model)          # blank, active, mask
-        self.z1_emb = nn.Embedding(K1 + 2, d_model)    # K1 codes + mask + null
-        self.z2_emb = nn.Embedding(K2 + 2, d_model)    # K2 codes + mask + null
-        
+        self.a_emb = nn.Embedding(3, d_model)               # blank, active, mask
+        self.flat_emb = nn.Embedding(self.V + 3, d_model)   # codes + OOV + mask + null
+
         self.roi_emb = nn.Embedding(2, d_model)  # 0 visible/context, 1 ROI/predict
 
-        self.a_to_z1 = nn.Sequential(
+        self.a_to_code = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.GELU(),
             nn.LayerNorm(d_model),
         )
-        self.z1_head = nn.Linear(d_model, K1)
-        
-        self.z1_to_z2 = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.GELU(),
-            nn.LayerNorm(d_model),
-        )
-        # Dirichlet concentration head over the K2 convex-hull coefficients.
-        #
-        # alpha is irreducibly stochastic given z1: the optimal point predictor
-        # (the z1-conditional mean) explains only ~0.25% of the residual
-        # variance, so regressing alpha produces a hull interior point that no
-        # real sample occupies. Modelling p(alpha | z1, context) as a Dirichlet
-        # and SAMPLING from it is what makes convex-hull generation meaningful.
-        #
-        # The parameter name is unchanged so existing Stage 3A checkpoints still
-        # load; only the interpretation of the output differs (concentration via
-        # softplus rather than softmax logits).
-        self.alpha_mu_head = nn.Linear(d_model, K2)
-        # Floor of 1.0, not ~0.
-        #
-        # The exact simplex projection produces genuine zeros in alpha. With
-        # concentration < 1 the term (conc-1)*log(alpha) turns those clamped
-        # zeros into a large POSITIVE log-likelihood, so the head can drive NLL
-        # toward -inf with a symmetric tiny concentration -- samples land near
-        # random corners and the mean stays uniform. That is a likelihood
-        # exploit, not a fit, and it is what the first Dirichlet run collapsed
-        # to (z2 loss -67, alpha entropy 2.03 == uniform).
-        #
-        # conc >= 1 keeps the density bounded on the simplex while still
-        # allowing sharply peaked fits via large concentration on the children
-        # that matter.
-        # 0.25, not 1.0: a floor of 1.0 caps the representable per-component
-        # spread near 0.11, while the data's intrinsic conditional spread is
-        # ~0.213, so conc>=1 cannot reproduce how dispersed alpha actually is.
-        # 0.25 admits that spread while keeping the sparse-target exploit
-        # bounded (finite, not -inf) -- and loss_alpha_residual counterweights
-        # it by rewarding a correct MEAN, which requires asymmetric conc.
-        self.alpha_concentration_floor = 0.25
-        # Dirichlet NLL is unbounded below: density -> infinity as the
-        # concentration grows, so an uncapped head can drive the loss to -inf by
-        # collapsing onto a spike instead of fitting the conditional spread.
-        # The cap bounds the attainable sharpness well above anything the data
-        # supports (sum up to K2 * cap) while removing the degenerate optimum.
-        self.alpha_concentration_max = 200.0
-    
+        self.flat_head = nn.Linear(d_model, self.V + 1)
+
         # Prefix context tokens
-        self.task_emb = nn.Embedding(num_tasks, d_model)        
+        self.task_emb = nn.Embedding(num_tasks, d_model)
         self.gct_proj = nn.Linear(gct_latent_dim, d_model)
         self.lct_proj = nn.Linear(lct_latent_dim, d_model)
-    
-        self.pos_emb = nn.Embedding(max_len, d_model)
+
+        # Factorised positions. A flat nn.Embedding(max_len) has to learn each
+        # of the 1024 sites independently; t/h/w factors share statistics across
+        # every site with the same coordinate, which is the structure the grid
+        # actually has.
+        self.pos_t = nn.Embedding(Tt, d_model)
+        self.pos_h = nn.Embedding(Hh, d_model)
+        self.pos_w = nn.Embedding(Ww, d_model)
+
         self.drop = nn.Dropout(dropout)
-        
+
         self.ctx_fuse = nn.Sequential(
             nn.LayerNorm(d_model),
             nn.Linear(d_model, d_model),
             nn.GELU(),
             nn.Linear(d_model, d_model),
         )
-        
+
         self.blocks = SparseTokenTransformerEncoder(
             dim=d_model,
             depth=n_layer,
@@ -417,21 +386,53 @@ class MaskGITMotifPrior(nn.Module):
             drop=dropout,
             attn_drop=dropout,
         )
-        
         self.ln_f = nn.LayerNorm(d_model)
-    
-    
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+
+    def flat_ids_from_codes(
+        self, codes: torch.Tensor, blank_code: int = -1
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """(B,N,3) ladder codes -> (flat ids with OOV bin, active mask)."""
+        if codes.dim() != 3 or codes.size(-1) < 3:
+            raise ValueError(
+                f"Expected codes shape (B,N,3), got {tuple(codes.shape)}"
+            )
+        a, b, c = codes[..., 0].long(), codes[..., 1].long(), codes[..., 2].long()
+        active = a.ne(int(blank_code))
+        K2, K3 = 8, 4
+        nominal = (a.clamp_min(0) * K2 + b.clamp_min(0)) * K3 + c.clamp_min(0)
+        f = self.merge_map[nominal.clamp(0, self.merge_map.numel() - 1)]
+        # -1 marks a nominal triple never observed in training.
+        f = torch.where(f < 0, torch.full_like(f, self.f_oov_id), f)
+        return f, active
+
+    def _pos_embed(self, N: int, device) -> torch.Tensor:
+        Tt, Hh, Ww = self.token_grid
+        if N != Tt * Hh * Ww:
+            raise ValueError(
+                f"N={N} does not match token_grid {self.token_grid} "
+                f"(= {Tt * Hh * Ww})."
+            )
+        idx = torch.arange(N, device=device)
+        t = torch.div(idx, Hh * Ww, rounding_mode="floor")
+        h = torch.div(idx, Ww, rounding_mode="floor") % Hh
+        w = idx % Ww
+        return (self.pos_t(t) + self.pos_h(h) + self.pos_w(w)).unsqueeze(0)
+
     def _map_ctx(self, mapper: Optional[nn.Module], x: torch.Tensor, proj: nn.Linear):
         if mapper is None:
             return x.to(device=proj.weight.device, dtype=proj.weight.dtype)
-    
+
         with torch.no_grad():
             p = next(mapper.parameters())
             x = x.to(device=p.device, dtype=p.dtype)
             y = mapper(x)
-    
+
         return y.to(device=proj.weight.device, dtype=proj.weight.dtype)
-    
+
     def _build_prefix(
         self,
         global_ctx: torch.Tensor,
@@ -444,574 +445,248 @@ class MaskGITMotifPrior(nn.Module):
             raise ValueError("local_ctx is required.")
         if task_id is None:
             raise ValueError("task_id is required.")
-    
+
         g = self._map_ctx(self.gct_mapper, global_ctx, self.gct_proj)
         l = self._map_ctx(self.lct_mapper, local_ctx, self.lct_proj)
-    
+
         g_tok = self.gct_proj(g).unsqueeze(1)
         l_tok = self.lct_proj(l).unsqueeze(1)
         t_tok = self.task_emb(task_id.long()).unsqueeze(1)
-    
+
         return torch.cat([g_tok, l_tok, t_tok], dim=1)
-    
+
     def _embed_layer_streams(
         self,
         a_in,
-        z1_in,
-        z2_in,
+        f_in,
         roi_mask: Optional[torch.Tensor] = None,
-        alpha_in: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """
-        Compact per-position hierarchical token fusion.
-    
-        Inputs:
-            a_in, z1_in, z2_in: (B, N) and also the ROI (if not given, consider all tokens)
-    
-        Output:
-            x_tok: (B, N, D)
-    
-        This keeps transformer length N, not 3N.
-        """
-        a_e = self.a_emb(a_in)
-        z1_e = self.z1_emb(z1_in)
-        z2_e = self.z2_emb(z2_in)
+        """Per-position token fusion. Keeps transformer length N, not 2N."""
+        x_tok = self.a_emb(a_in) + self.flat_emb(f_in)
 
-        if alpha_in is not None:
-            if alpha_in.shape != (*z2_in.shape, self.K2):
-                raise ValueError(
-                    f"alpha_in must have shape {(*z2_in.shape, self.K2)}, "
-                    f"got {tuple(alpha_in.shape)}"
-                )
-            alpha_in = alpha_in.to(device=z2_e.device, dtype=z2_e.dtype)
-            alpha_e = alpha_in @ self.z2_emb.weight[:self.K2]
-            visible_alpha = z2_in.ge(0) & z2_in.lt(self.K2)
-            z2_e = torch.where(visible_alpha.unsqueeze(-1), alpha_e, z2_e)
-    
-        x_tok = a_e + z1_e + z2_e
-        
         if roi_mask is not None:
             if roi_mask.dim() == 3:
                 roi_mask = roi_mask.squeeze(-1)
             roi_mask = roi_mask.to(device=a_in.device).bool().long()
             x_tok = x_tok + self.roi_emb(roi_mask)
-        
+
         return x_tok
-    
-    
-    def _expected_emb_from_logits(
-        self,
-        logits: torch.Tensor,
-        emb: nn.Embedding,
-        n_classes: int,
-    ) -> torch.Tensor:
-        """
-        Soft expected embedding from predicted class probabilities.
-        Excludes mask/null IDs by only using emb.weight[:n_classes].
-        """
-        p = F.softmax(logits, dim=-1)
-        return p @ emb.weight[:n_classes]
-    
-    
+
     def _compute_motif_logits(
         self,
         h: torch.Tensor,
         *,
-        activity_ids: Optional[torch.Tensor] = None,   # (B,N), 0 blank / 1 active
-        activity_prob: Optional[torch.Tensor] = None,  # (B,N), soft active probability
-        z1_teacher: Optional[torch.Tensor] = None,
-        z1_teacher_prob: float = 0.0,
+        activity_ids: Optional[torch.Tensor] = None,
+        activity_prob: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-    
         if activity_prob is not None:
-            blank_e = self.a_emb.weight[self.a_blank_id]    # (D,)
-            active_e = self.a_emb.weight[self.a_active_id]  # (D,)
+            blank_e = self.a_emb.weight[self.a_blank_id]
+            active_e = self.a_emb.weight[self.a_active_id]
             a_info = (
                 (1.0 - activity_prob).unsqueeze(-1) * blank_e
                 + activity_prob.unsqueeze(-1) * active_e
-            )  # (B,N,D)
-    
+            )
         elif activity_ids is not None:
-            activity_ids = activity_ids.long().clamp(0, 1)
-            a_info = self.a_emb(activity_ids)  # (B,N,D)
-    
+            a_info = self.a_emb(activity_ids.long().clamp(0, 1))
         else:
             raise ValueError("Need either activity_ids or activity_prob.")
-    
-        h_z1 = h + self.a_to_z1(a_info)  # (B,N,D)
-        z1_logits = self.z1_head(h_z1)   # (B,N,K1)
-    
-        z1_pred_info = self._expected_emb_from_logits(
-            z1_logits,
-            self.z1_emb,
-            n_classes=self.K1,
-        )  # (B,N,D)
-        
-        if z1_teacher is not None and z1_teacher_prob > 0.0:
-            z1_teacher = z1_teacher.long().clamp(0, self.K1 - 1)
-            z1_gt_info = self.z1_emb(z1_teacher)
-        
-            if z1_teacher_prob >= 1.0:
-                z1_info = z1_gt_info
-            else:
-                z1_info = (
-                    float(z1_teacher_prob) * z1_gt_info
-                    + (1.0 - float(z1_teacher_prob)) * z1_pred_info
-                )
-        else:
-            z1_info = z1_pred_info  # (B,N,D)
-    
-        h_z2 = h_z1 + self.z1_to_z2(z1_info)  # (B,N,D)
-        alpha_raw = self.alpha_mu_head(h_z2)  # (B,N,K2)
-        alpha_concentration = (
-            float(self.alpha_concentration_floor) + F.softplus(alpha_raw)
-        ).clamp(max=float(self.alpha_concentration_max))
-        # Dirichlet mean, for deterministic readout and diagnostics. Generation
-        # should SAMPLE from the Dirichlet rather than use this.
-        alpha_mean = alpha_concentration / alpha_concentration.sum(
-            dim=-1, keepdim=True
-        )
 
-        return {
-            "z1": z1_logits,
-            "z2": alpha_raw,
-            "alpha_concentration": alpha_concentration,
-            "alpha_mean": alpha_mean,
-        }
-    
+        h_code = h + self.a_to_code(a_info)
+        return {"flat": self.flat_head(h_code)}
+
     def _build_motif_sparse_mask(
         self,
         a_in: torch.Tensor,
-        z1_in: torch.Tensor,
-        z2_in: torch.Tensor,
+        f_in: torch.Tensor,
         *,
         targets: Optional[Dict[str, torch.Tensor]] = None,
         roi_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """
-        Returns sparse attention mask for motif prior.
-    
-        True = keep token in sparse transformer.
-    
-        Stage 3A:
-            use all GT-active tokens.
-    
-        Stage 3C / inference-like:
-            keep visible active tokens plus ROI/prediction tokens.
-        """
+        """True = keep token in the sparse transformer."""
         if targets is not None and "active" in targets:
             active = targets["active"].to(device=a_in.device).bool()
         else:
             active = a_in.eq(self.a_active_id)
-    
-        keep = active.clone()
 
-        # Keep explicitly masked motif positions.
-        # These should already be active in Stage 3A, but this is safer.
-        keep = keep | z1_in.eq(self.z1_mask_id) | z2_in.eq(self.z2_mask_id)
-        
-        return keep
-    
-    
+        return active | f_in.eq(self.f_mask_id)
+
+    # ------------------------------------------------------------------
+    # forward
+    # ------------------------------------------------------------------
+
     def forward_with_activity_prob(
         self,
-        z1_in: torch.LongTensor,
-        z2_in: torch.LongTensor,
+        f_in: torch.LongTensor,
         *,
         activity_prob: torch.Tensor,
         global_ctx: torch.Tensor,
         local_ctx: torch.Tensor,
         task_id: torch.Tensor,
         roi_mask: Optional[torch.Tensor] = None,
-        alpha_in: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """
-        Differentiable motif forward used when refining the activity prior.
-    
-        activity_prob comes from MaskGITActivityPrior.activity_prob_flat(out).
-        This allows voxel/statistical losses after soft decoding to backprop
-        into the activity prior.
-        """
-    
-        B, N = z1_in.shape
-    
-        if z2_in.shape != (B, N):
-            raise ValueError("z1_in and z2_in must have shape (B,N).")
-    
+        """Differentiable motif forward used when refining the activity prior."""
+        B, N = f_in.shape
         if activity_prob.shape != (B, N):
             raise ValueError(
-                f"activity_prob must have shape {(B, N)}, got {tuple(activity_prob.shape)}"
+                f"activity_prob must have shape {(B, N)}, "
+                f"got {tuple(activity_prob.shape)}"
             )
-    
         if N > self.max_len:
             raise ValueError(f"N={N} exceeds max_len={self.max_len}.")
-    
-        # Build a soft activity embedding for the input stream.
+
         blank_e = self.a_emb.weight[self.a_blank_id]
         active_e = self.a_emb.weight[self.a_active_id]
         a_soft_e = (
             (1.0 - activity_prob).unsqueeze(-1) * blank_e
             + activity_prob.unsqueeze(-1) * active_e
-        )  # (B,N,D)
-    
-        z1_e = self.z1_emb(z1_in)
-        z2_e = self.z2_emb(z2_in)
+        )
 
-        if alpha_in is not None:
-            expected_shape = (*z2_in.shape, self.K2)
-            if alpha_in.shape != expected_shape:
-                raise ValueError(
-                    f"alpha_in must have shape {expected_shape}, "
-                    f"got {tuple(alpha_in.shape)}"
-                )
-
-            alpha_in = alpha_in.to(
-                device=z2_e.device,
-                dtype=z2_e.dtype,
-            )
-
-            alpha_e = (
-                alpha_in @ self.z2_emb.weight[:self.K2]
-            )  # (B,N,D)
-
-            has_alpha = alpha_in.sum(dim=-1, keepdim=True).gt(0)
-            z2_e = torch.where(has_alpha, alpha_e, z2_e)
-    
         prefix = self._build_prefix(global_ctx, local_ctx, task_id)
         ctx_tok = self.ctx_fuse(prefix.mean(dim=1)).unsqueeze(1)
-        
-        x_tok = a_soft_e + z1_e + z2_e
-        
+
+        x_tok = a_soft_e + self.flat_emb(f_in)
+
         if roi_mask is not None:
             if roi_mask.dim() == 3:
                 roi_mask = roi_mask.squeeze(-1)
-            roi_mask_bool = roi_mask.to(device=z1_in.device).bool()
+            roi_mask_bool = roi_mask.to(device=f_in.device).bool()
             x_tok = x_tok + self.roi_emb(roi_mask_bool.long())
         else:
             roi_mask_bool = None
-        
-        tok_pos = self.pos_emb(
-            torch.arange(N, device=z1_in.device)
-        ).unsqueeze(0)
-        
-        x_tok = x_tok + tok_pos + ctx_tok
-        x_tok = self.drop(x_tok)
-        
-        visible_active_or_masked = (
-            z1_in.ne(self.z1_null_id)
-            | z2_in.ne(self.z2_null_id)
-        )
-        
+
+        x_tok = self.drop(x_tok + self._pos_embed(N, f_in.device) + ctx_tok)
+
+        visible_or_masked = f_in.ne(self.f_null_id)
         pred_active = activity_prob.gt(0.05)
-        
         if roi_mask_bool is not None:
-            sparse_keep = visible_active_or_masked | (roi_mask_bool & pred_active)
+            sparse_keep = visible_or_masked | (roi_mask_bool & pred_active)
         else:
-            sparse_keep = visible_active_or_masked | pred_active
-        
-        h, _, _, sparse_lengths = self.blocks(
-            tokens=x_tok,
-            active_mask=sparse_keep,
-            pos_embed=None,
-            fill_value=0.0,
+            sparse_keep = visible_or_masked | pred_active
+
+        h, _, _, _ = self.blocks(
+            tokens=x_tok, active_mask=sparse_keep, pos_embed=None, fill_value=0.0
         )
-        
         h = self.ln_f(h)
-    
-        logits = self._compute_motif_logits(
-            h,
-            activity_prob=activity_prob,
-        )
-    
-        return logits
-    
+
+        return self._compute_motif_logits(h, activity_prob=activity_prob)
+
     def forward(
         self,
         a_in: torch.LongTensor,
-        z1_in: torch.LongTensor,
-        z2_in: torch.LongTensor,
+        f_in: torch.LongTensor,
         *,
-        alpha_in: Optional[torch.Tensor] = None,
         global_ctx: torch.Tensor,
         local_ctx: torch.Tensor,
         task_id: torch.Tensor,
         roi_mask: Optional[torch.Tensor] = None,
         targets: Optional[Dict[str, torch.Tensor]] = None,
-        alpha_condition_z1: Optional[torch.Tensor] = None,
-        loss_weights: Tuple[float, float] = (1.0, 1.0),
+        loss_weights: Tuple[float, ...] = (1.0,),
     ):
         """
-        a_in, z1_in, z2_in:
-            (B,N)
-    
+        a_in, f_in: (B,N)
+
         targets:
             {
-                "a":           (B,N), 0/1
-                "z1":          (B,N), 0..K1-1
-                "z2":          (B,N), 0..K2-1
-                "a_loss_mask": (B,N) bool
-                "z_loss_mask": (B,N) bool, usually predict_mask & active
+                "a":            (B,N), 0/1
+                "f":            (B,N), 0..V (V = OOV)
+                "a_loss_mask":  (B,N) bool
+                "f_loss_mask":  (B,N) bool, usually predict_mask & active
             }
         """
         B, N = a_in.shape
-    
-        if z1_in.shape != (B, N) or z2_in.shape != (B, N):
-            raise ValueError("a_in, z1_in, and z2_in must all have shape (B,N).")
-    
+        if f_in.shape != (B, N):
+            raise ValueError("a_in and f_in must both have shape (B,N).")
         if N > self.max_len:
             raise ValueError(f"N={N} exceeds max_len={self.max_len}.")
-    
-        prefix = self._build_prefix(global_ctx, local_ctx, task_id)  # (B,3,D)
-        ctx_tok = self.ctx_fuse(prefix.mean(dim=1)).unsqueeze(1)     # (B,1,D)
-        
+
+        prefix = self._build_prefix(global_ctx, local_ctx, task_id)
+        ctx_tok = self.ctx_fuse(prefix.mean(dim=1)).unsqueeze(1)
+
         if roi_mask is None and targets is not None:
             roi_mask = targets.get("predict_mask", None)
-        
-        x_tok = self._embed_layer_streams(
-            a_in, z1_in, z2_in, roi_mask=roi_mask, alpha_in=alpha_in
-        )
-        
-        tok_pos = self.pos_emb(
-            torch.arange(N, device=a_in.device)
-        ).unsqueeze(0)
-        
-        x_tok = x_tok + tok_pos + ctx_tok
-        x_tok = self.drop(x_tok)
-        
-        sparse_keep = self._build_motif_sparse_mask(
-            a_in,
-            z1_in,
-            z2_in,
-            targets=targets,
-            roi_mask=roi_mask,
-        )
-        
-        h, _, _, sparse_lengths = self.blocks(
-            tokens=x_tok,
-            active_mask=sparse_keep,
-            pos_embed=None,
-            fill_value=0.0,
-        )
-        
-        h = self.ln_f(h)
-                
 
-        
-        if targets is not None:
-            activity_ids = targets["a"].long()
-        else:
-            activity_ids = a_in.long().clamp(0, 1)
-        
-        # Which z1 the ALPHA branch is conditioned on.
-        #
-        # alpha lives on the simplex over the children of ONE parent, so it must
-        # be conditioned on a committed parent, not on the soft posterior over
-        # all K1. Conditioning on the posterior average is what made the head
-        # hedge toward uniform: it could not know which parent it would be
-        # scored against, and at generation the sampled z1 frequently differed
-        # from the posterior mode it was conditioned on.
-        #
-        #   training  -> the true z1 (permanent teacher forcing), since
-        #                p(alpha | z1=k) is by definition the conditional where
-        #                k is the actual parent.
-        #   inference -> the SAMPLED z1, supplied as alpha_condition_z1 on a
-        #                second pass, so alpha matches the parent used to decode.
-        if alpha_condition_z1 is not None:
-            z1_teacher = alpha_condition_z1
-            z1_teacher_prob = 1.0
-        elif targets is not None:
-            z1_teacher = targets["z1"]
-            z1_teacher_prob = float(targets.get("z1_teacher_prob", 1.0))
-        else:
-            z1_teacher = None
-            z1_teacher_prob = 0.0
-        
-        logits = self._compute_motif_logits(
-            h,
-            activity_ids=activity_ids,
-            z1_teacher=z1_teacher,
-            z1_teacher_prob=float(z1_teacher_prob),
+        x_tok = self._embed_layer_streams(a_in, f_in, roi_mask=roi_mask)
+        x_tok = self.drop(x_tok + self._pos_embed(N, a_in.device) + ctx_tok)
+
+        sparse_keep = self._build_motif_sparse_mask(
+            a_in, f_in, targets=targets, roi_mask=roi_mask
         )
-            
+
+        h, _, _, _ = self.blocks(
+            tokens=x_tok, active_mask=sparse_keep, pos_embed=None, fill_value=0.0
+        )
+        h = self.ln_f(h)
+
+        activity_ids = (
+            targets["a"].long() if targets is not None else a_in.long().clamp(0, 1)
+        )
+        logits = self._compute_motif_logits(h, activity_ids=activity_ids)
+
         if targets is None:
             return logits, None, {}
-    
-        z1_t = targets["z1"].long()
-        z1_loss_mask = targets.get("z1_loss_mask", targets["z_loss_mask"]).bool()
-        alpha_loss_mask = targets.get(
-            "alpha_loss_mask",
-            targets.get("z2_loss_mask", targets["z_loss_mask"]),
-        ).bool()
 
-        ignore_z1 = torch.full_like(z1_t, -100)
-        z1_target = torch.where(z1_loss_mask, z1_t, ignore_z1)
+        f_t = targets["f"].long()
+        f_loss_mask = targets.get("f_loss_mask", targets["z_loss_mask"]).bool()
 
-        if z1_loss_mask.any():
-            loss_z1 = F.cross_entropy(
-                logits["z1"].reshape(-1, self.K1),
-                z1_target.reshape(-1),
+        f_target = torch.where(f_loss_mask, f_t, torch.full_like(f_t, -100))
+        if f_loss_mask.any():
+            loss_flat = F.cross_entropy(
+                logits["flat"].reshape(-1, self.V + 1),
+                f_target.reshape(-1),
                 ignore_index=-100,
             )
         else:
-            loss_z1 = logits["z1"].sum() * 0.0
+            loss_flat = logits["flat"].sum() * 0.0
 
-        alpha_target = targets.get("alpha", None)
-        if alpha_target is None:
-            raise KeyError("Stage 3 motif targets must include exact convex alpha.")
-        alpha_target = alpha_target.to(
-            device=logits["alpha_concentration"].device,
-            dtype=logits["alpha_concentration"].dtype,
-        )
+        loss = float(loss_weights[0]) * loss_flat
 
-        if alpha_loss_mask.any():
-            eps = 1e-8
-            # Light smoothing toward the uniform simplex point. The projection
-            # yields exact zeros, and log(0) clamped to log(1e-8) = -18.4
-            # dominates the Dirichlet likelihood; smoothing bounds it without
-            # materially changing the target.
-            alpha_smoothing = 1e-2
-            a_t = alpha_target[alpha_loss_mask].float().clamp_min(0.0)
-            a_t = a_t / a_t.sum(dim=-1, keepdim=True).clamp_min(eps)
-            a_t = (
-                (1.0 - alpha_smoothing) * a_t
-                + alpha_smoothing / float(a_t.shape[-1])
-            )
+        with torch.no_grad():
+            n_tok = f_loss_mask.sum()
+            if n_tok > 0:
+                pred = logits["flat"].argmax(-1)
+                acc = (pred[f_loss_mask] == f_t[f_loss_mask]).float().mean()
+                oov_frac = f_t[f_loss_mask].eq(self.f_oov_id).float().mean()
+            else:
+                acc = loss_flat * 0.0
+                oov_frac = loss_flat * 0.0
 
-            concentration = logits["alpha_concentration"][alpha_loss_mask].float()
-            alpha_mean = concentration / concentration.sum(dim=-1, keepdim=True)
-
-            # Dirichlet negative log-likelihood of the exact convex target.
-            #
-            # This replaces KL(alpha_target || softmax(logits)), which drove the
-            # head toward the conditional MEAN. For a broad conditional the mean
-            # is a poor sample: it sits in the hull interior where no real
-            # residual lives. NLL fits the whole distribution, so generation can
-            # sample coefficients that actually occur.
-            concentration_sum = concentration.sum(dim=-1)
-            log_normaliser = (
-                torch.lgamma(concentration_sum)
-                - torch.lgamma(concentration).sum(dim=-1)
-            )
-            log_likelihood = log_normaliser + (
-                (concentration - 1.0) * a_t.log()
-            ).sum(dim=-1)
-            loss_alpha_kl = -log_likelihood.mean()
-
-            parent = z1_t[alpha_loss_mask].clamp(0, self.K1 - 1)
-            children = (
-                self.z2_scale
-                * (1.0 + max(0.0, self.hull_margin_fraction))
-                * self.z2_codebook[parent]
-            ).float()
-            r_pred = torch.einsum("mk,mkd->md", alpha_mean, children)
-            r_tgt = torch.einsum("mk,mkd->md", a_t, children)
-            loss_alpha_residual = F.mse_loss(r_pred, r_tgt)
-            residual_den = r_tgt.pow(2).mean().clamp_min(eps)
-            loss_alpha_residual_nmse = (
-                loss_alpha_residual / residual_den
-            )
-
-            # Diagnostic: K2*floor is the minimum attainable sum. If this sits
-            # at the floor the head is not using its sharpness budget; if it is
-            # far above, the fit is sharper than the data (measured intrinsic
-            # per-component spread is ~0.213).
-            alpha_concentration_sum = concentration.sum(dim=-1).mean()
-            alpha_mae = (alpha_mean - a_t).abs().mean()
-            alpha_target_entropy = -(a_t * a_t.log()).sum(dim=-1).mean()
-            # Entropy of the Dirichlet MEAN vector, kept comparable to the
-            # previous softmax-based diagnostic and to alpha_target_entropy.
-            alpha_pred_entropy = -(
-                alpha_mean * alpha_mean.clamp_min(1e-12).log()
-            ).sum(dim=-1).mean()
-
-            loss_alpha = loss_alpha_kl + loss_alpha_residual
-        else:
-            zero = logits["alpha_concentration"].sum() * 0.0
-            loss_alpha_kl = zero
-            loss_alpha_residual = zero
-            loss_alpha_residual_nmse = zero
-            alpha_mae = zero
-            alpha_concentration_sum = zero
-            alpha_target_entropy = zero
-            alpha_pred_entropy = zero
-            loss_alpha = zero
-
-        w1, w2 = loss_weights
-        loss = w1 * loss_z1 + w2 * loss_alpha
-    
         aux = {
             "loss": loss.detach(),
-            "loss_z1": loss_z1.detach(),
-            "loss_z2": loss_alpha.detach(),
-            "loss_alpha": loss_alpha.detach(),
-            "loss_alpha_kl": loss_alpha_kl.detach(),
-            "loss_alpha_residual": loss_alpha_residual.detach(),
-            "loss_alpha_residual_nmse": loss_alpha_residual_nmse.detach(),
-            "alpha_mae": alpha_mae.detach(),
-            "alpha_concentration_sum": alpha_concentration_sum.detach(),
-            "alpha_target_entropy": alpha_target_entropy.detach(),
-            "alpha_pred_entropy": alpha_pred_entropy.detach(),
-            "z1_loss_tokens": z1_loss_mask.sum().detach(),
-            "z2_loss_tokens": alpha_loss_mask.sum().detach(),
-            "alpha_loss_tokens": alpha_loss_mask.sum().detach(),
+            "loss_flat": loss_flat.detach(),
+            "flat_acc": acc.detach(),
+            "flat_target_oov_frac": oov_frac.detach(),
+            "flat_loss_tokens": n_tok.detach(),
         }
-    
+
         return logits, loss, aux
+
+    # ------------------------------------------------------------------
+    # targets / corruption
+    # ------------------------------------------------------------------
 
     def make_targets_from_codes(
         self,
         codes: torch.Tensor,
         predict_mask: torch.Tensor,
         blank_code: int = -1,
-        alpha: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """
-        codes:
-            (B,N,2), from VQVAE.
-    
-        predict_mask:
-            (B,N) or (B,N,1), where True/1 means prior should predict this token.
+        codes: (B,N,3) ladder codes from the VQ-VAE.
+        predict_mask: (B,N) or (B,N,1); True means the prior should predict here.
         """
-        if codes.dim() != 3 or codes.size(-1) < 2:
-            raise ValueError(f"Expected codes shape (B,N,2), got {tuple(codes.shape)}")
-    
         if predict_mask.dim() == 3:
             predict_mask = predict_mask.squeeze(-1)
-    
-        z1_raw = codes[..., 0].long()
-        z2_raw = codes[..., 1].long()
-    
-        active = z1_raw.ne(int(blank_code))
-    
-        a = active.long()
-        z1 = z1_raw.clamp_min(0)
-        z2 = z2_raw.clamp_min(0)
-    
+
+        f, active = self.flat_ids_from_codes(codes, blank_code=blank_code)
         pmask = predict_mask.bool()
-    
-        if alpha is None:
-            alpha = F.one_hot(
-                z2.clamp(0, self.K2 - 1), num_classes=self.K2
-            ).to(dtype=torch.float32)
-        else:
-            alpha = alpha.to(device=codes.device, dtype=torch.float32)
-            if alpha.shape != (*z1.shape, self.K2):
-                raise ValueError(
-                    f"alpha must have shape {(*z1.shape, self.K2)}, "
-                    f"got {tuple(alpha.shape)}"
-                )
 
         return {
-            "a": a,
-            "z1": z1,
-            "z2": z2,
-            "alpha": alpha,
+            "a": active.long(),
+            "f": f,
             "active": active,
             "predict_mask": pmask,
             "a_loss_mask": pmask,
-            "z1_loss_mask": pmask & active,
-            "z2_loss_mask": pmask & active,
-            "alpha_loss_mask": pmask & active,
+            "f_loss_mask": pmask & active,
             "z_loss_mask": pmask & active,
         }
 
@@ -1022,77 +697,50 @@ class MaskGITMotifPrior(nn.Module):
         full_mask_prob: float = 0.15,
     ):
         """
-        Pairwise motif masking.
-        
-        z1 and z2 jointly identify one hierarchical motif. They therefore use
-        the exact same patch mask and are predicted together. Activity is
-        supplied separately and is not corrupted here.
+        Motif masking over the single flat stream.
+
+        Activity is supplied separately and is not corrupted here.
         """
         a = targets["a"].long()
-        z1 = targets["z1"].long().clamp(0, self.K1 - 1)
-        z2 = targets["z2"].long().clamp(0, self.K2 - 1)
-        alpha = targets["alpha"].float()
-    
+        f = targets["f"].long().clamp(0, self.f_oov_id)
         active = targets["active"].bool()
         pmask = targets["predict_mask"].bool()
-    
+
         B, N = a.shape
         device = a.device
-    
+
         gamma = torch.rand((B, 1), device=device)
-        
-        # Sometimes train exactly on the inference starting state:
-        # a/z1/z2 all masked inside predict_mask.
+
+        # Sometimes train exactly on the inference starting state: everything
+        # inside predict_mask masked.
         if full_mask_prob > 0:
             full_mask = torch.rand((B, 1), device=device) < float(full_mask_prob)
             gamma = torch.where(full_mask, torch.ones_like(gamma), gamma)
-        else:
-            full_mask = torch.zeros((B, 1), device=device, dtype=torch.bool)
-    
-        valid_z = pmask & active
-        m = (torch.rand((B, N), device=device) < gamma) & valid_z
-        # z2 should also be masked anywhere the coarse state is masked.
-        # This makes training match inference start:
-        # a=MASK, z1=MASK, z2=MASK.
-    
+
+        valid = pmask & active
+        m = (torch.rand((B, N), device=device) < gamma) & valid
+
         if ensure_at_least_one_mask:
             for b in range(B):
-                valid_z = torch.where(pmask[b] & active[b])[0]
-        
-                if valid_z.numel() > 0 and not (m[b] & active[b]).any():
-                    idx = valid_z[torch.randint(valid_z.numel(), (1,), device=device)]
+                idx_valid = torch.where(valid[b])[0]
+                if idx_valid.numel() > 0 and not m[b].any():
+                    idx = idx_valid[torch.randint(idx_valid.numel(), (1,), device=device)]
                     m[b, idx] = True
-    
-        a_in = a.clone()
-        z1_in = z1.clone()
-        z2_in = z2.clone()
-        alpha_in = alpha.clone()
-    
-        # Inactive/blank positions should not expose fake clamped code 0.
-        z1_in[~active] = self.z1_null_id
-        z2_in[~active] = self.z2_null_id
-        alpha_in[~active] = 0.0
-    
-        # Coarse-stage masking.
-        # Activity is externally supplied / teacher-forced.
-        # Do not mask a.
-        z1_in[m] = self.z1_mask_id
-    
-        # Fine-stage masking.
-        z2_in[m] = self.z2_mask_id
-        alpha_in[m] = 0.0
-    
+
+        f_in = f.clone()
+        # Inactive positions must not expose a fake clamped code 0.
+        f_in[~active] = self.f_null_id
+        f_in[m] = self.f_mask_id
+
         targets = dict(targets)
         targets["a_loss_mask"] = m
-        targets["z1_loss_mask"] = m & active
-        targets["z2_loss_mask"] = m & active
-        targets["alpha_loss_mask"] = m & active
-        targets["z_loss_mask"] = targets["z1_loss_mask"] | targets["alpha_loss_mask"]
+        targets["f_loss_mask"] = m & active
+        targets["z_loss_mask"] = targets["f_loss_mask"]
         targets["gamma"] = gamma.squeeze(1)
-    
-        return a_in, z1_in, z2_in, alpha_in, targets
-    
-    
+
+        return a.clone(), f_in, targets
+
+
 class HierarchicalCodebookPrior(nn.Module):
     """
     Wrapper around:
@@ -1135,20 +783,18 @@ class HierarchicalCodebookPrior(nn.Module):
     def forward_motif_teacher_forced(
         self,
         a_in: torch.LongTensor,
-        z1_in: torch.LongTensor,
-        z2_in: torch.LongTensor,
+        f_in: torch.LongTensor,
         *,
         global_ctx: torch.Tensor,
         local_ctx: torch.Tensor,
         task_id: torch.Tensor,
         roi_mask: Optional[torch.Tensor] = None,
         targets: Optional[Dict[str, torch.Tensor]] = None,
-        loss_weights: Tuple[float, float] = (1.0, 1.0),
+        loss_weights: Tuple[float, ...] = (1.0,),
     ):
         return self.motif_prior(
             a_in,
-            z1_in,
-            z2_in,
+            f_in,
             global_ctx=global_ctx,
             local_ctx=local_ctx,
             task_id=task_id,
@@ -1159,8 +805,7 @@ class HierarchicalCodebookPrior(nn.Module):
 
     def forward_joint_soft(
         self,
-        z1_in: torch.LongTensor,
-        z2_in: torch.LongTensor,
+        f_in: torch.LongTensor,
         *,
         global_ctx: torch.Tensor,
         local_ctx: torch.Tensor,
@@ -1187,8 +832,7 @@ class HierarchicalCodebookPrior(nn.Module):
         )
 
         motif_logits = self.motif_prior.forward_with_activity_prob(
-            z1_in=z1_in,
-            z2_in=z2_in,
+            f_in=f_in,
             activity_prob=activity_prob,
             global_ctx=global_ctx,
             local_ctx=local_ctx,
