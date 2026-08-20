@@ -2112,39 +2112,39 @@ def evaluate_stage4a_predictive(model, test_loader, device, train_loader=None):
     blank_code = getattr(model.vq, "blank_code", -1)
 
     # ---- null ladder -------------------------------------------------------
-    # z1_acc against 32 classes is uninterpretable on its own.  The relevant
-    # question is whether the prior beats a lookup table: the empirical z1
-    # frequency at this assay and this grid position.  The same comparison
+    # flat_acc against 936 classes is uninterpretable on its own.  The relevant
+    # question is whether the prior beats a lookup table: the empirical flat
+    # code frequency at this assay and this grid position.  The same comparison
     # already showed the activity head losing to an assay-frequency null, so
-    # 3A does not get to report a raw accuracy without one.
+    # 4A does not get to report a raw accuracy without one.
     #
-    # Fit on TRAINING data only.  The tables are keyed to codebook identity,
-    # so they must be rebuilt whenever Stage 1 is retrained.
-    # NOTE: the null ladder was fitted over the 32-way z1 alphabet. The prior
-    # now predicts a 935-way flat code, so the cached tables are not
-    # comparable and must be rebuilt against flat ids before this ladder means
-    # anything. Disabled rather than silently reported against the wrong
-    # alphabet.
-    null_levels = ()
+    # Fit on TRAINING data only.  The tables are keyed to codebook identity, so
+    # they must be rebuilt whenever Stage 2 is retrained.
+    null_levels = ("uniform", "global", "assay", "assay_position")
     null_payload = None
-    if False:
-        K1 = int(motif_prior.V)
+    if train_loader is not None:
+        V = int(motif_prior.V) + 1
         if MOTIF_NULL_BASELINE_PATH.exists():
-            null_payload = load_motif_null_baselines(str(MOTIF_NULL_BASELINE_PATH))
-            if int(null_payload.get("K1", -1)) != K1:
+            try:
+                null_payload = load_motif_null_baselines(str(MOTIF_NULL_BASELINE_PATH))
+            except RuntimeError as exc:
+                print(f"[4A nulls] {exc}")
+                null_payload = None
+            if null_payload is not None and int(null_payload.get("V", -1)) != V:
                 print(
-                    f"[3A nulls] cached payload has K1={null_payload.get('K1')} "
-                    f"but model has K1={K1}; rebuilding."
+                    f"[4A nulls] cached payload has V={null_payload.get('V')} "
+                    f"but model has V={V}; rebuilding."
                 )
                 null_payload = None
         if null_payload is None:
-            print("[3A nulls] building motif null baselines from the training split...")
+            print("[4A nulls] building motif null baselines from the training split...")
             null_payload = build_motif_null_baselines(
-                train_loader, model, K1=K1, K2=K2, device=device,
+                train_loader, model, motif_prior, device=device,
                 save_path=str(MOTIF_NULL_BASELINE_PATH),
             )
     else:
-        print("[3A nulls] no train_loader supplied; skipping the null ladder.")
+        print("[4A nulls] no train_loader supplied; skipping the null ladder.")
+        null_levels = ()
 
     null_totals = {
         lvl: {"correct": 0.0, "top5": 0.0, "ce": 0.0} for lvl in null_levels
@@ -2246,7 +2246,7 @@ def evaluate_stage4a_predictive(model, test_loader, device, train_loader=None):
                 tgt_np = z1_target.detach().cpu().numpy()
 
                 for lvl in null_levels:
-                    z1_prob, _ = motif_null_predictions(
+                    z1_prob = motif_null_predictions(
                         null_payload, assay_of, pos_of, level=lvl
                     )
                     pred = z1_prob.argmax(axis=1)
@@ -3397,27 +3397,113 @@ def _generation_row(x_gen, x_target, requested_ctx, model):
 
 @torch.no_grad()
 def evaluate_motif_nulls(model, train_loader, test_loader, device, *, rebuild: bool = True):
-    """Motif prior vs empirical motif nulls.
+    """Motif prior vs empirical motif nulls, in the prior's most favourable regime.
 
-    NOT MIGRATED to the flat alphabet, deliberately.
+    Activity is teacher-forced from ground truth and every active ROI motif is
+    masked, matching STAGE4A_EVAL_FULL_MASK_PROB=1.0. The model additionally
+    sees true motifs at visible (non-ROI) positions, which the nulls do not, so
+    the comparison is conservative in the model's favour.
 
-    Every quantity here was defined on the two-level decomposition: z1 top-1/
-    top-5 against chance 1/K1, alpha MAE over the K2 convex coefficients, and a
-    latent MSE built as e_z1 + sum_j alpha_j c_j. The prior now predicts a
-    single 935-way flat code, and ckpts/motif_null_baselines.pkl was fitted over
-    the 32-way z1 alphabet, so scoring the new predictions against the cached
-    tables would silently compare distributions of different dimension.
-
-    To restore this: rebuild the null ladder (uniform / global / assay /
-    assay_position) over flat ids using the Stage-2B merge_map, then score
-    top-1/top-5 against chance 1/V and replace the alpha/latent terms with a
-    single latent MSE ||flat_codebook[f_pred] - flat_codebook[f_true]||^2.
+    Reported per active ROI token, over the flat Stage-2B alphabet:
+      top-1 / top-5    flat code identity (chance = 1/V)
+      latent MSE       ||e_flat[f_pred] - e_flat[f_true]||^2, which is what the
+                       decoder actually consumes, reported both absolutely and
+                       relative to substituting the blank token as a scale
+                       reference
     """
-    raise NotImplementedError(
-        "evaluate_motif_nulls still speaks the two-level z1/alpha protocol. "
-        "Rebuild ckpts/motif_null_baselines.pkl over the flat Stage-2B "
-        "alphabet before using it; see this function's docstring."
-    )
+    prior = load_stage4_prior(model, device, activity_phase="4c")
+    motif_prior = prior.motif_prior
+    motif_prior.eval()
+    model.eval()
+    V = int(motif_prior.V)
+
+    if rebuild or not MOTIF_NULL_BASELINE_PATH.exists():
+        payload = build_motif_null_baselines(
+            train_loader, model, motif_prior, device=device,
+            save_path=str(MOTIF_NULL_BASELINE_PATH),
+        )
+    else:
+        payload = load_motif_null_baselines(str(MOTIF_NULL_BASELINE_PATH))
+        if int(payload.get("V", -1)) != V + 1:
+            payload = build_motif_null_baselines(
+                train_loader, model, motif_prior, device=device,
+                save_path=str(MOTIF_NULL_BASELINE_PATH),
+            )
+
+    E = motif_prior.flat_codebook.detach().float()
+    names = ["model", "uniform", "global", "assay", "assay_position"]
+    totals = {n: {"t1": 0.0, "t5": 0.0, "latent_mse": 0.0} for n in names}
+    n_tokens = 0.0
+    blank_reference = 0.0
+    blank_code = getattr(model.vq, "blank_code", -1)
+
+    for batch in test_loader:
+        x, gct, lct, task_id, mask_spec = _batch_to_device(batch, device)
+        codes, pmask, _ = _vq_codes_and_pmask_for_prior(
+            model, x, gct, lct, mask_spec, device
+        )
+        targets = motif_prior.make_targets_from_codes(
+            codes=codes, predict_mask=pmask, blank_code=blank_code
+        )
+        a_in, f_in, targets = motif_prior.corrupt_inputs_from_targets(
+            targets, ensure_at_least_one_mask=True, full_mask_prob=1.0
+        )
+        logits, _, _ = motif_prior(
+            a_in, f_in,
+            global_ctx=gct, local_ctx=lct, task_id=task_id, targets=None,
+        )
+        selected = targets["f_loss_mask"].bool() & targets["f"].lt(V)
+        if not bool(selected.any()):
+            continue
+
+        f_true = targets["f"][selected].long()
+        batch_pos, token_pos = torch.nonzero(selected, as_tuple=True)
+        assay_idx = np.asarray(batch["assay_idx"]).reshape(-1)[batch_pos.cpu().numpy()]
+        positions = token_pos.cpu().numpy()
+
+        true_latent = E[f_true]
+        blank_reference += float(
+            (model.vq.blank_token.detach().float().unsqueeze(0) - true_latent)
+            .pow(2).sum().item()
+        )
+
+        predictions = {"model": logits["flat"][selected][:, :V].float()}
+        for level in ("uniform", "global", "assay", "assay_position"):
+            prob = motif_null_predictions(
+                payload, assay_idx, positions, level=level
+            )[:, :V]
+            predictions[level] = (
+                torch.from_numpy(np.log(prob + 1e-12)).float().to(device)
+            )
+
+        for name, flat_logits in predictions.items():
+            top_k = flat_logits.topk(min(5, V), dim=-1).indices
+            totals[name]["t1"] += float((flat_logits.argmax(-1) == f_true).sum().item())
+            totals[name]["t5"] += float(
+                (top_k == f_true.unsqueeze(-1)).any(-1).sum().item()
+            )
+            pred_latent = E[flat_logits.argmax(-1)]
+            totals[name]["latent_mse"] += float(
+                (pred_latent - true_latent).pow(2).sum().item()
+            )
+
+        n_tokens += float(f_true.numel())
+
+    den = max(n_tokens, 1.0)
+    report = {"active_roi_tokens": int(n_tokens), "V": V, "chance_top1": 1.0 / V}
+    for name in names:
+        report[f"{name}_top1"] = totals[name]["t1"] / den
+        report[f"{name}_top5"] = totals[name]["t5"] / den
+        report[f"{name}_latent_mse"] = totals[name]["latent_mse"] / den
+    report["blank_latent_mse"] = blank_reference / den
+    for name in names[1:]:
+        report[f"model_minus_{name}_top1"] = (
+            report["model_top1"] - report[f"{name}_top1"]
+        )
+
+    save_json_report(report, REPORTS["motif_nulls"])
+    print("Motif null comparison:", report)
+    return report
 
 
 

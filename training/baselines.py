@@ -277,16 +277,15 @@ def load_null_baselines(path: str = "ckpts/null_baselines.pkl") -> Dict[str, Any
 # Motif-prior nulls
 # ---------------------------------------------------------------------------
 
-MOTIF_NULL_VERSION = 1
+MOTIF_NULL_VERSION = 2   # 2: flat Stage-2B alphabet (was 1: 32-way z1)
 
 
 @torch.no_grad()
 def build_motif_null_baselines(
     loader,
     vqvae,
+    motif_prior,
     *,
-    K1: int,
-    K2: int,
     device: str = "cuda",
     save_path: str = "ckpts/motif_null_baselines.pkl",
     max_batches: Optional[int] = None,
@@ -294,30 +293,31 @@ def build_motif_null_baselines(
 ) -> Dict[str, Any]:
     """Empirical motif statistics for null comparison, from TRAINING data only.
 
-    Accumulates, over active tokens:
-      * z1 code counts, globally / per assay / per (assay, token position)
-      * alpha sums, at the same three levels
+    Accumulates flat Stage-2B code counts over active tokens, globally / per
+    assay / per (assay, token position). The alphabet is ``motif_prior.V + 1``
+    (935 observed entries plus the OOV bin), matching what the prior's head
+    emits, so the null and the model are scored on the same support.
 
     The per-(assay, position) level is the strong null: "what motif usually
-    occupies this latent location in this preparation". With ~930 training
-    samples and ~85 active tokens each, a 31 x 1024 table averages only a few
-    observations per cell, so predictions from it must be hierarchically
-    smoothed toward the per-assay and global levels (see
-    ``motif_null_predictions``). Unsmoothed per-cell counts would be noise.
+    occupies this latent location in this preparation". With ~1000 training
+    samples and ~85 active tokens each, a 31 x 1024 table over a 936-way
+    alphabet averages far less than one observation per cell, so predictions
+    must be hierarchically smoothed toward the per-assay and global levels
+    (see ``motif_null_predictions``). Unsmoothed per-cell counts are noise.
+
+    Was previously fitted over the 32-way z1 alphabet; that payload is
+    rejected by version.
     """
-    from ..training.train_prior import _vq_codes_alpha_and_pmask
+    from ..training.train_prior import _vq_codes_and_pmask_for_prior
 
     vqvae.eval()
-    z1_global = np.zeros(K1, dtype=np.float64)
-    a_global = np.zeros(K2, dtype=np.float64)
+    V = int(motif_prior.V) + 1          # + OOV bin
+    f_global = np.zeros(V, dtype=np.float64)
     n_global = 0.0
 
-    z1_assay: Dict[int, np.ndarray] = {}
-    a_assay: Dict[int, np.ndarray] = {}
+    f_assay: Dict[int, np.ndarray] = {}
     n_assay: Dict[int, float] = {}
-
-    z1_pos: Dict[int, np.ndarray] = {}
-    a_pos: Dict[int, np.ndarray] = {}
+    f_pos: Dict[int, np.ndarray] = {}
     n_pos: Dict[int, np.ndarray] = {}
 
     n_tokens = None
@@ -331,42 +331,33 @@ def build_motif_null_baselines(
         local_ctx = batch["local_ctx"].to(device).float()
         assay_idx = np.asarray(batch["assay_idx"]).reshape(-1).astype(np.int64)
 
-        codes, alpha, _pmask, _grid = _vq_codes_alpha_and_pmask(
+        codes, _pmask, _grid = _vq_codes_and_pmask_for_prior(
             vqvae, x, global_ctx, local_ctx, None, device
         )
-        active = codes[..., 0].ge(0)
-        z1 = codes[..., 0].clamp_min(0)
+        flat_ids, active = motif_prior.flat_ids_from_codes(codes)
 
         if n_tokens is None:
             n_tokens = int(codes.shape[1])
 
-        z1_np = z1.cpu().numpy()
-        alpha_np = alpha.float().cpu().numpy()
+        f_np = flat_ids.cpu().numpy()
         active_np = active.cpu().numpy()
 
         for b in range(x.shape[0]):
             a_id = int(assay_idx[b])
-            if a_id not in z1_assay:
-                z1_assay[a_id] = np.zeros(K1, dtype=np.float64)
-                a_assay[a_id] = np.zeros(K2, dtype=np.float64)
+            if a_id not in f_assay:
+                f_assay[a_id] = np.zeros(V, dtype=np.float64)
                 n_assay[a_id] = 0.0
-                z1_pos[a_id] = np.zeros((n_tokens, K1), dtype=np.float64)
-                a_pos[a_id] = np.zeros((n_tokens, K2), dtype=np.float64)
+                f_pos[a_id] = np.zeros((n_tokens, V), dtype=np.float64)
                 n_pos[a_id] = np.zeros(n_tokens, dtype=np.float64)
 
             positions = np.nonzero(active_np[b])[0]
             if positions.size == 0:
                 continue
-            codes_here = z1_np[b, positions]
-            alphas_here = alpha_np[b, positions]
+            codes_here = f_np[b, positions]
 
-            np.add.at(z1_global, codes_here, 1.0)
-            np.add.at(z1_assay[a_id], codes_here, 1.0)
-            np.add.at(z1_pos[a_id], (positions, codes_here), 1.0)
-
-            a_global += alphas_here.sum(axis=0)
-            a_assay[a_id] += alphas_here.sum(axis=0)
-            np.add.at(a_pos[a_id], positions, alphas_here)
+            np.add.at(f_global, codes_here, 1.0)
+            np.add.at(f_assay[a_id], codes_here, 1.0)
+            np.add.at(f_pos[a_id], (positions, codes_here), 1.0)
 
             np.add.at(n_pos[a_id], positions, 1.0)
             n_assay[a_id] += float(positions.size)
@@ -377,18 +368,14 @@ def build_motif_null_baselines(
 
     payload = {
         "version": MOTIF_NULL_VERSION,
-        "K1": int(K1),
-        "K2": int(K2),
+        "V": int(V),
         "Ntok": int(n_tokens),
         "active_token_observations": float(n_global),
-        "z1_global": z1_global,
-        "alpha_global": a_global,
+        "f_global": f_global,
         "n_global": n_global,
-        "z1_assay": z1_assay,
-        "alpha_assay": a_assay,
+        "f_assay": f_assay,
         "n_assay": n_assay,
-        "z1_pos": z1_pos,
-        "alpha_pos": a_pos,
+        "f_pos": f_pos,
         "n_pos": n_pos,
     }
 
@@ -400,10 +387,13 @@ def build_motif_null_baselines(
             print(f"[motif_nulls] saved -> {save_path}")
 
     if verbose:
-        per_cell = n_global / max(len(z1_assay) * max(n_tokens or 1, 1), 1)
+        per_cell = n_global / max(len(f_assay) * max(n_tokens or 1, 1), 1)
+        occupied = int((f_global > 0).sum())
         print(
             f"[motif_nulls] {n_global:.0f} active-token observations across "
-            f"{len(z1_assay)} assays; mean {per_cell:.2f} per (assay, position) cell"
+            f"{len(f_assay)} assays over a {V}-way alphabet "
+            f"({occupied} entries ever seen); mean {per_cell:.2f} per "
+            f"(assay, position) cell"
         )
     return payload
 
@@ -416,7 +406,7 @@ def motif_null_predictions(
     level: str,
     smoothing: float = 4.0,
 ):
-    """Return (z1 probability table, alpha estimate) for one null level.
+    """Return a (m, V) flat-code probability table for one null level.
 
     level: 'uniform' | 'global' | 'assay' | 'assay_position'
 
@@ -425,55 +415,43 @@ def motif_null_predictions(
     sparse. Without smoothing the strong null would be dominated by cells seen
     once or not at all.
     """
-    K1, K2 = int(payload["K1"]), int(payload["K2"])
+    V = int(payload["V"])
     m = positions.shape[0]
 
-    z1_global = payload["z1_global"] + 1e-9
-    p_global = z1_global / z1_global.sum()
-    alpha_global = payload["alpha_global"] / max(payload["n_global"], 1.0)
+    f_global = payload["f_global"] + 1e-9
+    p_global = f_global / f_global.sum()
 
     if level == "uniform":
-        return (
-            np.tile(np.full(K1, 1.0 / K1), (m, 1)),
-            np.tile(np.full(K2, 1.0 / K2), (m, 1)),
-        )
+        return np.tile(np.full(V, 1.0 / V), (m, 1))
     if level == "global":
-        return np.tile(p_global, (m, 1)), np.tile(alpha_global, (m, 1))
+        return np.tile(p_global, (m, 1))
 
     assay_idx = np.asarray(assay_idx).reshape(-1)
-    z1_out = np.empty((m, K1), dtype=np.float64)
-    alpha_out = np.empty((m, K2), dtype=np.float64)
+    out = np.empty((m, V), dtype=np.float64)
 
     for i in range(m):
         a_id = int(assay_idx[i])
-        if a_id in payload["z1_assay"]:
-            counts_a = payload["z1_assay"][a_id]
+        if a_id in payload["f_assay"]:
+            counts_a = payload["f_assay"][a_id]
             n_a = payload["n_assay"][a_id]
             p_assay = (counts_a + smoothing * p_global) / (n_a + smoothing)
-            alpha_assay = (
-                payload["alpha_assay"][a_id] + smoothing * alpha_global
-            ) / (n_a + smoothing)
         else:
-            p_assay, alpha_assay = p_global, alpha_global
+            p_assay = p_global
 
         if level == "assay":
-            z1_out[i], alpha_out[i] = p_assay, alpha_assay
+            out[i] = p_assay
             continue
 
         pos = int(positions[i])
-        if a_id in payload["z1_pos"]:
-            counts_p = payload["z1_pos"][a_id][pos]
+        if a_id in payload["f_pos"]:
+            counts_p = payload["f_pos"][a_id][pos]
             n_p = payload["n_pos"][a_id][pos]
-            z1_out[i] = (counts_p + smoothing * p_assay) / (n_p + smoothing)
-            alpha_out[i] = (
-                payload["alpha_pos"][a_id][pos] + smoothing * alpha_assay
-            ) / (n_p + smoothing)
+            out[i] = (counts_p + smoothing * p_assay) / (n_p + smoothing)
         else:
-            z1_out[i], alpha_out[i] = p_assay, alpha_assay
+            out[i] = p_assay
 
-    z1_out /= z1_out.sum(axis=1, keepdims=True).clip(1e-12)
-    alpha_out /= alpha_out.sum(axis=1, keepdims=True).clip(1e-12)
-    return z1_out, alpha_out
+    out /= out.sum(axis=1, keepdims=True).clip(1e-12)
+    return out
 
 
 def load_motif_null_baselines(path: str = "ckpts/motif_null_baselines.pkl") -> Dict[str, Any]:

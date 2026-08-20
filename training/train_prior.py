@@ -848,13 +848,13 @@ def train_motif_prior_mgit(
             total_spatial += float(loss_spatial.item()) * float(B)
             total_cnt += float(B)
 
+            # One stream: both slots report the flat-alphabet CE so the
+            # existing z1/z2 report keys stay populated.
             if n_z1 > 0:
-                total_z1 += float(aux["loss_z1"].item()) * n_z1
+                total_z1 += float(aux["loss_flat"].item()) * n_z1
                 total_z1_cnt += n_z1
-
-            if n_z2 > 0:
-                total_z2 += float(aux["loss_z2"].item()) * n_z2
-                total_z2_cnt += n_z2
+                total_z2 += float(aux["loss_flat"].item()) * n_z1
+                total_z2_cnt += n_z1
 
             total_z1_acc += mz1["acc"] * mz1["n"]
             total_z2_acc += mz2["acc"] * mz2["n"]
