@@ -159,7 +159,7 @@ def fit_vqvae(
     # ---- early stop ----
     save_start_epoch: int = 0,
     early_stop_patience: Optional[int] = None,
-    val_metric_name: str = "AUPRC_tol_cond",
+    val_metric_name: str = "AUPRC_tol",
     val_metric_goal: str = "max",  # or "min"
     use_ROI_mask: bool = False,
     
@@ -620,7 +620,7 @@ def fit_vqvae(
                     # only anchor holding probability up at true spikes once
                     # pos_weight has decayed.
                     # Setting it to 0 collapsed the model: pred_mean_p halved
-                    # (0.00179 -> 0.00088) and AUPRC_cond turned over
+                    # (0.00179 -> 0.00088) and AUPRC turned over
                     # (0.03848 -> 0.02377) exactly at level3_full_loss_epoch=65,
                     # when this tier took full weight. Target density is 0.00012,
                     # so 99.99% zeros dominate the BCE without this term.
@@ -1271,21 +1271,7 @@ def fit_vqvae(
                 metric_tolerance=metric_tolerance,
                 mask_latents=mask_latents,
                 latent_recon_drop_p=latent_recon_drop_p,
-                eval_ctx_shuffle=bool(log_ctx_diagnostics),
             )
-
-            # Context effect sizes, reported next to the raw metrics so an
-            # inert context branch is visible in the epoch line rather than
-            # only discoverable by diffing cond/uncond columns afterwards.
-            if "val_loss_BCE_uncond" in eval_report:
-                eval_report["ctx_effect_bce"] = (
-                    eval_report["val_loss_BCE_uncond"]
-                    - eval_report["val_loss_BCE_cond"]
-                )
-                eval_report["ctx_effect_auprc_tol"] = (
-                    eval_report["AUPRC_tol_cond"]
-                    - eval_report["AUPRC_tol_uncond"]
-                )
 
             if val_metric_name in eval_report:
                 val_metric = eval_report[val_metric_name]
@@ -1302,13 +1288,13 @@ def fit_vqvae(
             # number alone -- which structurally favours a diffuse field, since
             # radius (1,1,1) is a 27-voxel neighbourhood a blurry model harvests
             # cheaply. A sharper model looked worse with no way to see otherwise.
-            for _k in ("AUPRC_cond", "AUPRC_tol_cond"):
+            for _k in ("AUPRC", "AUPRC_tol"):
                 if eval_report is not None and _k in eval_report:
                     train_log[_k] = float(eval_report[_k])
 
             # These remain raw evaluation operating points.
-            exact_thr = eval_report["BestF1_threshold_cond"]
-            tolerant_thr = eval_report["BestF1_threshold_tol_cond"]
+            exact_thr = eval_report["BestF1_threshold"]
+            tolerant_thr = eval_report["BestF1_threshold_tol"]
 
             model._set_best_thresholds(
                 exact=exact_thr,
@@ -1427,20 +1413,20 @@ def fit_vqvae(
                 log_str += f"  val_BCE_full_tol={eval_report['val_loss_BCE_full']:.5f}"
 
             # exact metrics
-            if "AUPRC_cond" in eval_report:
-                log_str += f"\nAUPRC_exact={eval_report['AUPRC_cond']:.6f}"
-            if "BestF1_cond" in eval_report:
-                log_str += f"  BestF1_exact={eval_report['BestF1_cond']:.4f}"
-            if "BestF1_threshold_cond" in eval_report:
-                log_str += f"  Thr_exact={eval_report['BestF1_threshold_cond']:.3f}"
+            if "AUPRC" in eval_report:
+                log_str += f"\nAUPRC_exact={eval_report['AUPRC']:.6f}"
+            if "BestF1" in eval_report:
+                log_str += f"  BestF1_exact={eval_report['BestF1']:.4f}"
+            if "BestF1_threshold" in eval_report:
+                log_str += f"  Thr_exact={eval_report['BestF1_threshold']:.3f}"
 
             # tolerant metrics
-            if "AUPRC_tol_cond" in eval_report:
-                log_str += f"\nAUPRC_tol={eval_report['AUPRC_tol_cond']:.6f}"
-            if "BestF1_tol_cond" in eval_report:
-                log_str += f"  BestF1_tol={eval_report['BestF1_tol_cond']:.4f}"
-            if "BestF1_threshold_tol_cond" in eval_report:
-                log_str += f"  Thr_tol={eval_report['BestF1_threshold_tol_cond']:.3f}"
+            if "AUPRC_tol" in eval_report:
+                log_str += f"\nAUPRC_tol={eval_report['AUPRC_tol']:.6f}"
+            if "BestF1_tol" in eval_report:
+                log_str += f"  BestF1_tol={eval_report['BestF1_tol']:.4f}"
+            if "BestF1_threshold_tol" in eval_report:
+                log_str += f"  Thr_tol={eval_report['BestF1_threshold_tol']:.3f}"
 
         print(log_str)
 
@@ -1461,12 +1447,8 @@ def fit_vqvae(
             if val_loader is not None and len(history["val_metrics"]) > 0:
                 last_val = history["val_metrics"][-1]
                 ctx_lines.append(
-                    "  [ctx] effect_bce=%+.5f effect_auprc_tol=%+.5f specificity_bce=%+.5f"
-                    % (
-                        last_val.get("ctx_effect_bce", float("nan")),
-                        last_val.get("ctx_effect_auprc_tol", float("nan")),
-                        last_val.get("ctx_specificity_bce", float("nan")),
-                    )
+                    "  [ctx] specificity_bce=%+.5f"
+                    % (last_val.get("ctx_specificity_bce", float("nan")),)
                 )
             print("\n".join(ctx_lines))
         print(" ")

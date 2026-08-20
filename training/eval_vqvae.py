@@ -23,8 +23,6 @@ def evaluate_vqvae(
     pos_weight: float = 1.0,
     recon_tolerance: tuple[int, int, int] = (2, 2, 2),
     metric_tolerance: tuple[int, int, int] = (2, 2, 2),
-    # If True: compute both conditioned (FiLM on) and unconditioned (FiLM off) metrics.
-    eval_cfg_modes: bool = True,
     # If True, decode every cumulative hierarchy level so per-level reconstruction
     # curves exist. Costs one extra decoder pass per level below the last.
     eval_per_level_refinements: bool = True,
@@ -34,28 +32,20 @@ def evaluate_vqvae(
     # them makes ref1 and ref2 different objectives and the level-to-level
     # comparison meaningless. Set False to reproduce the train-matched weights.
     comparable_per_level_losses: bool = True,
-    # Hide a subset of latent tokens from the decoder, matching Stage 2C
-    # training.  Context can only matter where the codes are missing, so
-    # measuring conditional-vs-unconditional under full autoencoding will
-    # always report "no effect" regardless of what the branch learned.
     mask_latents: bool = False,
     latent_recon_drop_p: float = 0.5,
-    # Extra pass with local_ctx permuted across the batch.  Distinguishes
-    # "the decoder uses context" from "the decoder uses THIS sample's
-    # context": if shuffled matches conditional, the branch has only learned
-    # a constant bias.
-    eval_ctx_shuffle: bool = False,
 ):
     """
     Deterministic evaluation.
 
-    NOTE: the decoder is dense and takes no context input, so the
-    conditional and unconditional arms are now identical by
-    construction. Kept only so report keys stay stable.
+    There is ONE arm. The decoder is dense and takes no context input, so a
+    conditional/unconditional contrast is not merely unmeasurable, it is
+    undefined: both passes run the identical function of the identical inputs.
+    The old ``_cond`` / ``_uncond`` / ``_shuf`` suffixes and the second and
+    third forward passes that produced them are gone.
 
     PR metrics are calculated once from TP/FP/FN accumulated over the complete
-    loader. Conditional keys end in ``_cond``; optional unconditional keys end
-    in ``_uncond``.
+    loader.
 
     Per-level reconstruction keys ``val_loss_recon_ref{L}_*`` are indexed by the
     decode's own hierarchy level and, by default, scored with identical loss
@@ -75,11 +65,7 @@ def evaluate_vqvae(
         autocast_ctx = nullcontext
     # autocast_ctx = torch.cuda.amp.autocast if (use_amp and device.type == "cuda") else torch.cpu.amp.autocast
     
-    # ---- accumulators (conditional) ----
     total_bce_c, total_bce_full_c, sum_vq_c = 0.0, 0.0, 0.0
-    
-    # ---- accumulators (unconditional) ----
-    total_bce_u, total_bce_full_u, sum_vq_u = 0.0, 0.0, 0.0
     
     mt, mh, mw = metric_tolerance
 
@@ -95,21 +81,6 @@ def evaluate_vqvae(
         radius_w=mw,
     )
     
-    exact_u = None
-    tolerant_u = None
-    if eval_cfg_modes:
-        exact_u = PRCurveAccumulator(
-            num_thr=num_thr,
-            device=device,
-        )
-        tolerant_u = PRCurveAccumulator(
-            num_thr=num_thr,
-            device=device,
-            radius_t=mt,
-            radius_h=mh,
-            radius_w=mw,
-        )
-    
     total_frames = 0
     total_eval_voxels = 0
     total_full_voxels = 0
@@ -120,15 +91,9 @@ def evaluate_vqvae(
     sb_sum_sq = 0.0
     sb_count = 0
 
-    total_bce_s = 0.0
-    total_bce_full_s = 0.0
-
-
     max_ref_levels = int(getattr(model.vq, "num_quantizers", 1))
     refinement_sums_c = {}
-    refinement_sums_u = {}
     refinement_counts_c = {}
-    refinement_counts_u = {}
 
     for ridx in range(1, max_ref_levels + 1):
         refinement_sums_c[f"ref{ridx}"] = 0.0
@@ -136,10 +101,6 @@ def evaluate_vqvae(
         refinement_sums_c[f"ref{ridx}_tol"] = 0.0
         refinement_counts_c[ridx] = 0
 
-        refinement_sums_u[f"ref{ridx}"] = 0.0
-        refinement_sums_u[f"ref{ridx}_exact"] = 0.0
-        refinement_sums_u[f"ref{ridx}_tol"] = 0.0
-        refinement_counts_u[ridx] = 0
 
     def _metrics_from_out(
         out,
@@ -364,32 +325,6 @@ def evaluate_vqvae(
                 sb_count += int(sb.numel())
             
 
-            out_u = None
-            if eval_cfg_modes:
-                out_u = model(
-                    x,
-                    global_ctx=gct,
-                    local_ctx=lct,
-                    predict_mask_spec=mask_spec,
-                    roi_hw=roi_hw,
-                    pad_hw=pad_hw,
-                    return_all_refinements=bool(eval_per_level_refinements),
-                    latent_hidden_mask=latent_hidden_mask,
-                )
-
-            out_s = None
-            if eval_ctx_shuffle and isinstance(lct, torch.Tensor) and lct.size(0) > 1:
-                out_s = model(
-                    x,
-                    global_ctx=gct,
-                    local_ctx=torch.roll(lct, shifts=1, dims=0),
-                    predict_mask_spec=mask_spec,
-                    roi_hw=roi_hw,
-                    pad_hw=pad_hw,
-                    return_all_refinements=False,
-                    latent_hidden_mask=latent_hidden_mask,
-                )
-
         # ---- metrics: conditional ----
         bce_c, bce_full_c, vq_c, frames_c, vox_c, full_vox_c, samples_c, \
             ref_losses_c, ref_exact_c, ref_tol_c = _metrics_from_out(
@@ -415,39 +350,6 @@ def evaluate_vqvae(
         total_full_voxels += full_vox_c
         eval_passes += samples_c
 
-        # ---- metrics: shuffled context ----
-        if out_s is not None:
-            bce_s, bce_full_s, _, _, _, _, _, _, _, _ = _metrics_from_out(
-                out_s,
-                x,
-                None,
-                None,
-            )
-            total_bce_s += bce_s
-            total_bce_full_s += bce_full_s
-
-        # ---- metrics: unconditional ----
-        if eval_cfg_modes and out_u is not None:
-            bce_u, bce_full_u, vq_u, _, _, _, _, \
-                ref_losses_u, ref_exact_u, ref_tol_u = _metrics_from_out(
-                    out_u,
-                    x,
-                    exact_u,
-                    tolerant_u,
-                )
-            total_bce_u += bce_u
-            total_bce_full_u += bce_full_u
-            sum_vq_u += vq_u
-            
-            for ridx, val in ref_losses_u.items():
-                refinement_sums_u[f"ref{ridx}"] += val
-                refinement_counts_u[ridx] = refinement_counts_u.get(ridx, 0) + 1
-            for ridx, val in ref_exact_u.items():
-                refinement_sums_u[f"ref{ridx}_exact"] += val
-            for ridx, val in ref_tol_u.items():
-                refinement_sums_u[f"ref{ridx}_tol"] += val
-
-
     (
         auprc_c,
         bestf1_c,
@@ -460,59 +362,37 @@ def evaluate_vqvae(
         bestthr_tol_c,
     ) = tolerant_c.compute()
     
-    if eval_cfg_modes:
-        (
-            auprc_u,
-            bestf1_u,
-            bestthr_u,
-        ) = exact_u.compute()
-    
-        (
-            auprc_tol_u,
-            bestf1_tol_u,
-            bestthr_tol_u,
-        ) = tolerant_u.compute()
-
     report = {
         "val_loss_BCE": total_bce_c / max(1, len(loader)),
         "val_loss_BCE_full": total_bce_full_c / max(1, len(loader)),
         "val_loss_vq": sum_vq_c / max(1, len(loader)),
-        "val_loss_BCE_cond": total_bce_c / max(1, len(loader)),
-        "val_loss_BCE_full_cond": total_bce_full_c / max(1, len(loader)),
-        "val_loss_vq_cond": sum_vq_c / max(1, len(loader)),
-        "AUPRC_cond": auprc_c,
-        "BestF1_cond": bestf1_c,
-        "BestF1_threshold_cond": bestthr_c,
-        "AUPRC_tol_cond": auprc_tol_c,
-        "BestF1_tol_cond": bestf1_tol_c,
-        "BestF1_threshold_tol_cond": bestthr_tol_c,
+        "val_loss_BCE": total_bce_c / max(1, len(loader)),
+        "val_loss_BCE_full": total_bce_full_c / max(1, len(loader)),
+        "val_loss_vq": sum_vq_c / max(1, len(loader)),
+        "AUPRC": auprc_c,
+        "BestF1": bestf1_c,
+        "BestF1_threshold": bestthr_c,
+        "AUPRC_tol": auprc_tol_c,
+        "BestF1_tol": bestf1_tol_c,
+        "BestF1_threshold_tol": bestthr_tol_c,
         "eval_count": eval_passes,
         "eval_density": float(total_eval_voxels) / max(1.0, float(total_frames)),
         "eval_mask_frac": float(total_eval_voxels) / max(1.0, float(total_full_voxels)),
         "latent_masking_enabled": bool(mask_latents),
     }
 
-    if eval_ctx_shuffle:
-        report["val_loss_BCE_shuf"] = total_bce_s / max(1, len(loader))
-        report["val_loss_BCE_full_shuf"] = total_bce_full_s / max(1, len(loader))
-        # The number that matters.  If the decoder actually uses THIS sample's
-        # context, mismatching it must hurt: ctx_specificity_bce > 0.
-        report["ctx_specificity_bce"] = (
-            report["val_loss_BCE_shuf"] - report["val_loss_BCE_cond"]
-        )
-    
     for ridx in range(1, max_ref_levels + 1):
         den = refinement_counts_c.get(ridx, 0)
         if den <= 0:
             # Never decoded this level. Emit NaN so a missing level can never be
             # plotted or tabulated as a real zero.
-            report[f"val_loss_recon_ref{ridx}_cond"] = float("nan")
-            report[f"val_loss_recon_ref{ridx}_exact_cond"] = float("nan")
-            report[f"val_loss_recon_ref{ridx}_tol_cond"] = float("nan")
+            report[f"val_loss_recon_ref{ridx}"] = float("nan")
+            report[f"val_loss_recon_ref{ridx}_exact"] = float("nan")
+            report[f"val_loss_recon_ref{ridx}_tol"] = float("nan")
             continue
-        report[f"val_loss_recon_ref{ridx}_cond"] = refinement_sums_c[f"ref{ridx}"] / den
-        report[f"val_loss_recon_ref{ridx}_exact_cond"] = refinement_sums_c[f"ref{ridx}_exact"] / den
-        report[f"val_loss_recon_ref{ridx}_tol_cond"] = refinement_sums_c[f"ref{ridx}_tol"] / den
+        report[f"val_loss_recon_ref{ridx}"] = refinement_sums_c[f"ref{ridx}"] / den
+        report[f"val_loss_recon_ref{ridx}_exact"] = refinement_sums_c[f"ref{ridx}_exact"] / den
+        report[f"val_loss_recon_ref{ridx}_tol"] = refinement_sums_c[f"ref{ridx}_tol"] / den
 
     if sb_count > 0:
         sb_mean = sb_sum / sb_count
@@ -528,29 +408,6 @@ def evaluate_vqvae(
             "val_num_bias_values": sb_count,
         })
     
-    if eval_cfg_modes:
-        report.update({
-            "val_loss_BCE_uncond": total_bce_u / max(1, len(loader)),
-            "val_loss_BCE_full_uncond": total_bce_full_u / max(1, len(loader)),
-            "val_loss_vq_uncond": sum_vq_u / max(1, len(loader)),
-            "AUPRC_uncond": auprc_u,
-            "BestF1_uncond": bestf1_u,
-            "BestF1_threshold_uncond": bestthr_u,
-            "AUPRC_tol_uncond": auprc_tol_u,
-            "BestF1_tol_uncond": bestf1_tol_u,
-            "BestF1_threshold_tol_uncond": bestthr_tol_u,
-        })
-        
-        for ridx in range(1, max_ref_levels + 1):
-            den = refinement_counts_u.get(ridx, 0)
-            if den <= 0:
-                report[f"val_loss_recon_ref{ridx}_uncond"] = float("nan")
-                report[f"val_loss_recon_ref{ridx}_exact_uncond"] = float("nan")
-                report[f"val_loss_recon_ref{ridx}_tol_uncond"] = float("nan")
-                continue
-            report[f"val_loss_recon_ref{ridx}_uncond"] = refinement_sums_u[f"ref{ridx}"] / den
-            report[f"val_loss_recon_ref{ridx}_exact_uncond"] = refinement_sums_u[f"ref{ridx}_exact"] / den
-            report[f"val_loss_recon_ref{ridx}_tol_uncond"] = refinement_sums_u[f"ref{ridx}_tol"] / den
 
 
     return report

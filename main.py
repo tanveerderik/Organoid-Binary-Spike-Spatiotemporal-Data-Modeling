@@ -852,10 +852,29 @@ def common_fit_kwargs(model):
         memory_adj=getattr(model, "memory_adj", None),
         memory_adj_conf_den_scale=100.0,
 
-        level2_start_epoch=1,
-        level3_start_epoch=1,
-        level2_full_loss_epoch=20,
-        level3_full_loss_epoch=50,
+        # STAGED ACTIVATION, not merely staged loss weights.
+        #
+        # These are the values the shipped 2A checkpoint was trained with. The
+        # defaults used to be start_epoch=1 for both, which assigns all three
+        # quantizers from epoch 1: z3 then quantizes a residual whose upstream
+        # levels are still moving. That arm is on disk as
+        # reports/stage1a_3level_simultaneous_epochs.jsonl and reached
+        # AUPRC_tol 0.04499 at epoch 134, against 0.15244 for the staged run at
+        # the same epoch -- a 3.4x gap from activation timing alone, since both
+        # arms moved the loss weights on the identical 20/35/50/65 schedule.
+        #
+        # Each level gets 15 epochs to populate via EMA between ACTIVATION and
+        # carrying full loss weight, so it is never asked to bear the objective
+        # from randomly initialised codes:
+        #   1-20   z1 only     [1.0]
+        #   20-35  z1,z2       [1.0, 0.5]
+        #   35-50  z1,z2       [0.75, 1.0]
+        #   50-65  z1,z2,z3    [0.75, 1.0, 0.5]
+        #   65+    z1,z2,z3    [0.5, 0.75, 1.0]
+        level2_start_epoch=20,
+        level2_full_loss_epoch=35,
+        level3_start_epoch=50,
+        level3_full_loss_epoch=65,
         lambda_sp_token=1e-3,
         lambda_sp_pixel=1e-4,
         sp_pixel_start_epoch=40,
@@ -977,7 +996,11 @@ def run_stage2a(model, train_loader, val_loader, blank_logit_threshold):
         ckpt_best_path=str(CKPTS["stage2a_best"]),
         ckpt_last_path=str(CKPTS["stage2a_last"]),
         early_stop_patience=40,
-        val_metric_name="AUPRC_tol_cond",
+        # Select on EXACT AUPRC, not tolerant. The tolerant metric's 27-voxel
+        # slack rewards a diffuse field: the 3-level model measured exact/tol
+        # 0.909 against the 2-level reference's 0.737, i.e. it is the sharper
+        # model and was being ranked on the axis that penalises sharpness.
+        val_metric_name="AUPRC",
         val_metric_goal="max",
         use_ROI_mask=False,
 
@@ -3074,15 +3097,12 @@ def evaluate_existing_checkpoints_on_temporal_split(model, test_loader, device):
             use_ROI_mask=False,
             recon_tolerance=recon_tolerance,
             metric_tolerance=metric_tolerance,
-            eval_cfg_modes=True,
         )
         rows[stage_label] = report
         print(
-            f"  [{stage_label}] AUPRC_cond={report['AUPRC_cond']:.5f} "
-            f"BestF1_cond={report['BestF1_cond']:.5f} "
-            f"AUPRC_tol_cond={report['AUPRC_tol_cond']:.5f} "
-            f"| AUPRC_uncond={report['AUPRC_uncond']:.5f} "
-            f"(cond-uncond delta={report['AUPRC_cond'] - report['AUPRC_uncond']:+.2e})"
+            f"  [{stage_label}] AUPRC={report['AUPRC']:.5f} "
+            f"BestF1={report['BestF1']:.5f} "
+            f"AUPRC_tol={report['AUPRC_tol']:.5f}"
         )
 
     payload = {
