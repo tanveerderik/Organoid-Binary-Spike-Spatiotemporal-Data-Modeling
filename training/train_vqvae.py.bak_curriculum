@@ -117,9 +117,7 @@ def fit_vqvae(
     
     # ---- hierarchical VQ schedule ----
     level2_start_epoch: int = 1,
-    level3_start_epoch: int = 1,
     level2_full_loss_epoch: int = 20,
-    level3_full_loss_epoch: int = 50,
     
     # ---- CFG FiLM conditioning dropout schedule (per-sample) ----
     cfg_ctx_drop_start: float = 0.0,     # start p(drop conditioning)
@@ -139,6 +137,15 @@ def fit_vqvae(
     code_norm_token_ceiling: float = 14.0,
 
     # ---- Stage-2 continuous residual relaxation ----
+    lambda_cont_projection: float = 0.0,
+    lambda_cont_parent_margin: float = 0.0,
+    continuous_sample_start_epoch: int = 1,
+    continuous_sample_warmup_epochs: int = 40,
+    continuous_sample_mix_start: float = 0.0,
+    continuous_sample_mix_end: float = 0.25,
+    continuous_gumbel_tau_start: float = 1.0,
+    continuous_gumbel_tau_end: float = 0.50,
+    continuous_posterior_temperature: float = 0.35,
     
     # --- Blank embedding and patch enforcement ---
     lambda_blank: float = 0.05,
@@ -271,23 +278,38 @@ def fit_vqvae(
                         
             "loss_enc_var": 0.0,
             "loss_code_norm": 0.0,
+            "loss_cont_projection": 0.0,
+            "loss_cont_parent_margin": 0.0,
+            "cont_alpha_entropy": 0.0,
+            "cont_alpha_mean_entropy": 0.0,
+            "cont_alpha_sample_entropy": 0.0,
+            "cont_alpha_final_entropy": 0.0,
+            "cont_alpha_final_usage_entropy": 0.0,
+            "cont_alpha_mean_max": 0.0,
+            "cont_alpha_sample_max": 0.0,
+            "cont_alpha_final_max": 0.0,
+            "cont_adapter_delta_logit_norm": 0.0,
+            "cont_alpha_adapter_enabled": 0.0,
+            "cont_residual_norm": 0.0,
+            "cont_safe_radius": 0.0,
+            "cont_hull_scale": 0.0,
+            "cont_hull_scale_delta": 0.0,
+            "cont_hull_expansion_fraction": 0.0,
+            "cont_geometric_projection_mse": 0.0,
+            "cont_distance_reference_mse": 0.0,
+            "cont_hard_vertex_mse": 0.0,
+            "cont_projection_gain_vs_hard": 0.0,
+            "cont_decode_uses_projection_target": 0.0,
             "loss_blank": 0.0,
             "loss_blank_sep": 0.0,
             
         }
         
         # ---- hierarchy schedule ----
-        # Was hardcoded to 1-or-2, which silently capped a 3-level model at two
-        # levels every epoch, overriding the constructor. Level 3 was allocated
-        # (1024 entries) but never assigned: perplexity_nonblank_l3 = 0.
-        _L_max = int(getattr(model.vq, "num_quantizers", 1))
         if epoch < level2_start_epoch:
-            _n_active = 1
-        elif _L_max < 3 or epoch < level3_start_epoch:
-            _n_active = min(2, _L_max)
+            model.vq.set_active_quantizers(1)
         else:
-            _n_active = min(3, _L_max)
-        model.vq.set_active_quantizers(_n_active)
+            model.vq.set_active_quantizers(2)
         
         max_ref_levels = int(getattr(model.vq, "num_quantizers", 1))
         
@@ -339,6 +361,27 @@ def fit_vqvae(
             v1=ctx_cf_sigma_end,
         )
 
+        cont_sample_mix_eff = _cosine_ramp(
+            epoch_idx=epoch,
+            start_epoch=continuous_sample_start_epoch,
+            warmup_epochs=continuous_sample_warmup_epochs,
+            v0=continuous_sample_mix_start,
+            v1=continuous_sample_mix_end,
+        )
+        cont_gumbel_tau_eff = _cosine_ramp(
+            epoch_idx=epoch,
+            start_epoch=continuous_sample_start_epoch,
+            warmup_epochs=continuous_sample_warmup_epochs,
+            v0=continuous_gumbel_tau_start,
+            v1=continuous_gumbel_tau_end,
+        )
+
+        if hasattr(model, "continuous_residual_sample_mix"):
+            model.continuous_residual_sample_mix = float(cont_sample_mix_eff)
+            model.continuous_residual_gumbel_temperature = float(cont_gumbel_tau_eff)
+            model.continuous_residual_posterior_temperature = float(
+                continuous_posterior_temperature
+            )
         
         # ---- dynamic refinement supervision ----
         L_active = int(getattr(model.vq, "active_quantizers", model.vq.num_quantizers))
@@ -350,18 +393,6 @@ def fit_vqvae(
                 refinement_loss_weights_eff = [1.0, 0.5]
             else:
                 refinement_loss_weights_eff = [0.75, 1.0]
-        elif L_active == 3:
-            # Two handovers instead of one, walking the tolerance ladder
-            # (1,1,1) -> (0,1,1) -> (0,0,0). level3_full_loss_epoch defaults to
-            # 50 rather than 40 so the second handover does not land on top of
-            # the ctx dim schedule completing at 40, which would confound two
-            # transitions in the same epochs.
-            if epoch < level2_full_loss_epoch:
-                refinement_loss_weights_eff = [1.0, 0.5, 0.25]
-            elif epoch < level3_full_loss_epoch:
-                refinement_loss_weights_eff = [0.75, 1.0, 0.5]
-            else:
-                refinement_loss_weights_eff = [0.5, 0.75, 1.0]
         else:
             raise ValueError(f"Unsupported active quantizer count: {L_active}")
         
@@ -381,11 +412,8 @@ def fit_vqvae(
                 raise KeyError('Batch missing "task_id".')
             task_id = task_id.to(device, non_blocking=True).long()
             
-            _last_handover = (
-                level3_full_loss_epoch if L_active >= 3 else level2_full_loss_epoch
-            )
             do_refinement_supervision = (
-                (epoch < _last_handover)
+                (epoch < level2_full_loss_epoch)
                 or (num_batches % 100 == 0)
             )
             num_batches += 1
@@ -471,6 +499,15 @@ def fit_vqvae(
                         }
                 
                 
+                loss_cont_projection = out.get(
+                    "loss_cont_projection",
+                    z_e_active.new_zeros(()),
+                )
+                loss_cont_parent_margin = out.get(
+                    "loss_cont_parent_margin",
+                    z_e_active.new_zeros(()),
+                )
+                continuous_aux = out.get("continuous_residual_aux", None)
                 logits_patches = out["pred_patches"]
                 grid = out["grid"]
                 predict_mask = out["predict_mask"]
@@ -600,74 +637,50 @@ def fit_vqvae(
                     logits_ref = _get_ref_logits(ref)
                     level_id = int(ref.get("level", ridx))
                     is_final_refinement = ridx == num_ref
-
-                    # Single-quantizer models have no coarse companion decode,
-                    # so their sole pass is is_final_refinement from epoch 1 and
-                    # never sees the tolerant curriculum that shapes z1 over the
-                    # first level2_full_loss_epoch epochs of a two-level run.
-                    # Without this the z1-size sweep confounds "one pass instead
-                    # of two" with "exact objective from scratch", while still
-                    # being scored on the tolerant metric. Give the single pass
-                    # the same curriculum: tolerant first, exact from
-                    # level2_full_loss_epoch on. L_active == 2 is untouched.
-                    if L_active == 1 and epoch < level2_full_loss_epoch:
-                        is_final_refinement = False
                 
-                    # ---- tolerance ladder ----
-                    # L=3 walks (1,1,1) -> (0,1,1) -> (0,0,0) keyed on level_id.
-                    # L<=2 reproduces the historical two-branch behaviour exactly.
-                    #
-                    # beta_hit STAYS NON-ZERO at zero tolerance. At radius
-                    # (0,0,0) the hit term's max_pool3d is the identity, so
-                    # loss_hit = -log(p[pos]).mean() -- an UNWEIGHTED,
-                    # POSITIVE-ONLY log-likelihood with no false-positive
-                    # counterbalance. That is NOT a duplicate of alpha_exact's
-                    # BCE, which carries pos_weight (decaying 100 -> 1 over the
-                    # first 100 epochs) and the negative term. beta_hit is the
-                    # only anchor holding probability up at true spikes once
-                    # pos_weight has decayed.
-                    # Setting it to 0 collapsed the model: pred_mean_p halved
-                    # (0.00179 -> 0.00088) and AUPRC_cond turned over
-                    # (0.03848 -> 0.02377) exactly at level3_full_loss_epoch=65,
-                    # when this tier took full weight. Target density is 0.00012,
-                    # so 99.99% zeros dominate the BCE without this term.
-                    #
-                    # peak/multi keep peak_radius_* at EVERY tier. Those are
-                    # decoupled from radius_* precisely so the profile is still
-                    # shaped once the hit tolerance vanishes (utils/losses.py:118);
-                    # without it the exact tier is per-voxel BCE with nothing
-                    # penalising a flat profile.
-                    if L_active >= 3:
-                        if level_id <= 1:
-                            tier = (rt, rh, rw, 0.10, gamma_peak_mid, delta_multi_mid)
-                        elif level_id == 2:
-                            tier = (0, 1, 1, 0.05, gamma_peak_mid, delta_multi_mid)
-                        else:
-                            tier = (0, 0, 0, 0.05, gamma_peak_final, delta_multi_final)
-                    elif not is_final_refinement:
-                        tier = (rt, rh, rw, 0.10, gamma_peak_mid, delta_multi_mid)
+                    if not is_final_refinement:
+                        # ---- early/intermediate refinements: tolerant coarse supervision ----
+                        ref_parts = tolerant_spike_loss(
+                            logits=logits_ref,
+                            target=tgt_vol,
+                            mask_vol=mask_vol,
+                            pos_weight=pos_weight_eff,
+                            radius_t=rt,
+                            radius_h=rh,
+                            radius_w=rw,
+                            alpha_exact=1,
+                            beta_hit=0.1,
+                            gamma_peak=gamma_peak_mid,
+                            delta_multi=delta_multi_mid,
+                            peak_radius_t=peak_radius_t,
+                            peak_radius_h=peak_radius_h,
+                            peak_radius_w=peak_radius_w,
+                            return_parts=True,
+                        )
                     else:
-                        tier = (0, 1, 1, 0.05, gamma_peak_final, delta_multi_final)
-                    t_rt, t_rh, t_rw, t_beta, t_gamma, t_delta = tier
-
-                    ref_parts = tolerant_spike_loss(
-                        logits=logits_ref,
-                        target=tgt_vol,
-                        mask_vol=mask_vol,
-                        pos_weight=pos_weight_eff,
-                        radius_t=t_rt,
-                        radius_h=t_rh,
-                        radius_w=t_rw,
-                        alpha_exact=1,
-                        beta_hit=t_beta,
-                        gamma_peak=t_gamma,
-                        delta_multi=t_delta,
-                        peak_radius_t=peak_radius_t,
-                        peak_radius_h=peak_radius_h,
-                        peak_radius_w=peak_radius_w,
-                        return_parts=True,
-                    )
-
+                        # ---- final refinement: mostly exact, weak local-tolerance auxiliary ----
+                        ref_parts = tolerant_spike_loss(
+                            logits=logits_ref,
+                            target=tgt_vol,
+                            mask_vol=mask_vol,
+                            pos_weight=pos_weight_eff,
+                            radius_t=0,
+                            radius_h=1,
+                            radius_w=1,
+                            alpha_exact=1,
+                            beta_hit=0.05,
+                            gamma_peak=gamma_peak_final,
+                            delta_multi=delta_multi_final,
+                            # The final layer is what gets thresholded and
+                            # sampled, so this is where the temporal reach has to
+                            # exist. radius_t stays 0 so the HIT term grants no
+                            # temporal tolerance -- only peak/multi look across time.
+                            peak_radius_t=peak_radius_t,
+                            peak_radius_h=peak_radius_h,
+                            peak_radius_w=peak_radius_w,
+                            return_parts=True,
+                        )
+                
                     ref_total = ref_parts["total"]
                     recon_total = recon_total + float(w_ref) * ref_total
                     
@@ -994,6 +1007,8 @@ def fit_vqvae(
                 + lambda_isi_eff * loss_isi
                 + lambda_enc_var * loss_enc_var
                 + lambda_code_norm * loss_code_norm
+                + lambda_cont_projection * loss_cont_projection
+                + lambda_cont_parent_margin * loss_cont_parent_margin
                 + lambda_ctx_eff * loss_ctx
                 + lambda_ctx_cf_eff * loss_ctx_cf
                 + lambda_ctx_field_eff * loss_ctx_field
@@ -1012,6 +1027,69 @@ def fit_vqvae(
             sums["loss_vq"] += float(vq_loss.detach().cpu())
             sums["loss_enc_var"] += float(loss_enc_var.detach().cpu())
             sums["loss_code_norm"] += float(loss_code_norm.detach().cpu())
+            sums["loss_cont_projection"] += float(loss_cont_projection.detach().cpu())
+            sums["loss_cont_parent_margin"] += float(loss_cont_parent_margin.detach().cpu())
+            if continuous_aux is not None:
+                sums["cont_alpha_entropy"] += float(
+                    continuous_aux["alpha_entropy"].detach().cpu()
+                )
+                sums["cont_alpha_mean_entropy"] += float(
+                    continuous_aux["alpha_mean_entropy"].detach().cpu()
+                )
+                sums["cont_alpha_sample_entropy"] += float(
+                    continuous_aux["alpha_sample_entropy"].detach().cpu()
+                )
+                sums["cont_alpha_final_entropy"] += float(
+                    continuous_aux["alpha_final_entropy"].detach().cpu()
+                )
+                sums["cont_alpha_final_usage_entropy"] += float(
+                    continuous_aux["alpha_final_usage_entropy"].detach().cpu()
+                )
+                sums["cont_alpha_mean_max"] += float(
+                    continuous_aux["alpha_mean_max"].detach().cpu()
+                )
+                sums["cont_alpha_sample_max"] += float(
+                    continuous_aux["alpha_sample_max"].detach().cpu()
+                )
+                sums["cont_alpha_final_max"] += float(
+                    continuous_aux["alpha_final_max"].detach().cpu()
+                )
+                sums["cont_adapter_delta_logit_norm"] += float(
+                    continuous_aux["adapter_delta_logit_norm"].detach().cpu()
+                )
+                sums["cont_alpha_adapter_enabled"] += float(
+                    continuous_aux["alpha_adapter_enabled"].detach().cpu()
+                )
+                sums["cont_residual_norm"] += float(
+                    continuous_aux["mean_residual_norm"].detach().cpu()
+                )
+                sums["cont_safe_radius"] += float(
+                    continuous_aux["mean_safe_radius"].detach().cpu()
+                )
+                sums["cont_hull_scale"] += float(
+                    continuous_aux["mean_hull_scale"].detach().cpu()
+                )
+                sums["cont_hull_scale_delta"] += float(
+                    continuous_aux["mean_hull_scale_delta"].detach().cpu()
+                )
+                sums["cont_hull_expansion_fraction"] += float(
+                    continuous_aux["hull_expansion_fraction"].detach().cpu()
+                )
+                sums["cont_geometric_projection_mse"] += float(
+                    continuous_aux["geometric_projection_mse"].detach().cpu()
+                )
+                sums["cont_distance_reference_mse"] += float(
+                    continuous_aux["distance_reference_mse"].detach().cpu()
+                )
+                sums["cont_hard_vertex_mse"] += float(
+                    continuous_aux["hard_vertex_mse"].detach().cpu()
+                )
+                sums["cont_projection_gain_vs_hard"] += float(
+                    continuous_aux["projection_gain_vs_hard"].detach().cpu()
+                )
+                sums["cont_decode_uses_projection_target"] += float(
+                    continuous_aux["decode_uses_projection_target"].detach().cpu()
+                )
             
             sums["loss_blank"] += float(loss_blank.detach().cpu())
             sums["loss_blank_sep"] += float(loss_blank_sep.detach().cpu())
@@ -1189,6 +1267,31 @@ def fit_vqvae(
             "loss_vq": sums["loss_vq"] / max(1, num_batches),
             "loss_enc_var": sums["loss_enc_var"] / max(1, num_batches),
             "loss_code_norm": sums["loss_code_norm"] / max(1, num_batches),
+            "loss_cont_projection": sums["loss_cont_projection"] / max(1, num_batches),
+            "loss_cont_parent_margin": sums["loss_cont_parent_margin"] / max(1, num_batches),
+            "cont_alpha_entropy": sums["cont_alpha_entropy"] / max(1, num_batches),
+            "cont_alpha_mean_entropy": sums["cont_alpha_mean_entropy"] / max(1, num_batches),
+            "cont_alpha_sample_entropy": sums["cont_alpha_sample_entropy"] / max(1, num_batches),
+            "cont_alpha_final_entropy": sums["cont_alpha_final_entropy"] / max(1, num_batches),
+            "cont_alpha_final_usage_entropy": sums["cont_alpha_final_usage_entropy"] / max(1, num_batches),
+            "cont_alpha_mean_max": sums["cont_alpha_mean_max"] / max(1, num_batches),
+            "cont_alpha_sample_max": sums["cont_alpha_sample_max"] / max(1, num_batches),
+            "cont_alpha_final_max": sums["cont_alpha_final_max"] / max(1, num_batches),
+            "cont_adapter_delta_logit_norm": sums["cont_adapter_delta_logit_norm"] / max(1, num_batches),
+            "cont_alpha_adapter_enabled": sums["cont_alpha_adapter_enabled"] / max(1, num_batches),
+            "cont_residual_norm": sums["cont_residual_norm"] / max(1, num_batches),
+            "cont_safe_radius": sums["cont_safe_radius"] / max(1, num_batches),
+            "cont_hull_scale": sums["cont_hull_scale"] / max(1, num_batches),
+            "cont_hull_scale_delta": sums["cont_hull_scale_delta"] / max(1, num_batches),
+            "cont_hull_expansion_fraction": sums["cont_hull_expansion_fraction"] / max(1, num_batches),
+            "cont_geometric_projection_mse": sums["cont_geometric_projection_mse"] / max(1, num_batches),
+            "cont_distance_reference_mse": sums["cont_distance_reference_mse"] / max(1, num_batches),
+            "cont_hard_vertex_mse": sums["cont_hard_vertex_mse"] / max(1, num_batches),
+            "cont_projection_gain_vs_hard": sums["cont_projection_gain_vs_hard"] / max(1, num_batches),
+            "cont_decode_uses_projection_target": sums["cont_decode_uses_projection_target"] / max(1, num_batches),
+            "continuous_sample_mix": float(cont_sample_mix_eff),
+            "continuous_gumbel_tau": float(cont_gumbel_tau_eff),
+            "continuous_posterior_temperature": float(continuous_posterior_temperature),
             "blank": sums["loss_blank"] / max(1, num_batches),
             "blank_sep": sums["loss_blank_sep"] / max(1, num_batches),
             "loss_isi": sums["loss_isi"] / max(1, num_batches),
@@ -1318,14 +1421,6 @@ def fit_vqvae(
                 )
 
             train_log[val_metric_name] = val_metric
-            # Log BOTH AUPRC variants regardless of which one selects. Only the
-            # selected metric was stored, so every comparison ran on the tolerant
-            # number alone -- which structurally favours a diffuse field, since
-            # radius (1,1,1) is a 27-voxel neighbourhood a blurry model harvests
-            # cheaply. A sharper model looked worse with no way to see otherwise.
-            for _k in ("AUPRC_cond", "AUPRC_tol_cond"):
-                if eval_report is not None and _k in eval_report:
-                    train_log[_k] = float(eval_report[_k])
 
             # These remain raw evaluation operating points.
             exact_thr = eval_report["BestF1_threshold_cond"]
@@ -1379,6 +1474,29 @@ def fit_vqvae(
             f"blank={train_log.get('blank', 0):.5f} "
             f"blank_sep={train_log.get('blank_sep', 0):.5f}\n"            
             f"\n"
+            
+            f"cont_proj={train_log.get('loss_cont_projection', 0):.6f} "
+            f"cont_parent={train_log.get('loss_cont_parent_margin', 0):.6f} "
+            f"cont_H_mean={train_log.get('cont_alpha_mean_entropy', 0):.4f} "
+            f"cont_H_sample={train_log.get('cont_alpha_sample_entropy', 0):.4f} "
+            f"cont_H_final={train_log.get('cont_alpha_final_entropy', 0):.4f} "
+            f"cont_H_usage={train_log.get('cont_alpha_final_usage_entropy', 0):.4f}\n"
+            f"cont_max_mean={train_log.get('cont_alpha_mean_max', 0):.4f} "
+            f"cont_max_sample={train_log.get('cont_alpha_sample_max', 0):.4f} "
+            f"cont_max_final={train_log.get('cont_alpha_final_max', 0):.4f} "
+            f"cont_adapter_delta={train_log.get('cont_adapter_delta_logit_norm', 0):.5f} "
+            f"cont_adapter_on={train_log.get('cont_alpha_adapter_enabled', 0):.0f}\n"
+            
+            f"cont_resid={train_log.get('cont_residual_norm', 0):.5f} "
+            f"cont_safe={train_log.get('cont_safe_radius', 0):.5f} "
+            f"geom_mse={train_log.get('cont_geometric_projection_mse', 0):.6f} "
+            f"rbf_mse={train_log.get('cont_distance_reference_mse', 0):.6f} "
+            f"hard_mse={train_log.get('cont_hard_vertex_mse', 0):.6f} "
+            f"gain={train_log.get('cont_projection_gain_vs_hard', 0):.6f} "
+            f"decode_target={train_log.get('cont_decode_uses_projection_target', 0):.0f}\n"
+            f"cont_mix={train_log.get('continuous_sample_mix', 0):.4f} "
+            f"cont_tau={train_log.get('continuous_gumbel_tau', 0):.4f} "
+            f"cont_post_tau={train_log.get('continuous_posterior_temperature', 0):.4f}\n"
             f"\n"
             
             f"pred_mean_p={train_log.get('pred_mean_p', 0):.6e}, "

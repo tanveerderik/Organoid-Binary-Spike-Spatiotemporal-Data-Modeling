@@ -145,12 +145,13 @@ def _vq_codes_alpha_and_pmask(vqvae, x, gct, lct, mask_spec, device):
             pmask = pmask.squeeze(-1)
         pmask = pmask.to(device=device, dtype=torch.float32)
 
+    # TODO(step5): the continuous alpha target is removed with the hull path;
+    # the prior now predicts a flat 935-entry code id directly.
     aux = out.get("continuous_residual_aux", None)
     if aux is None or aux.get("alpha_target", None) is None:
         raise RuntimeError(
-            "Stage 3 alpha training requires VQVAE exact convex projection. "
-            "Set model.use_continuous_residual=True and "
-            "decode_with_projection_target=True before encoding."
+            "Continuous alpha targets are no longer produced by the VQ-VAE. "
+            "This path is superseded by the flat-alphabet prior."
         )
 
     K2 = int(vqvae.vq.num_codes_per_level[1])

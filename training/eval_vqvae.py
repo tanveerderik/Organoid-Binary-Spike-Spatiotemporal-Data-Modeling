@@ -122,11 +122,6 @@ def evaluate_vqvae(
     total_bce_s = 0.0
     total_bce_full_s = 0.0
 
-    cont_adapter_projection_sum = 0.0
-    cont_geometric_projection_sum = 0.0
-    cont_distance_reference_sum = 0.0
-    cont_hard_vertex_sum = 0.0
-    cont_metric_batches = 0
 
     max_ref_levels = int(getattr(model.vq, "num_quantizers", 1))
     refinement_sums_c = {}
@@ -368,21 +363,6 @@ def evaluate_vqvae(
                 sb_sum_sq += float((sb * sb).sum().item())
                 sb_count += int(sb.numel())
             
-            continuous_aux = out_c.get("continuous_residual_aux", None)
-            if continuous_aux is not None:
-                cont_adapter_projection_sum += float(
-                    continuous_aux["projection_loss"].detach().float().cpu()
-                )
-                cont_geometric_projection_sum += float(
-                    continuous_aux["geometric_projection_mse"].detach().float().cpu()
-                )
-                cont_distance_reference_sum += float(
-                    continuous_aux["distance_reference_mse"].detach().float().cpu()
-                )
-                cont_hard_vertex_sum += float(
-                    continuous_aux["hard_vertex_mse"].detach().float().cpu()
-                )
-                cont_metric_batches += 1
 
             out_u = None
             if eval_cfg_modes:
@@ -511,18 +491,6 @@ def evaluate_vqvae(
         "eval_count": eval_passes,
         "eval_density": float(total_eval_voxels) / max(1.0, float(total_frames)),
         "eval_mask_frac": float(total_eval_voxels) / max(1.0, float(total_full_voxels)),
-        "cont_adapter_projection_mse": (
-            cont_adapter_projection_sum / max(1, cont_metric_batches)
-        ),
-        "cont_geometric_projection_mse": (
-            cont_geometric_projection_sum / max(1, cont_metric_batches)
-        ),
-        "cont_distance_reference_mse": (
-            cont_distance_reference_sum / max(1, cont_metric_batches)
-        ),
-        "cont_hard_vertex_mse": (
-            cont_hard_vertex_sum / max(1, cont_metric_batches)
-        ),
         "latent_masking_enabled": bool(mask_latents),
     }
 

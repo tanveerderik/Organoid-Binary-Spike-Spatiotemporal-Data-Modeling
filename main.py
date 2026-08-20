@@ -133,32 +133,12 @@ EVAL_STAGES  = ()   # 0,1,2,3
 #   widen the child hull without paying for a full Stage 1A retrain.
 STAGE1_PHASES = ("1a",)
 
-# Stage 1B configuration. STAGE1B_CHILDREN must equal num_codes[1] of the model
-# being built; the source checkpoint may carry a different (smaller) count and
-# its level-2 tensors are resized on load.
-STAGE1B_SOURCE = Path("ckpts") / "vqvae_stage1_balanced_best.pt"
-STAGE1B_CHILDREN = 64
-STAGE1B_FIT_BATCHES = 250
-# Block-coordinate refinement of the children against the CONVEX PROJECTION
-# objective. k-means fits nearest-neighbour centroids, but the children are
-# used as hull vertices, and the optimal vertices are not the centroids.
-STAGE1B_REFINE_ITERS = 12
-
 STAGE2_PHASES = ("2a", "2b")
 
 # Independently evaluate any saved Stage-2 substages. Evaluation order is
 # always 2A -> 2B, regardless of tuple order.
 STAGE2_EVAL_PHASES = ("2a", "2b")
 
-# DEPRECATED with the discrete three-level ladder. The continuous convex-hull
-# residual (1B hull fit + 2A alpha decode) is out of the pipeline: the decoder
-# needed it near-exact -- a wrong-but-plausible residual scored 0.062 against
-# 0.130 for none -- and its conditional mean was only ~4% predictable, so it
-# could not be sampled. Default flipped True -> False so a stage-2 run cannot
-# silently route the ladder through the hull projector, which would read
-# tree_embeds[1] as a children table and replace z2/z3 with a projection.
-# Machinery retained but inert; see the guard in freeze_for_stage(2).
-STAGE2_CONTINUOUS_RESIDUAL = False
 STAGE2A_EPOCHS = 150
 STAGE2B_EPOCHS = 50
 
@@ -720,8 +700,6 @@ def freeze_for_stage(model: nn.Module, stage: float):
     set_all_trainable(model, False)
 
     if stage == 1:
-        model.use_continuous_residual = False
-        model.continuous_residual_sample_mix = 0.0
         set_decoder_cross_attention(model, enabled=False, layers=())
         for name in ["stem", "patch_embed", "sparse_encoder", "to_code", "vq", "code_to_dec",
                      "dec_blocks", "dec_norm", "patch_renderer"]:
@@ -763,20 +741,6 @@ def freeze_for_stage(model: nn.Module, stage: float):
                 True,
             )
     
-        if bool(STAGE2_CONTINUOUS_RESIDUAL) and int(
-            getattr(model.vq, "num_quantizers", 2)
-        ) >= 3:
-            raise RuntimeError(
-                "STAGE2_CONTINUOUS_RESIDUAL=True is incompatible with a "
-                f"{int(model.vq.num_quantizers)}-level discrete ladder: the hull "
-                "projector would treat tree_embeds[1] as a children table and "
-                "silently replace z2/z3 with a continuous projection."
-            )
-        model.use_continuous_residual = bool(STAGE2_CONTINUOUS_RESIDUAL)
-        model.continuous_residual_sample_mix = 0.0
-        model.continuous_residual_projector.use_alpha_adapter = False
-        model.continuous_residual_projector.decode_with_projection_target = True
-
         # Decoder adaptation to continuous points includes the first linear
         # code-space interface.  The z1/z2 codebook geometry itself stays fixed.
         set_requires_grad(
@@ -820,10 +784,6 @@ def freeze_for_stage(model: nn.Module, stage: float):
     elif stage == 3:
         # Stage 3 uses the corrected exact convex projection to produce alpha
         # training targets. The VQVAE remains completely frozen.
-        model.use_continuous_residual = True
-        model.continuous_residual_sample_mix = 0.0
-        model.continuous_residual_projector.use_alpha_adapter = False
-        model.continuous_residual_projector.decode_with_projection_target = True
         set_decoder_cross_attention(
             model,
             enabled=True,
@@ -849,12 +809,6 @@ def freeze_for_stage2b(model: nn.Module):
     layer 0.
     """
     freeze_for_stage(model, 2)
-
-    projector = model.continuous_residual_projector
-    projector.use_alpha_adapter = False
-    projector.decode_with_projection_target = True
-    set_requires_grad(projector.alpha_adapter, False)
-    set_requires_grad(projector.hull_scale_adapter, False)
 
     set_decoder_cross_attention(
         model,
@@ -1439,282 +1393,9 @@ def _make_stage2_scheduler(optimizer, n_epoch):
     )
 
 
-def run_stage1b(model, train_loader, device):
-    """Stage 1B: refit the z2 children against a frozen encoder and z1.
-
-    The residual r = z_e - z1[code] is a function of the encoder and z1 only, so
-    refitting level 2 against it is well posed with both frozen. New children are
-    per-parent k-means centroids of that parent's real residuals, which is what
-    level-2 EMA converges toward; EMA buffers are then reset to the constructor
-    convention (count=1, weight=embed) so training takes over cleanly.
-
-    Level-2 tensors in the source checkpoint are resized to the model's current
-    children-per-parent. Every other tensor loads unchanged, which is what keeps
-    the Stage 1A z1-level results valid.
-    """
-    from sklearn.cluster import KMeans
-
-    print("\n" + "=" * 80)
-    print("STAGE 1B: refit z2 children (encoder and z1 frozen)")
-    print("=" * 80, flush=True)
-
-    K1 = int(model.vq.num_codes_per_level[0])
-    K2_new = int(model.vq.num_codes_per_level[1])
-    code_dim = int(model.vq.code_dim)
-    if K2_new != int(STAGE1B_CHILDREN):
-        raise RuntimeError(
-            f"STAGE1B_CHILDREN={STAGE1B_CHILDREN} does not match the model's "
-            f"children-per-parent {K2_new}. Set num_codes=({K1}, {STAGE1B_CHILDREN})."
-        )
-
-    src = Path(STAGE1B_SOURCE)
-    if not src.exists():
-        raise FileNotFoundError(f"Stage 1B source checkpoint missing: {src}")
-
-    # Load 1A with its own (possibly smaller) level-2 shapes, so residuals are
-    # computed by exactly the encoder and z1 that Stage 1A produced.
-    ck = torch.load(src, map_location="cpu")
-    sd = ck.get("model", ck.get("state_dict", ck))
-    keys = [k for k in sd if k.endswith("tree_embeds.1")]
-    if keys:
-        prefix = keys[0][: -len("tree_embeds.1")]
-        K2_old = int(sd[prefix + "tree_embeds.1"].shape[1])
-        print(f"  source {src}  children {K2_old} -> {K2_new}", flush=True)
-    else:
-        # Single-level 1A ablation: the source has no z2 at all. Level 2 is
-        # created here from scratch. Residuals are z_e - z1[code], which do not
-        # depend on the children, so nothing about the fit is affected.
-        k0 = [k for k in sd if k.endswith("tree_embeds.0")]
-        if not k0:
-            raise RuntimeError(f"neither tree_embeds.0 nor .1 found in {src}")
-        prefix = k0[0][: -len("tree_embeds.0")]
-        K2_old = 0
-        print(f"  source {src} is SINGLE-LEVEL; creating level 2 with "
-              f"{K2_new} children", flush=True)
-
-    own = model.state_dict()
-    compatible = {
-        k: v for k, v in sd.items()
-        if k in own and own[k].shape == v.shape
-    }
-    missing = [k for k in own if k not in compatible]
-    model.load_state_dict(compatible, strict=False)
-    print(f"  loaded {len(compatible)} tensors; {len(missing)} left at init "
-          f"(level-2 and any shape-changed entries)", flush=True)
-
-    # Seed level 2 from the OLD children so residual extraction is well defined
-    # even before the refit.
-    with torch.no_grad():
-        if K2_old > 0:
-            old_children = sd[prefix + "tree_embeds.1"].to(device=device, dtype=torch.float32)
-            reps = old_children.repeat(1, (K2_new + K2_old - 1) // K2_old, 1)[:, :K2_new, :]
-            model.vq.tree_embeds[1].data.copy_(reps)
-        else:
-            old_children = 0.01 * torch.randn(
-                K1, max(1, K2_new), code_dim, device=device, dtype=torch.float32
-            )
-            model.vq.tree_embeds[1].data.copy_(old_children)
-
-    # ---- collect residuals with the frozen encoder and z1
-    prev_cont = bool(getattr(model, "use_continuous_residual", False))
-    prev_proj = bool(getattr(model, "decode_with_projection_target", False))
-    model.use_continuous_residual = True
-    model.decode_with_projection_target = True
-    projector = model.continuous_residual_projector
-    projector.use_alpha_adapter = False
-    projector.decode_with_projection_target = True
-    model.eval()
-
-    blank = int(getattr(model.vq, "blank_code", -1))
-    captured = {"r": []}
-    original = projector._project_onto_child_hull
-
-    def _capture(target_residual, children, initial_alpha=None):
-        alpha, resid = original(
-            target_residual=target_residual,
-            children=children,
-            initial_alpha=initial_alpha,
-        )
-        captured["r"].append(target_residual.detach().float().cpu())
-        return alpha, resid
-
-    projector._project_onto_child_hull = _capture
-    parents = []
-    try:
-        with torch.no_grad():
-            for i, batch in enumerate(train_loader):
-                x, gct, lct, _, _ = _batch_to_device(batch, device)
-                out = model(
-                    x,
-                    global_ctx=gct,
-                    local_ctx=lct,
-                    predict_mask_spec=[{"type": "recon"}] * x.shape[0],
-                )
-                z1 = out["codes"].long()[..., 0]
-                for b in range(z1.shape[0]):
-                    m = z1[b] != blank
-                    if m.any():
-                        parents.append(z1[b][m].cpu().numpy())
-                if i + 1 >= int(STAGE1B_FIT_BATCHES):
-                    break
-    finally:
-        projector._project_onto_child_hull = original
-
-    residual = torch.cat(captured["r"]).numpy()
-    parent = np.concatenate(parents)
-    n = min(len(residual), len(parent))
-    residual, parent = residual[:n], parent[:n]
-    counts = np.bincount(parent, minlength=K1)
-    print(f"  {n} residuals | tokens/parent min {counts[counts > 0].min()} "
-          f"median {int(np.median(counts[counts > 0]))}", flush=True)
-
-    # ---- per-parent k-means into K2_new children
-    children_new = np.zeros((K1, K2_new, code_dim), dtype=np.float32)
-    occupancy = []
-    rng = np.random.RandomState(0)
-    old_np = old_children.detach().cpu().numpy()
-    for c in range(K1):
-        X = residual[parent == c]
-        if len(X) < K2_new:
-            base = old_np[c]
-            reps = np.repeat(base, int(np.ceil(K2_new / base.shape[0])), 0)[:K2_new]
-            children_new[c] = reps + 0.01 * rng.randn(K2_new, code_dim)
-            occupancy.append(min(1.0, len(X) / K2_new))
-            continue
-        km = KMeans(n_clusters=K2_new, n_init=4, random_state=0).fit(X)
-        children_new[c] = km.cluster_centers_
-        occupancy.append(len(np.unique(km.labels_)) / K2_new)
-    under = int(sum(1 for c in range(K1) if counts[c] < K2_new))
-    print(f"  mean child occupancy {np.mean(occupancy) * 100:.1f}% | "
-          f"under-populated parents {under}", flush=True)
-
-    # ---- refine children against the convex-projection objective
-    #
-    # k-means minimises distance to the NEAREST child. The children are actually
-    # used as vertices of a hull that the residual is projected onto, and the
-    # optimal vertices for that are not the centroids. Alternate:
-    #   alpha <- project(r, C)          convex, exact, by the model's own solver
-    #   C     <- argmin_C ||R - A C||^2 least squares given those weights
-    # which is block-coordinate descent on the quantity we actually report.
-    def _capture_for(children_arr):
-        err = 0.0
-        den = 0.0
-        with torch.no_grad():
-            for c in range(K1):
-                X = residual[parent == c]
-                if len(X) == 0:
-                    continue
-                rt = torch.tensor(X, device=device)
-                ch = torch.tensor(children_arr[c], device=device)[None].expand(len(X), -1, -1)
-                _, proj = original(target_residual=rt, children=ch, initial_alpha=None)
-                err += float(((rt - proj.float()) ** 2).sum())
-                den += float((rt ** 2).sum())
-        return 1.0 - err / max(den, 1e-12)
-
-    capture_kmeans = _capture_for(children_new)
-    print(f"  capture after k-means seed: {capture_kmeans:.4f}", flush=True)
-
-    # Persist the PRE-REFINEMENT seed. It is the ablation arm for "does the
-    # projection-objective refinement matter", and without it the refined
-    # vertices have no reproducible provenance: residual collection is not
-    # bit-deterministic across runs (loader ordering varies).
-    seed_path = Path(str(CKPTS["stage1_best"]).replace(".pt", "_kmeans_seed.pt"))
-    torch.save(
-        {
-            "kind": "z2_kmeans_centroids_pre_refinement",
-            "note": (
-                "Per-parent k-means centroids of the residuals, BEFORE "
-                "block-coordinate refinement against the convex-projection "
-                "objective. Centroids, not hull vertices."
-            ),
-            "source_checkpoint": str(src),
-            "children_per_parent": int(K2_new),
-            "z2_kmeans_centroids": torch.tensor(children_new),
-            "realised_capture": float(capture_kmeans),
-        },
-        seed_path,
-    )
-    print(f"  saved pre-refinement seed -> {seed_path}", flush=True)
-
-    refined = children_new.copy()
-    best = (capture_kmeans, refined.copy())
-    for it in range(int(STAGE1B_REFINE_ITERS)):
-        with torch.no_grad():
-            for c in range(K1):
-                X = residual[parent == c]
-                if len(X) < K2_new:
-                    continue
-                rt = torch.tensor(X, device=device)
-                ch = torch.tensor(refined[c], device=device)[None].expand(len(X), -1, -1)
-                alpha, _ = original(target_residual=rt, children=ch, initial_alpha=None)
-                A = alpha.float()
-                G = A.T @ A + 1e-3 * torch.eye(K2_new, device=device)
-                sol = torch.linalg.solve(G, A.T @ rt)
-                refined[c] = sol.cpu().numpy()
-        cap_it = _capture_for(refined)
-        if cap_it > best[0]:
-            best = (cap_it, refined.copy())
-        print(f"    refine iter {it + 1:2d}/{int(STAGE1B_REFINE_ITERS)}  "
-              f"capture {cap_it:.4f}", flush=True)
-    capture_refined, children_new = best
-    print(f"  capture after refinement:   {capture_refined:.4f}  "
-          f"({capture_refined - capture_kmeans:+.4f} over k-means)", flush=True)
-
-    with torch.no_grad():
-        tensor_children = torch.tensor(children_new, device=device)
-        model.vq.tree_embeds[1].data.copy_(tensor_children)
-        model.vq._ema_weight(1).data.copy_(tensor_children)
-        model.vq._ema_count(1).data.fill_(1.0)
-
-    # ---- realised capture, as an acceptance number
-    total_err = 0.0
-    total_den = 0.0
-    with torch.no_grad():
-        for i, batch in enumerate(train_loader):
-            x, gct, lct, _, _ = _batch_to_device(batch, device)
-            out = model(
-                x,
-                global_ctx=gct,
-                local_ctx=lct,
-                predict_mask_spec=[{"type": "recon"}] * x.shape[0],
-            )
-            aux = out["continuous_residual_aux"]
-            r_t = aux["target_residual"].float()
-            r_h = aux["residual_hull"].float()
-            total_err += float(((r_t - r_h) ** 2).sum())
-            total_den += float((r_t ** 2).sum())
-            if i + 1 >= 40:
-                break
-    capture = 1.0 - total_err / max(total_den, 1e-12)
-    print(f"  realised capture 1 - ||r - r_hull||^2 / ||r||^2 = {capture:.4f}", flush=True)
-
-    model.use_continuous_residual = prev_cont
-    model.decode_with_projection_target = prev_proj
-
-    model.save_checkpoint(str(CKPTS["stage1_best"]))
-    model.save_checkpoint(str(CKPTS["stage1_last"]))
-    report = {
-        "source": str(src),
-        "children_old": K2_old,
-        "children_new": K2_new,
-        "parents": K1,
-        "residuals": int(n),
-        "mean_occupancy": float(np.mean(occupancy)),
-        "capture_kmeans_seed": float(capture_kmeans),
-        "kmeans_seed_path": str(seed_path),
-        "capture_after_refinement": float(capture_refined),
-        "refine_iters": int(STAGE1B_REFINE_ITERS),
-        "under_populated_parents": under,
-        "realised_capture": float(capture),
-    }
-    save_json_report(report, REPORTS["stage1b"])
-    print(f"  wrote {CKPTS['stage1_best']} and {REPORTS['stage1b']}", flush=True)
-    return report
-
-
 def run_stage2a(model, train_loader, val_loader, blank_logit_threshold):
     print("\n" + "=" * 80)
-    print("STAGE 2A: exact convex projection decoder calibration")
+    print("STAGE 2A: decoder calibration on the frozen discrete ladder")
     print("=" * 80)
 
     map_location = next(model.parameters()).device
@@ -1726,15 +1407,10 @@ def run_stage2a(model, train_loader, val_loader, blank_logit_threshold):
     model._set_training_prob_threshold(0.5)
     freeze_for_stage(model, 2)
 
-    projector = model.continuous_residual_projector
-    projector.use_alpha_adapter = False
-    projector.decode_with_projection_target = True
-
     print(
         f"Loaded Stage 1 best weights from: {stage1_best_ckpt}\n"
-        "Stage 2A uses the Euclidean projection of z_e-z1 onto "
-        "conv{z2_1,...,z2_K}. Encoder, to_code, z1, and z2 are frozen; "
-        "the decoder adapts to this fixed continuous geometry."
+        "Encoder, to_code, and the codebook ladder are frozen; the decoder "
+        "adapts to the fixed discrete geometry."
     )
 
     n_epoch = int(STAGE2A_EPOCHS)
@@ -1784,12 +1460,6 @@ def run_stage2a(model, train_loader, val_loader, blank_logit_threshold):
         pos_weight_end=1.0,
         pos_decay_epochs=1,
         blank_logit_margin=blank_logit_threshold,
-        lambda_cont_projection=0.0,
-        lambda_cont_parent_margin=0.0,
-        continuous_sample_start_epoch=10**9,
-        continuous_sample_warmup_epochs=1,
-        continuous_sample_mix_start=0.0,
-        continuous_sample_mix_end=0.0,
         continuous_gumbel_tau_start=1.0,
         continuous_gumbel_tau_end=1.0,
         continuous_posterior_temperature=0.35,
@@ -1839,7 +1509,6 @@ def run_stage2b(model, train_loader, val_loader, blank_logit_threshold):
     )
     model._set_training_prob_threshold(0.5)
     freeze_for_stage2b(model)
-    model.continuous_residual_sample_mix = 0.0
 
     print(
         f"Loaded Stage 2A best weights from: {stage2a_ckpt}\n"
@@ -1984,12 +1653,6 @@ def run_stage2b(model, train_loader, val_loader, blank_logit_threshold):
         pos_weight_end=1.0,
         pos_decay_epochs=1,
         blank_logit_margin=blank_logit_threshold,
-        lambda_cont_projection=0.0,
-        lambda_cont_parent_margin=0.0,
-        continuous_sample_start_epoch=10**9,
-        continuous_sample_warmup_epochs=1,
-        continuous_sample_mix_start=0.0,
-        continuous_sample_mix_end=0.0,
         continuous_gumbel_tau_start=1.0,
         continuous_gumbel_tau_end=1.0,
         continuous_posterior_temperature=0.35,
@@ -2208,9 +1871,7 @@ def build_prior_from_model(
         z2_codebook=model.vq.tree_embeds[1],
         z1_scale=float(model.vq.level_scales[0]),
         z2_scale=float(model.vq.level_scales[1]),
-        hull_margin_fraction=float(
-            model.continuous_residual_projector.hull_margin_fraction
-        ),
+        hull_margin_fraction=1.10 - 1.0,  # TODO(step5): removed with alpha path
     ).to(device)
 
     return HierarchicalCodebookPrior(
@@ -3971,12 +3632,8 @@ def evaluate_existing_checkpoints_on_temporal_split(model, test_loader, device):
 
         model.load_checkpoint(str(checkpoint), map_location=device)
         if stage_label == "stage1":
-            model.use_continuous_residual = False
             set_decoder_cross_attention(model, enabled=False, layers=())
         else:
-            model.use_continuous_residual = bool(STAGE2_CONTINUOUS_RESIDUAL)
-            model.continuous_residual_projector.use_alpha_adapter = False
-            model.continuous_residual_projector.decode_with_projection_target = True
             set_decoder_cross_attention(
                 model,
                 enabled=(stage_label == "stage2b"),
@@ -4324,7 +3981,8 @@ def evaluate_motif_nulls(model, train_loader, test_loader, device, *, rebuild: b
     table1 = model.vq.tree_embeds[1].detach().float()
     scale0 = float(model.vq.level_scales[0])
     scale1 = float(model.vq.level_scales[1])
-    hull = 1.0 + max(0.0, float(model.continuous_residual_projector.hull_margin_fraction))
+    # TODO(step5): alpha/hull decode is replaced by the flat-alphabet prior.
+    hull = 1.10
 
     def _latent(z1_ids, alpha):
         return scale0 * table0[z1_ids] + scale1 * hull * torch.einsum(
@@ -4451,23 +4109,10 @@ def evaluate_and_visualize(
     device = next(model.parameters()).device
     model.load_checkpoint(str(ckpt), map_location=device)
 
-    # Runtime latent mode is not part of the state_dict.
-    model.use_continuous_residual = bool(
-        stage == 2 and STAGE2_CONTINUOUS_RESIDUAL
-    )
-
-    # The alpha-adapter stage was removed: it trained only the adapter and showed
-    # no measurable effect, so nothing selects it any more.
-    using_alpha_adapter = False
     using_stage2b_context = bool(
         stage == 2 and stage2_phase == "2b"
     )
 
-    model.continuous_residual_projector.use_alpha_adapter = (
-        using_alpha_adapter
-    )
-    model.continuous_residual_projector.decode_with_projection_target = True
-    model.continuous_residual_sample_mix = 0.0
     set_decoder_cross_attention(
         model,
         enabled=using_stage2b_context,
@@ -5220,8 +4865,6 @@ def main():
                     val_loader,
                     blank_logit_threshold=1.05*logit_baseline
                 )
-            if "1b" in phases:
-                run_stage1b(model, train_loader, device)
     
         elif stage == 2:
             run_stage2(

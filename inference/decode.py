@@ -211,7 +211,8 @@ def decode_motif_logits_soft_given_activity(
     E1 = model.vq.tree_embeds[1].detach().to(device=device, dtype=dtype)
     scale0 = float(model.vq.level_scales[0])
     scale1 = float(model.vq.level_scales[1])
-    margin = 1.0 + max(0.0, float(model.continuous_residual_projector.hull_margin_fraction))
+    # TODO(step5): alpha/hull decode is superseded by the flat-alphabet prior.
+    margin = 1.10
     temperature = max(float(tau_z), 1e-6)
 
     z1_prob = F.softmax(logits["z1"] / temperature, dim=-1)
