@@ -163,7 +163,9 @@ STAGE4_PHASES = ("4a",)
 # from the previous run reached 0.288 top-1; retraining from scratch would spend
 # ~400 epochs re-earning it. strict=False because the alpha head is now a
 # Dirichlet concentration head (same shape, new interpretation).
-STAGE4A_WARM_START = True
+# The only warm-start checkpoint on disk predates the flat alphabet, so this
+# must stay off until a flat-alphabet 4A run produces one.
+STAGE4A_WARM_START = False
 # Literal path: CKPT_DIR is defined further down in this config block.
 STAGE4A_WARM_START_PATH = Path("ckpts") / "motif_prior_warmstart.pt"
 STAGE4A_EPOCHS = 600
@@ -1675,17 +1677,31 @@ def _load_stage4_activity_best(prior, model, device):
 
 
 def run_stage4a(prior, model, train_loader, val_loader, device):
-    print("[3A] Training motif prior.")
+    print("[4A] Training motif prior.")
 
     if STAGE4A_WARM_START and STAGE4A_WARM_START_PATH.exists():
         warm = torch.load(str(STAGE4A_WARM_START_PATH), map_location=device)
+        warm_state = warm.get("model", warm)
         missing, unexpected = prior.motif_prior.load_state_dict(
-            warm.get("model", warm), strict=False
+            warm_state, strict=False
         )
+        # strict=False will happily load NOTHING. A checkpoint from the old
+        # two-level protocol (z1_emb / z2_emb / alpha_mu_head) matches zero
+        # keys against the flat-alphabet prior, which would look like a warm
+        # start in the log while actually being a cold one.
+        matched = len(warm_state) - len(unexpected)
+        if matched == 0:
+            raise RuntimeError(
+                f"Warm start {STAGE4A_WARM_START_PATH} matched 0 of "
+                f"{len(warm_state)} keys -- it predates the flat-alphabet "
+                f"prior. Set STAGE4A_WARM_START=False or point it at a "
+                f"flat-alphabet checkpoint."
+            )
         print(
-            f"[3A] warm start from {STAGE4A_WARM_START_PATH} "
+            f"[4A] warm start from {STAGE4A_WARM_START_PATH} "
             f"(epoch {warm.get('epoch', '?')}); "
-            f"missing={len(missing)} unexpected={len(unexpected)}"
+            f"matched={matched} missing={len(missing)} "
+            f"unexpected={len(unexpected)}"
         )
     opt_motif = torch.optim.AdamW(
         [p for p in prior.motif_prior.parameters() if p.requires_grad],
