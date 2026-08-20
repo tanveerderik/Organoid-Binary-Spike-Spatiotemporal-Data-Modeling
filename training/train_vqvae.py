@@ -17,7 +17,6 @@ from ..utils.recon import (
     dilate_spatial_support_hw,
     sample_full_pixel_map_to_crop,
     sample_full_token_map_to_crop,
-    perturb_local_ctx,
 )
 
 from ..utils.losses import (
@@ -91,13 +90,6 @@ def fit_vqvae(
     latent_recon_drop_p: float = 0.5,
     log_ctx_diagnostics: bool = False,
 
-    # ---- counterfactual context conditioning (trains the local ctx head) ----
-    # A second decode of the same latents under a perturbed context request.
-    # This is the only term that puts the context in tension with the codes;
-    # without it argmin(recon) == argmin(ctx_loss) and the head never learns.
-    lambda_ctx_cf: float = 0.0,
-    local_ctx_std: Optional[Any] = None,
-    local_ctx_bank: Optional[Any] = None,
     # Per-dimension weights for ctx_loss_soft, w_d = 1 / var_d.  Without these
     # the nine activity features enter the loss as raw squared error, and
     # log_mean_firing_density (std 0.85) contributes ~1500x more than cov_xt
@@ -105,11 +97,6 @@ def fit_vqvae(
     # w_d = 1/var_d makes the objective a plain mean of squared errors
     # measured in each dimension's own std units.
     ctx_dim_weights: Optional[Any] = None,
-    ctx_cf_sigma_start: float = 0.25,
-    ctx_cf_sigma_end: float = 1.0,
-    ctx_cf_pair_p: float = 0.5,
-    ctx_cf_start_epoch: int = 0,
-    ctx_cf_warmup_epochs: int = 10,
     
     # ---- hierarchical refinement supervision ----
     refinement_loss_weights: Optional[list[float]] = None,
@@ -250,13 +237,6 @@ def fit_vqvae(
             "loss_ctx_field": 0.0,
             "latent_hidden_frac": 0.0,
             "latent_hidden_active_frac": 0.0,
-            "loss_ctx_cf": 0.0,
-            "ctx_steer_gain": 0.0,
-            "ctx_steer_batches": 0.0,
-            "ctx_cf_bank_frac": 0.0,
-            "ctx_cf_pair_frac": 0.0,
-            "ctx_cf_displacement": 0.0,
-            "ctx_cf_batches": 0.0,
             "loss_sp_cons": 0.0,
             "loss_sp_token": 0.0,
             "loss_sp_pixel": 0.0,
@@ -319,21 +299,6 @@ def fit_vqvae(
         )
 
         # Counterfactual conditioning: the loss weight switches on at
-        # ctx_cf_start_epoch, and the request displacement grows from
-        # ctx_cf_sigma_start to ctx_cf_sigma_end so early requests stay
-        # physically achievable.
-        lambda_ctx_cf_eff = (
-            float(lambda_ctx_cf) if epoch >= ctx_cf_start_epoch else 0.0
-        )
-        ctx_cf_sigma_eff = _cosine_ramp(
-            epoch_idx=epoch,
-            start_epoch=ctx_cf_start_epoch,
-            warmup_epochs=ctx_cf_warmup_epochs,
-            v0=ctx_cf_sigma_start,
-            v1=ctx_cf_sigma_end,
-        )
-
-        
         # ---- dynamic refinement supervision ----
         L_active = int(getattr(model.vq, "active_quantizers", model.vq.num_quantizers))
         
@@ -384,45 +349,11 @@ def fit_vqvae(
             )
             num_batches += 1
             
-            # ---- counterfactual context request ----
-            # ctx_dims for this epoch is resolved below from
-            # ctx_epoch_schedule; recompute it here so the perturbation only
-            # touches dimensions that actually carry a loss term.
-            cf_dims = tuple(
-                d for d, ep0 in sorted(ctx_epoch_schedule.items())
-                if epoch >= ep0
-            )
-            lct_cf = None
-            gct_cf = None
-            if (
-                lambda_ctx_cf_eff > 0.0
-                and isinstance(lct, torch.Tensor)
-                and local_ctx_std is not None
-                and len(cf_dims) > 0
-            ):
-                (lct_cf, gct_cf), cf_stats = perturb_local_ctx(
-                    lct,
-                    local_ctx_std,
-                    dims=cf_dims,
-                    global_ctx=gct,
-                    bank=local_ctx_bank,
-                    assay_idx=batch.get("assay_idx", None),
-                    pair_p=float(ctx_cf_pair_p),
-                    sigma_scale=ctx_cf_sigma_eff,
-                    return_stats=True,
-                )
-                sums["ctx_cf_bank_frac"] += cf_stats.get("bank_frac", 0.0)
-                sums["ctx_cf_pair_frac"] += cf_stats.get("pair_frac", 0.0)
-                sums["ctx_cf_displacement"] += cf_stats.get("displacement", 0.0)
-                sums["ctx_cf_batches"] += 1.0
-
             with torch.cuda.amp.autocast(enabled=amp_enabled):
                 out = model(
                     x,
                     global_ctx=gct,
                     local_ctx=lct,
-                    counterfactual_local_ctx=lct_cf,
-                    counterfactual_global_ctx=gct_cf,
                     predict_mask_spec=predict_mask_spec,
                     roi_hw=roi_hw,
                     pad_hw=pad_hw,
@@ -824,23 +755,6 @@ def fit_vqvae(
                         prob_threshold=active_prob_threshold,
                     )
                 
-                # --- counterfactual controllability loss ---
-                # The request in lct_cf disagrees with what the codes encode.
-                # Only using the context can satisfy this term, so it is the
-                # gradient that actually trains the local context head.
-                loss_ctx_cf = logits_vol_raw.new_zeros(())
-                logits_cf = out.get("logits_vol_raw_cf", None)
-
-                if logits_cf is not None and lct_cf is not None:
-                    loss_ctx_cf = ctx_loss_soft(
-                        logits_b1thw=logits_cf,
-                        ctx_tgt_b9=lct_cf,
-                        dims=cf_dims,
-                        weights=ctx_dim_weights,
-                        tau=0.25,
-                        prob_threshold=active_prob_threshold,
-                    )
-
                 # --- blank patch enforcing loss ---
                 t_blank = (epoch - blank_start_epoch) / max(1, blank_warmup_epochs)
                 t_blank = min(1.0, max(0.0, t_blank))
@@ -988,7 +902,6 @@ def fit_vqvae(
                 + lambda_enc_var * loss_enc_var
                 + lambda_code_norm * loss_code_norm
                 + lambda_ctx_eff * loss_ctx
-                + lambda_ctx_cf_eff * loss_ctx_cf
                 + lambda_ctx_field_eff * loss_ctx_field
                 + loss_sp_cons
                 + lambda_blank_eff * loss_blank + lambda_blank_sep_eff * loss_blank_sep
@@ -1033,46 +946,7 @@ def fit_vqvae(
 
             sums["loss_ctx"] += float(loss_ctx.detach().cpu())
             sums["loss_ctx_raw"] += float(loss_ctx_raw.detach().cpu())
-            sums["loss_ctx_cf"] += float(loss_ctx_cf.detach().cpu())
 
-            # Steering gain: does conditioning on the counterfactual request
-            # actually move the output toward it?  Compares the distance to
-            # the request achieved by the true-context decode against the
-            # counterfactual decode, over the supervised dims only.
-            # Positive means the control signal is doing work.
-            if logits_cf is not None and lct_cf is not None:
-                with torch.no_grad():
-                    dim_idx = list(cf_dims)
-                    feat_true = ctx_features_soft_from_logits(
-                        logits_vol_raw.float(),
-                        tau=0.25,
-                        prob_threshold=active_prob_threshold,
-                    )[:, dim_idx]
-                    feat_cf = ctx_features_soft_from_logits(
-                        logits_cf.float(),
-                        tau=0.25,
-                        prob_threshold=active_prob_threshold,
-                    )[:, dim_idx]
-                    target = lct_cf[:, dim_idx].to(feat_cf)
-                    err_true = (feat_true - target).pow(2).mean()
-                    err_cf = (feat_cf - target).pow(2).mean()
-                    sums["ctx_steer_gain"] += float((err_true - err_cf).cpu())
-                    sums["ctx_steer_batches"] += 1.0
-
-                    # Per-dimension, in std units, so no single dim can hide
-                    # the others behind its scale.
-                    if ctx_dim_weights is not None:
-                        w = torch.as_tensor(
-                            ctx_dim_weights, device=feat_cf.device
-                        )[dim_idx].sqrt()
-                        per_true = ((feat_true - target) * w).pow(2).mean(0)
-                        per_cf = ((feat_cf - target) * w).pow(2).mean(0)
-                        for j, d in enumerate(dim_idx):
-                            key = f"steer_d{d}"
-                            sums[key] = sums.get(key, 0.0) + float(
-                                (per_true[j] - per_cf[j]).cpu()
-                            )
-                            ctx_diag_keys.add(key)
             sums["loss_ctx_field"] += float(loss_ctx_field.detach().cpu())
             sums["loss_sp_cons"] += float(loss_sp_cons.detach().cpu())
             sums["loss_sp_token"] += float(loss_sp_token.detach().cpu())
@@ -1178,21 +1052,6 @@ def fit_vqvae(
             "latent_hidden_frac": sums["latent_hidden_frac"] / max(1, num_batches),
             "latent_hidden_active_frac": (
                 sums["latent_hidden_active_frac"] / max(1, num_batches)
-            ),
-            "loss_ctx_cf": sums["loss_ctx_cf"] / max(1, num_batches),
-            "lambda_ctx_cf_eff": lambda_ctx_cf_eff,
-            "ctx_cf_sigma_eff": ctx_cf_sigma_eff,
-            "ctx_steer_gain": (
-                sums["ctx_steer_gain"] / max(1.0, sums["ctx_steer_batches"])
-            ),
-            "ctx_cf_bank_frac": (
-                sums["ctx_cf_bank_frac"] / max(1.0, sums["ctx_cf_batches"])
-            ),
-            "ctx_cf_pair_frac": (
-                sums["ctx_cf_pair_frac"] / max(1.0, sums["ctx_cf_batches"])
-            ),
-            "ctx_cf_displacement": (
-                sums["ctx_cf_displacement"] / max(1.0, sums["ctx_cf_batches"])
             ),
             "loss_sp_cons": sums["loss_sp_cons"] / max(1, num_batches),
             "loss_sp_token": sums["loss_sp_token"] / max(1, num_batches),
@@ -1432,16 +1291,10 @@ def fit_vqvae(
 
         if log_ctx_diagnostics:
             ctx_lines = [
-                "  [ctx] hidden_frac=%.3f hidden_active_frac=%.3f "
-                "ctx_cf=%.5f bank=%.2f pair=%.2f displ=%.2f steer_gain=%+.3e"
+                "  [ctx] hidden_frac=%.3f hidden_active_frac=%.3f"
                 % (
                     train_log.get("latent_hidden_frac", 0.0),
                     train_log.get("latent_hidden_active_frac", 0.0),
-                    train_log.get("loss_ctx_cf", 0.0),
-                    train_log.get("ctx_cf_bank_frac", 0.0),
-                    train_log.get("ctx_cf_pair_frac", 0.0),
-                    train_log.get("ctx_cf_displacement", 0.0),
-                    train_log.get("ctx_steer_gain", 0.0),
                 )
             ]
             if val_loader is not None and len(history["val_metrics"]) > 0:

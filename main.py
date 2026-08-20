@@ -964,13 +964,13 @@ def run_stage2a(model, train_loader, val_loader, blank_logit_threshold):
         ).to(next(model.parameters()).device)
         globals()["STAGE2_LAMBDA_CTX"] = STAGE2_LAMBDA_CTX_BALANCED
         print(
-            f"Stage 1 balanced ctx weighting ON, lambda_ctx="
+            f"Stage 2A balanced ctx weighting ON, lambda_ctx="
             f"{STAGE2_LAMBDA_CTX_BALANCED} (rescaled from 0.1 by the measured "
             f"weighted/unweighted ratio 0.036)"
         )
 
     print("\n" + "=" * 80)
-    print("STAGE 1: context-agnostic VQVAE motif learning")
+    print("STAGE 2A: hierarchical VQ-VAE, context-agnostic motif learning")
     print("=" * 80)
 
     freeze_for_stage(model, 2)

@@ -1019,8 +1019,6 @@ class TransformerVQVAE(nn.Module):
         mask_latents: bool = False,
         latent_recon_drop_p: float = 0.5,
         latent_hidden_mask: Optional[torch.Tensor] = None,   # (B,N) bool, True = hide
-        counterfactual_local_ctx: Optional[torch.Tensor] = None,   # (B,L)
-        counterfactual_global_ctx: Optional[torch.Tensor] = None,  # (B,G)
     ):
         B, C, T, H, W = x.shape
         
@@ -1171,26 +1169,6 @@ class TransformerVQVAE(nn.Module):
         # if len(refinements) > 0:
         #     refinements[-1] = final_dec
         
-        # ----- counterfactual context decode -----
-        # A second decode of the SAME latents with a different context request.
-        # The encoder and VQ are shared, so this costs one extra decoder pass.
-        # Its only job is to carry the controllability loss: whatever context
-        # is asked for here, the output's measured statistics must follow.
-        counterfactual_dec = None
-        if counterfactual_local_ctx is not None:
-            counterfactual_dec = self._decode_quantized_latent(
-                z_q=z_q_decode,
-                active_mask=decoder_active_mask,
-                grid=grid,
-                global_ctx=(
-                    global_ctx if counterfactual_global_ctx is None
-                    else counterfactual_global_ctx
-                ),
-                local_ctx=counterfactual_local_ctx,
-                roi_hw=roi_hw,
-                pad_hw=pad_hw,
-            )
-
         z_q = final_dec["z_q"]
         # Keep the encoder-side active_mask for downstream losses; the decoder
         # may have seen a masked variant of it.
@@ -1243,15 +1221,6 @@ class TransformerVQVAE(nn.Module):
             "predict_mask": predict_mask,
             "latent_hidden_mask": latent_hidden_mask,
             "decoder_active_mask": decoder_active_mask,
-            "logits_vol_cf": (
-                None if counterfactual_dec is None
-                else counterfactual_dec["logits_vol"]
-            ),
-            "logits_vol_raw_cf": (
-                None if counterfactual_dec is None
-                else counterfactual_dec["logits_vol_raw"]
-            ),
-        
             "z_e_full": z_e_full,
             "z_e_active": z_e_active,
             "x_enc_full": x_enc_full,
