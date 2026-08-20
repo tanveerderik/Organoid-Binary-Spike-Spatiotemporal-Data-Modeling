@@ -426,22 +426,19 @@ def train_motif_prior_mgit(
                     
                     loss_ce_raw = loss_ce
 
-                    # Distance-weighted auxiliaries now run on the flat
-                    # alphabet. The OOV logit is dropped: it has no codebook
-                    # entry, so it has no distance to anything.
-                    flat_logits_nooov = logits["flat"][..., : motif_prior.V]
-                    flat_valid = targets["f_loss_mask"] & targets["f"].lt(motif_prior.V)
+                    # Distance-weighted auxiliaries on the flat alphabet.
+                    flat_valid = targets["f_loss_mask"]
                     loss_topk_z1 = distance_neighborhood_ce_loss(
-                        flat_logits_nooov,
-                        targets["f"].clamp(0, motif_prior.V - 1),
+                        logits["flat"],
+                        targets["f"],
                         flat_valid,
                         motif_prior.flat_distance_matrix,
                         k=topk_z1,
                         tau=z1_neighbor_tau,
                     )
                     loss_z1_distance = expected_code_distance_loss(
-                        flat_logits_nooov,
-                        targets["f"].clamp(0, motif_prior.V - 1),
+                        logits["flat"],
+                        targets["f"],
                         flat_valid,
                         motif_prior.flat_distance_matrix,
                     )
@@ -637,22 +634,19 @@ def train_motif_prior_mgit(
                     
                     loss_ce_raw = loss_ce
                     
-                    # Distance-weighted auxiliaries now run on the flat
-                    # alphabet. The OOV logit is dropped: it has no codebook
-                    # entry, so it has no distance to anything.
-                    flat_logits_nooov = logits["flat"][..., : motif_prior.V]
-                    flat_valid = targets["f_loss_mask"] & targets["f"].lt(motif_prior.V)
+                    # Distance-weighted auxiliaries on the flat alphabet.
+                    flat_valid = targets["f_loss_mask"]
                     loss_topk_z1 = distance_neighborhood_ce_loss(
-                        flat_logits_nooov,
-                        targets["f"].clamp(0, motif_prior.V - 1),
+                        logits["flat"],
+                        targets["f"],
                         flat_valid,
                         motif_prior.flat_distance_matrix,
                         k=topk_z1,
                         tau=z1_neighbor_tau,
                     )
                     loss_z1_distance = expected_code_distance_loss(
-                        flat_logits_nooov,
-                        targets["f"].clamp(0, motif_prior.V - 1),
+                        logits["flat"],
+                        targets["f"],
                         flat_valid,
                         motif_prior.flat_distance_matrix,
                     )
@@ -831,7 +825,7 @@ def train_motif_prior_mgit(
                 logits["flat"],
                 targets["f"],
                 z1_mask,
-                motif_prior.V + 1,
+                motif_prior.V,
                 topk=topk_z1,
             )
             mz2 = mz1

@@ -199,9 +199,7 @@ def decode_motif_logits_soft_given_activity(
     E = motif_prior.flat_codebook.detach().to(device=device, dtype=dtype)   # (V,D)
 
     temperature = max(float(tau_z), 1e-6)
-    # The OOV bin has no codebook entry, so it can never be decoded.
-    flat_logits = logits["flat"][..., :V]
-    f_prob = F.softmax(flat_logits / temperature, dim=-1)
+    f_prob = F.softmax(logits["flat"] / temperature, dim=-1)
     f_hard = F.one_hot(f_prob.argmax(dim=-1), num_classes=V).to(f_prob.dtype)
     f_prob_st = f_hard + f_prob - f_prob.detach()
 

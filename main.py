@@ -422,7 +422,7 @@ cache_write_prob = 1.0
 # into one flat entry per token, so the deliverable is a single discrete
 # codebook, not a hierarchy at inference time.
 #
-# Alphabet 32*8*4 = 1024 nominal (935 observed after dedupe). Storage is
+# Alphabet 32*8*4 = 1024 nominal (961 rows after merging duplicate sums). Storage is
 # 32 + 256 + 1024 = 1312 vectors; the binding constraint is occupancy, not
 # memory. Watch the vq_l3 dead fractions: if the tail dies, drop to (16,8,4)
 # or (32,4,4) rather than raising K3.
@@ -2128,7 +2128,7 @@ def evaluate_stage4a_predictive(model, test_loader, device, train_loader=None):
     blank_code = getattr(model.vq, "blank_code", -1)
 
     # ---- null ladder -------------------------------------------------------
-    # flat_acc against 936 classes is uninterpretable on its own.  The relevant
+    # flat_acc against 961 classes is uninterpretable on its own.  The relevant
     # question is whether the prior beats a lookup table: the empirical flat
     # code frequency at this assay and this grid position.  The same comparison
     # already showed the activity head losing to an assay-frequency null, so
@@ -2139,7 +2139,7 @@ def evaluate_stage4a_predictive(model, test_loader, device, train_loader=None):
     null_levels = ("uniform", "global", "assay", "assay_position")
     null_payload = None
     if train_loader is not None:
-        V = int(motif_prior.V) + 1
+        V = int(motif_prior.V)
         if MOTIF_NULL_BASELINE_PATH.exists():
             try:
                 null_payload = load_motif_null_baselines(str(MOTIF_NULL_BASELINE_PATH))
@@ -2202,11 +2202,10 @@ def evaluate_stage4a_predictive(model, test_loader, device, train_loader=None):
             loss_weights=(1.0,),
         )
 
-        flat_logits_nooov = logits["flat"][..., : motif_prior.V]
-        flat_valid = targets["f_loss_mask"] & targets["f"].lt(motif_prior.V)
-        flat_tgt = targets["f"].clamp(0, motif_prior.V - 1)
+        flat_valid = targets["f_loss_mask"]
+        flat_tgt = targets["f"]
         neighbor_loss = distance_neighborhood_ce_loss(
-            flat_logits_nooov,
+            logits["flat"],
             flat_tgt,
             flat_valid,
             motif_prior.flat_distance_matrix,
@@ -2214,7 +2213,7 @@ def evaluate_stage4a_predictive(model, test_loader, device, train_loader=None):
             tau=0.25,
         )
         distance_loss = expected_code_distance_loss(
-            flat_logits_nooov,
+            logits["flat"],
             flat_tgt,
             flat_valid,
             motif_prior.flat_distance_matrix,
@@ -2278,6 +2277,7 @@ def evaluate_stage4a_predictive(model, test_loader, device, train_loader=None):
                     )
 
     z1_den = max(totals["z1_tokens"], 1.0)
+    sample_den = max(totals["samples"], 1.0)
     report = {
         "phase": "4a",
         "loss_total": totals["loss_total"] / sample_den,
@@ -2300,8 +2300,8 @@ def evaluate_stage4a_predictive(model, test_loader, device, train_loader=None):
             report[f"null_{lvl}_z1_acc"] = acc
             report[f"null_{lvl}_z1_top5_acc"] = top5
             report[f"null_{lvl}_z1_ce"] = ce
-            report[f"null_{lvl}_z1_acc_margin"] = report["z1_acc"] - acc
-            report[f"null_{lvl}_z1_top5_margin"] = report["z1_top5_acc"] - top5
+            report[f"null_{lvl}_z1_acc_margin"] = report["flat_acc"] - acc
+            report[f"null_{lvl}_z1_top5_margin"] = report["flat_top5_acc"] - top5
             report[f"null_{lvl}_z1_ce_margin"] = ce - report["loss_flat"]
         strongest = max(
             null_levels, key=lambda L: report[f"null_{L}_z1_acc"]
@@ -2314,9 +2314,6 @@ def evaluate_stage4a_predictive(model, test_loader, device, train_loader=None):
     save_json_report(report, REPORTS["prior_motif_eval"])
     print("Stage 4A held-out predictive evaluation:", report)
     return report
-
-
-@torch.no_grad()
 
 
 @torch.no_grad()
@@ -3440,7 +3437,7 @@ def evaluate_motif_nulls(model, train_loader, test_loader, device, *, rebuild: b
         )
     else:
         payload = load_motif_null_baselines(str(MOTIF_NULL_BASELINE_PATH))
-        if int(payload.get("V", -1)) != V + 1:
+        if int(payload.get("V", -1)) != V:
             payload = build_motif_null_baselines(
                 train_loader, model, motif_prior, device=device,
                 save_path=str(MOTIF_NULL_BASELINE_PATH),

@@ -111,8 +111,7 @@ def iterative_unmask_motif_given_activity(
             roi_mask=roi_mask,
             targets=None,
         )
-        # The OOV bin has no codebook entry, so it must never be generated.
-        return out["flat"][..., :V]
+        return out["flat"]
 
     for step in range(steps):
         if not masked.any():

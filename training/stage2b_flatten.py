@@ -5,26 +5,44 @@ there is no hierarchy: each token carries one entry
 
     e_flat[f] = s0*z1[a] + s1*z2[a,b] + s2*z3[a,b,c],   f = (a*K2 + b)*K3 + c
 
-Deterministic -- no fitting, no data beyond counting occupancy. Provenance
-(a,b,c) is retained for every surviving entry so hierarchy-coloured plots and
-motif graphs stay possible after flattening.
+The ONLY reduction this stage performs is merging entries whose flat sums
+coincide. Every nominal triple keeps a decodable row otherwise, so any code the
+encoder can emit can be decoded -- there is no out-of-vocabulary outcome.
+
+Duplicate criterion, matching the one Stage 2A uses for duplicate restarts
+(``TreeVQ.duplicate_rel_dist_thresh``, model/base.py:592):
+
+    rel_dist(i,j) = ||e_i - e_j|| / (0.5 * (||e_i|| + ||e_j||))
+
+Pairwise-relative, normalised by the two entries' OWN norms. A global scale
+(mean norm over the codebook) is wrong here because entry norms span more than
+an order of magnitude -- rarely-used leaves are EMA quotients with tiny
+denominators and carry norms ~7, while heavily-used ones sit near ~1.6. A global
+threshold is simultaneously far too tight for the former and too loose for the
+latter.
+
+Counting is retained for diagnostics and to decide which entry survives a
+collision (most-used wins). It is NOT a filter: a low count is not evidence that
+an entry is invalid, and the occupancy of a finite pass is not a property of the
+codebook.
 
 Outputs (CKPTS["stage2b_flat"]):
-  embed        (M, D)   surviving flat entries, in occupancy order
+  embed        (M, D)   surviving flat entries, in nominal (a,b,c) order
   provenance   (M, 3)   the (z1,z2,z3) triple each entry came from
   flat_index   (M,)     original f, so old code sequences remap
-  counts       (M,)     train-set token counts
-  merge_map    (F,)     original f -> surviving row, -1 if never occupied
-
-Promoted verbatim from the scratch script that produced the shipped
-stage2b_flat_codebook.pt; only the I/O paths and the entry point changed.
+  counts       (M,)     train-set token counts (diagnostic)
+  merge_map    (F,)     original f -> surviving row; always >= 0
 """
 import json
 
 import numpy as np
 import torch
 
-DEDUP_EPS = 0.01
+# Matches TreeVQ.duplicate_rel_dist_thresh used by Stage 2A duplicate restarts.
+DUP_REL_DIST_THRESH = 0.05
+
+# Thresholds reported so the choice above is auditable rather than asserted.
+_REPORT_THRESHOLDS = (0.005, 0.01, 0.02, 0.05, 0.10, 0.20)
 
 
 @torch.no_grad()
@@ -63,6 +81,7 @@ def run_stage2b_flatten(
     ).reshape(F, 3)
     print(f"ladder ({K1},{K2},{K3}) scales {scales} -> flat {F} x {E.shape[1]}", flush=True)
 
+    # ---- counting: diagnostics + collision tie-break only, never a filter
     blank = int(getattr(model.vq, "blank_code", -1))
     counts = np.zeros(F, dtype=np.int64)
     for i, batch in enumerate(train_loader):
@@ -80,81 +99,89 @@ def run_stage2b_flatten(
         if i + 1 >= max_batches:
             break
 
-    occ = counts > 0
+    seen = int((counts > 0).sum())
     print(
-        f"\nOCCUPANCY {int(occ.sum())}/{F} entries occur | {int(counts.sum())} tokens"
-        f" | {counts.sum() / max(occ.sum(), 1):.0f} per occupied entry",
+        f"\nUSAGE (diagnostic) {seen}/{F} entries seen in {int(counts.sum())} tokens"
+        f" | min {counts.min()} median {int(np.median(counts))} max {counts.max()}",
         flush=True,
     )
-    nz = counts[occ]
-    print(
-        f"  usage min {nz.min()} median {int(np.median(nz))} max {nz.max()}"
-        f" | entries <20 tokens: {int((nz < 20).sum())}"
-    )
 
-    # ---- dedupe among OCCUPIED entries: report the curve, merge at DEDUP_EPS
-    Eo = E[torch.tensor(occ, device=E.device)]
-    scale = float(Eo.norm(dim=1).mean())
-    D = torch.cdist(Eo, Eo)
-    D.fill_diagonal_(float("inf"))
-    nnd = D.min(1).values
-    print(
-        f"\nnearest-neighbour distance: mean {nnd.mean():.4f} median {nnd.median():.4f}"
-        f" (mean entry norm {scale:.4f})"
-    )
-    for eps in (0.005, 0.01, 0.02, 0.05, 0.10):
-        print(f"  within {eps:.1%} of mean norm: {int((nnd < eps * scale).sum())}/{int(occ.sum())}")
+    # ---- dedupe over ALL entries, pairwise-relative distance (Stage 2A criterion)
+    x = E.to(device).float()
+    x_norm = x.norm(dim=1).clamp_min(1e-8)
+    rel = torch.cdist(x, x) / (0.5 * (x_norm[:, None] + x_norm[None, :])).clamp_min(1e-8)
+    rel.fill_diagonal_(float("inf"))
 
-    thr = DEDUP_EPS * scale
-    order = np.argsort(-counts[occ])  # most-used first wins a collision
-    idx_occ = np.where(occ)[0]
+    nn_rel = rel.min(1).values
+    print(
+        f"\nnearest-neighbour RELATIVE distance: min {nn_rel.min():.4f} "
+        f"median {nn_rel.median():.4f} max {nn_rel.max():.4f}"
+    )
+    print("  collision curve (entries with a neighbour closer than t):")
+    for t in _REPORT_THRESHOLDS:
+        mark = "  <-- selected" if abs(t - DUP_REL_DIST_THRESH) < 1e-12 else ""
+        print(f"    rel < {t:<6.3f} : {int((nn_rel < t).sum()):4d}/{F}{mark}")
+
+    # Greedy merge, most-used entry wins a collision. Ties broken by nominal
+    # index so the result is deterministic.
+    order = np.lexsort((np.arange(F), -counts))
+    rel_cpu = rel.cpu()
     keep, assign = [], {}
-    Eo_np = Eo.cpu().numpy()
-    for oi in order:
-        v = Eo_np[oi]
-        hit = None
-        for kj in keep:
-            if np.linalg.norm(v - Eo_np[kj]) < thr:
-                hit = kj
-                break
-        if hit is None:
-            keep.append(oi)
-            assign[oi] = oi
-        else:
-            assign[oi] = hit
-    keep = np.array(keep, dtype=np.int64)
-    print(f"\nDEDUPE at {DEDUP_EPS:.1%}: {len(idx_occ)} occupied -> {len(keep)} distinct")
+    for i in order:
+        i = int(i)
+        if keep:
+            k_idx = torch.tensor(keep)
+            d = rel_cpu[i, k_idx]
+            j = int(d.argmin())
+            if float(d[j]) < DUP_REL_DIST_THRESH:
+                assign[i] = keep[j]
+                continue
+        keep.append(i)
+        assign[i] = i
+
+    keep = np.sort(np.array(keep, dtype=np.int64))   # nominal order
+    merged = F - len(keep)
+    print(
+        f"\nDEDUPE at rel<{DUP_REL_DIST_THRESH}: {F} nominal -> {len(keep)} distinct "
+        f"({merged} merged)"
+    )
 
     row_of = {int(k): r for r, k in enumerate(keep)}
-    merge_map = np.full(F, -1, dtype=np.int64)
-    for oi, tgt in assign.items():
-        merge_map[idx_occ[oi]] = row_of[int(tgt)]
+    merge_map = np.empty(F, dtype=np.int64)
+    for i, tgt in assign.items():
+        merge_map[i] = row_of[int(tgt)]
+    assert (merge_map >= 0).all(), "every nominal triple must map to a row"
 
+    kept = torch.tensor(keep)
     out = {
-        "embed": Eo[torch.tensor(keep, device=Eo.device)].cpu(),
-        "provenance": prov[torch.tensor(idx_occ[keep])].cpu(),
-        "flat_index": torch.tensor(idx_occ[keep]),
-        "counts": torch.tensor(counts[idx_occ[keep]]),
+        "embed": E[kept].cpu(),
+        "provenance": prov[kept].cpu(),
+        "flat_index": kept,
+        "counts": torch.tensor(counts[keep]),
         "merge_map": torch.tensor(merge_map),
         "ladder": (K1, K2, K3),
         "level_scales": scales,
-        "dedup_eps": DEDUP_EPS,
+        "dup_rel_dist_thresh": DUP_REL_DIST_THRESH,
         "source_ckpt": str(source_ckpt),
     }
     torch.save(out, str(out_path))
     json.dump(
         {
             "F": F,
-            "occupied": int(occ.sum()),
             "distinct": int(len(keep)),
+            "merged": int(merged),
+            "entries_seen_in_count_pass": seen,
             "tokens": int(counts.sum()),
-            "dedup_eps": DEDUP_EPS,
-            "mean_entry_norm": scale,
-            "nn_dist_mean": float(nnd.mean()),
-            "usage_min": int(nz.min()),
-            "usage_median": int(np.median(nz)),
-            "usage_max": int(nz.max()),
-            "entries_under_20": int((nz < 20).sum()),
+            "dup_rel_dist_thresh": DUP_REL_DIST_THRESH,
+            "dup_criterion": "||ei-ej|| / (0.5*(||ei||+||ej||))  [Stage 2A duplicate_rel_dist_thresh]",
+            "collision_curve": {
+                f"{t}": int((nn_rel < t).sum()) for t in _REPORT_THRESHOLDS
+            },
+            "nn_rel_min": float(nn_rel.min()),
+            "nn_rel_median": float(nn_rel.median()),
+            "usage_min": int(counts.min()),
+            "usage_median": int(np.median(counts)),
+            "usage_max": int(counts.max()),
         },
         open(str(report_path), "w"),
         indent=2,

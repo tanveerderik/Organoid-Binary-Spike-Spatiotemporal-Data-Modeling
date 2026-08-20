@@ -294,13 +294,13 @@ def build_motif_null_baselines(
     """Empirical motif statistics for null comparison, from TRAINING data only.
 
     Accumulates flat Stage-2B code counts over active tokens, globally / per
-    assay / per (assay, token position). The alphabet is ``motif_prior.V + 1``
-    (935 observed entries plus the OOV bin), matching what the prior's head
-    emits, so the null and the model are scored on the same support.
+    assay / per (assay, token position). The alphabet is ``motif_prior.V``,
+    matching what the prior's head emits, so the null and the model are scored
+    on the same support.
 
     The per-(assay, position) level is the strong null: "what motif usually
     occupies this latent location in this preparation". With ~1000 training
-    samples and ~85 active tokens each, a 31 x 1024 table over a 936-way
+    samples and ~85 active tokens each, a 31 x 1024 table over a ~1000-way
     alphabet averages far less than one observation per cell, so predictions
     must be hierarchically smoothed toward the per-assay and global levels
     (see ``motif_null_predictions``). Unsmoothed per-cell counts are noise.
@@ -311,7 +311,7 @@ def build_motif_null_baselines(
     from ..training.train_prior import _vq_codes_and_pmask_for_prior
 
     vqvae.eval()
-    V = int(motif_prior.V) + 1          # + OOV bin
+    V = int(motif_prior.V)
     f_global = np.zeros(V, dtype=np.float64)
     n_global = 0.0
 

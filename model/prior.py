@@ -252,16 +252,15 @@ class MaskGITMotifPrior(nn.Module):
     Input special IDs:
         a_mask_id   = 2
 
-        f_oov_id    = V        (nominal (a,b,c) never observed in training)
-        f_mask_id   = V + 1
-        f_null_id   = V + 2
+        f_mask_id   = V
+        f_null_id   = V + 1
 
     Output:
-        logits["flat"] : (B, N, V+1)   -- V codes plus the OOV bin
+        logits["flat"] : (B, N, V)
 
-    OOV is embeddable and scoreable but must never be *generated*: it has no
-    codebook entry to decode. Sampling masks that logit to -inf. Held-out OOV
-    token rate measured at 0.0587%, so it is a guard, not a hot path.
+    Stage 2B gives every nominal (a,b,c) triple a decodable row, so merge_map is
+    total and every code the encoder can emit is in the alphabet. There is no
+    out-of-vocabulary outcome to guard against.
     """
 
     def __init__(
@@ -326,9 +325,8 @@ class MaskGITMotifPrior(nn.Module):
         self.a_mask_id = 2
 
         # flat code ids
-        self.f_oov_id = self.V
-        self.f_mask_id = self.V + 1
-        self.f_null_id = self.V + 2
+        self.f_mask_id = self.V
+        self.f_null_id = self.V + 1
 
         self.ctx_len = 3
         self.use_sparse_motif_encoder = True
@@ -345,7 +343,7 @@ class MaskGITMotifPrior(nn.Module):
 
         # Input embeddings for transformer input
         self.a_emb = nn.Embedding(3, d_model)               # blank, active, mask
-        self.flat_emb = nn.Embedding(self.V + 3, d_model)   # codes + OOV + mask + null
+        self.flat_emb = nn.Embedding(self.V + 2, d_model)   # codes + mask + null
 
         self.roi_emb = nn.Embedding(2, d_model)  # 0 visible/context, 1 ROI/predict
 
@@ -354,7 +352,7 @@ class MaskGITMotifPrior(nn.Module):
             nn.GELU(),
             nn.LayerNorm(d_model),
         )
-        self.flat_head = nn.Linear(d_model, self.V + 1)
+        self.flat_head = nn.Linear(d_model, self.V)
 
         # Prefix context tokens
         self.task_emb = nn.Embedding(num_tasks, d_model)
@@ -395,7 +393,7 @@ class MaskGITMotifPrior(nn.Module):
     def flat_ids_from_codes(
         self, codes: torch.Tensor, blank_code: int = -1
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """(B,N,3) ladder codes -> (flat ids with OOV bin, active mask)."""
+        """(B,N,3) ladder codes -> (flat ids, active mask)."""
         if codes.dim() != 3 or codes.size(-1) < 3:
             raise ValueError(
                 f"Expected codes shape (B,N,3), got {tuple(codes.shape)}"
@@ -405,8 +403,6 @@ class MaskGITMotifPrior(nn.Module):
         K2, K3 = 8, 4
         nominal = (a.clamp_min(0) * K2 + b.clamp_min(0)) * K3 + c.clamp_min(0)
         f = self.merge_map[nominal.clamp(0, self.merge_map.numel() - 1)]
-        # -1 marks a nominal triple never observed in training.
-        f = torch.where(f < 0, torch.full_like(f, self.f_oov_id), f)
         return f, active
 
     def _pos_embed(self, N: int, device) -> torch.Tensor:
@@ -588,7 +584,7 @@ class MaskGITMotifPrior(nn.Module):
         targets:
             {
                 "a":            (B,N), 0/1
-                "f":            (B,N), 0..V (V = OOV)
+                "f":            (B,N), 0..V-1
                 "a_loss_mask":  (B,N) bool
                 "f_loss_mask":  (B,N) bool, usually predict_mask & active
             }
@@ -631,7 +627,7 @@ class MaskGITMotifPrior(nn.Module):
         f_target = torch.where(f_loss_mask, f_t, torch.full_like(f_t, -100))
         if f_loss_mask.any():
             loss_flat = F.cross_entropy(
-                logits["flat"].reshape(-1, self.V + 1),
+                logits["flat"].reshape(-1, self.V),
                 f_target.reshape(-1),
                 ignore_index=-100,
             )
@@ -645,16 +641,13 @@ class MaskGITMotifPrior(nn.Module):
             if n_tok > 0:
                 pred = logits["flat"].argmax(-1)
                 acc = (pred[f_loss_mask] == f_t[f_loss_mask]).float().mean()
-                oov_frac = f_t[f_loss_mask].eq(self.f_oov_id).float().mean()
             else:
                 acc = loss_flat * 0.0
-                oov_frac = loss_flat * 0.0
 
         aux = {
             "loss": loss.detach(),
             "loss_flat": loss_flat.detach(),
             "flat_acc": acc.detach(),
-            "flat_target_oov_frac": oov_frac.detach(),
             "flat_loss_tokens": n_tok.detach(),
         }
 
@@ -702,7 +695,7 @@ class MaskGITMotifPrior(nn.Module):
         Activity is supplied separately and is not corrupted here.
         """
         a = targets["a"].long()
-        f = targets["f"].long().clamp(0, self.f_oov_id)
+        f = targets["f"].long().clamp(0, self.V - 1)
         active = targets["active"].bool()
         pmask = targets["predict_mask"].bool()
 

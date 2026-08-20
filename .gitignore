@@ -2,3 +2,13 @@ __pycache__/
 *.py[cod]
 *.so
 .ipynb_checkpoints/
+
+# Ad-hoc editor/refactor backups and pre-change snapshot trees. These are local
+# restore points, not history -- git already provides that.
+*.bak_*
+ckpts_pre_v2/
+ckpts_pre2Cfix/
+ckpts_oldsplit_backup/
+reports_pre2Cfix/
+reports_oldsplit_backup/
+*.log

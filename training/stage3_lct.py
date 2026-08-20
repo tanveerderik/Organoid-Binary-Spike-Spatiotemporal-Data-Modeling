@@ -8,12 +8,12 @@ noise from drawing n ~ 86 active tokens:
 
     R2_max = Var(lambda) / (Var(lambda) + Var(eps)) ~= n*CV^2 / (V + n*CV^2)
 
-At n=86: V=32 -> 0.73, V=935 -> 0.084. More epochs shrink the *estimator*
+At n=86: V=32 -> 0.73, V=961 -> 0.082. More epochs shrink the *estimator*
 variance and approach R2_max; they cannot move R2_max, which is set by n and V.
 The flat histogram looked hopeless because of the ceiling, not the signal.
 
 A multinomial likelihood has no such denominator: each clip contributes n real
-samples from the predicted distribution, so a 935-way alphabet is exactly as
+samples from the predicted distribution, so a 961-way alphabet is exactly as
 estimable as a 32-way one. The score is dNLL against the marginal, in
 nats/token -- which is also what the MaskGIT prior optimises, so the trunk is
 objective-matched to its consumer.
@@ -125,8 +125,7 @@ def run_stage3_lct(
     EMB = fc["embed"].float().to(device)
     MERGE = fc["merge_map"].long().to(device)
     n_flat = EMB.shape[0]
-    OOV = n_flat
-    VF = n_flat + 1
+    VF = n_flat
     PROV = fc["provenance"].long().to(device)
 
     t1 = model.vq.tree_embeds[0].detach().float() * float(model.vq.level_scales[0])
@@ -142,7 +141,7 @@ def run_stage3_lct(
     n_nominal = int(model.vq.num_codes_per_level[0]) * L2 * L3
 
     print(
-        f"grid {Tt}x{Hh}x{Ww} | K1={K1} | flat V={n_flat}(+OOV) | lct 9 "
+        f"grid {Tt}x{Hh}x{Ww} | K1={K1} | flat V={n_flat} | lct 9 "
         f"| gct_in {model.global_ctx_in_dim} | textons {n_textons} on {tex_basis}",
         flush=True,
     )
@@ -153,7 +152,6 @@ def run_stage3_lct(
         m = a != blank
         nom = (a.clamp_min(0) * L2 + b.clamp_min(0)) * L3 + c.clamp_min(0)
         f = MERGE[nom.clamp(0, n_nominal - 1)]
-        f = torch.where(f < 0, torch.full_like(f, OOV), f)
         return f, m
 
     @torch.no_grad()
@@ -257,10 +255,8 @@ def run_stage3_lct(
     EL, EG, EF, ET, ER = [torch.cat(t) for t in (EL, EG, EF, ET, ER)]
     RMU, RSD = ER.mean(0, keepdim=True), ER.std(0, keepdim=True).clamp_min(1e-6)
     ERn = (ER - RMU) / RSD
-    oov_rate = float(EF[:, OOV].sum() / EF.sum())
     print(
-        f"held-out {len(EL)} clips | mean active {float(EF.sum(1).mean()):.1f} "
-        f"| OOV token rate {oov_rate:.4%}",
+        f"held-out {len(EL)} clips | mean active {float(EF.sum(1).mean()):.1f}",
         flush=True,
     )
 
