@@ -799,6 +799,7 @@ class TransformerVQVAE(nn.Module):
         # incompatible or absent entries for it; those are reinitialized.
         removed_module_prefixes = (
             "continuous_residual_projector.",
+            "local_embedder.",
             "local_to_dec_ctx.",
             "global_to_dec_ctx.",
             "ctx_slot_embed",
@@ -806,10 +807,17 @@ class TransformerVQVAE(nn.Module):
             "local_ctx_scale",
         )
 
+        # Cross-attention submodules removed from DecoderBlock. Scoped to
+        # dec_blocks. so the encoder's own norm2 is never caught.
+        removed_dec_block_parts = (".ctx_gate", ".norm2.", ".norm_ctx.", ".cross_attn.")
+
         def _is_removed_legacy(key: str) -> bool:
             return (
                 key.startswith(removed_module_prefixes)
-                or (key.startswith("dec_blocks.") and ".ctx_gate" in key)
+                or (
+                    key.startswith("dec_blocks.")
+                    and any(part in key for part in removed_dec_block_parts)
+                )
             )
 
         filtered_state = {}
