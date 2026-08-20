@@ -227,15 +227,17 @@ STAGE4B_MASKGIT_HYPERPARAMETERS = {
     # decoding produce exactly this distribution and the shipped specs never do.
     "random_mask_prob": 0.5,
     "random_mask_ratio": (0.15, 1.0),
-    # AUPRC, not NLL and not F1.
-    #   - not NLL, because a loss is not a task metric and the pipeline no
-    #     longer selects on one anywhere.
-    #   - not F1, for the original reason recorded here: F1 is maximized by
-    #     emitting the mode, which is the wrong target for a checkpoint whose
-    #     whole purpose is to be sampled.
-    # AUPRC is threshold-free and rank-based, so it keeps the property that
-    # ruled F1 out while satisfying the first point.
-    "select_on": "auprc",
+    # True-generation composite, the same family Stage 4C selects on.
+    #
+    # Not AUPRC and not F1: both depend only on the ordering of p, so both are
+    # invariant under monotone rescaling of it. Sampling draws Bernoulli from
+    # the absolute probability, so a rank metric cannot distinguish a prior that
+    # samples correctly from one that does not -- a run selected on F1 here once
+    # scored best-in-ladder AUPRC while being worse-calibrated than the
+    # per-assay marginal. Not NLL either: diagnostic, but a loss.
+    "select_on": "generation",
+    "generation_val_max_batches": 4,
+    "generation_motif_steps": 12,
     "warmup_epochs": 5,
     "save_start_epoch": 10,
     "early_stop_patience": 30,
@@ -1872,8 +1874,9 @@ def run_stage4b(prior, model, train_loader, val_loader, device):
     elif STAGE4B_USE_TOKEN_ADJ_BANK:
         raise FileNotFoundError(f"{_tab} missing; build it before enabling the bank.")
 
-    # Selected on AUPRC: threshold-free and rank-based, so it does not reward
-    # mode-emission the way F1 does, and it is not a loss.
+    # Selected by sampling the prior and scoring generated statistics against
+    # real ones. See train_maskgit_activity_prior for why no rank metric works
+    # for a checkpoint that is sampled.
     dcfg = dict(STAGE4B_MASKGIT_HYPERPARAMETERS)
     history = train_maskgit_activity_prior(
         activity_prior=prior.activity_prior,
@@ -1895,6 +1898,9 @@ def run_stage4b(prior, model, train_loader, val_loader, device):
         random_mask_ratio=tuple(dcfg["random_mask_ratio"]),
         select_on=str(dcfg["select_on"]),
         scheduler=sched_activity,
+        motif_prior=prior.motif_prior,
+        generation_val_max_batches=int(dcfg["generation_val_max_batches"]),
+        generation_motif_steps=int(dcfg["generation_motif_steps"]),
         save_start_epoch=int(dcfg["save_start_epoch"]),
         early_stop_patience=int(dcfg["early_stop_patience"]),
         deterministic_val_masks=bool(config["deterministic_validation_masks"]),
@@ -2037,6 +2043,16 @@ def run_stage4_prior(model, train_loader, val_loader, device):
         )
 
     if "4b" in phases:
+        # 4B used to be independent of 4A's weights. It is not any more: its
+        # checkpoint is selected by the true-generation composite, which decodes
+        # activity -> MaskGIT -> VQ-VAE and therefore needs the trained motif
+        # prior. Without this load a standalone 4B run scores itself through a
+        # randomly initialised motif prior and still returns a number, so
+        # selection would proceed on noise. Loaded read-only: the motif prior is
+        # never in 4B's optimizer and evaluate_true_stage4_generation calls
+        # .eval() on it.
+        if "4a" not in phases:
+            _load_stage4_motif_best(prior, device)
         reports["4b"] = run_stage4b(
             prior, model, train_loader, val_loader, device
         )

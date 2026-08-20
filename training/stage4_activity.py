@@ -24,7 +24,7 @@ from ..inference.decode import (
 from ..inference.metrics_gen import evaluate_generation_global_metrics
 from ..inference.metrics_generative import mea_statistics, compare_statistics
 from ..inference.sample_prior import iterative_unmask_motif_given_activity
-from ..utils.constants import normalize_gap_bins
+from ..utils.constants import DEFAULT_GAP_BINS, normalize_gap_bins
 from ..utils.losses import (
     ctx_loss_soft,
     local_moment_field_loss,
@@ -2041,19 +2041,43 @@ def train_maskgit_activity_prior(
     lambda_spatial: float = 0.0,
     random_mask_prob: float = 0.5,
     random_mask_ratio: Tuple[float, float] = (0.15, 1.0),
-    select_on: str = "auprc",
+    select_on: str = "generation",
     deterministic_val_masks: bool = True,
     scheduler=None,
+    # Required when select_on == "generation": the composite is scored on the
+    # real activity -> MaskGIT -> VQ-VAE path, which needs the trained motif
+    # prior from Stage 4A.
+    motif_prior=None,
+    generation_val_max_batches: int = 4,
+    generation_motif_steps: int = 12,
+    # DEFAULT_GAP_BINS, not evaluate_true_stage4_generation's own default of
+    # ((1,1),(2,2),(3,3)). That default does not match the Stage 1 memory bank,
+    # so the global-memory terms -- local_context_consistency (0.10) and
+    # short_gap_consistency (0.05) in the composite -- are dropped with only a
+    # printed warning. 4B has no earlier baseline to stay comparable with, so it
+    # scores the whole composite.
+    generation_gap_bins=DEFAULT_GAP_BINS,
+    null_baselines=None,
 ):
     """Train the dense activity prior.
 
-    ``select_on`` is AUPRC: threshold-free and rank-based, and not a loss.
+    ``select_on`` is the true-generation composite, the same family Stage 4C
+    selects on. This checkpoint exists to be sampled, so it is scored by
+    sampling it and comparing generated statistics against real ones.
 
-    It is deliberately not F1. F1 picks the model that best predicts the single
-    most likely map, which is the opposite of what a prior needs; a run selected
-    that way scored best-in-ladder AUPRC while being worse-calibrated than the
-    per-assay marginal. AUPRC integrates over thresholds and so does not carry
-    that mode-seeking bias.
+    Neither rank metric is usable here, for the same underlying reason. AUPRC
+    and F1 depend only on the ordering of p, so both are invariant under any
+    monotone rescaling of it -- replace p with p**3 and AUPRC is unchanged while
+    calibration is destroyed. Sampling draws Bernoulli from the absolute
+    probability, not the rank, so a rank metric cannot tell a prior that samples
+    correctly from one that does not. This is not hypothetical: a run selected
+    on F1 scored best-in-ladder AUPRC while being worse-calibrated than the
+    per-assay marginal.
+
+    NLL would be diagnostic, being a proper scoring rule, but it is a loss and
+    the pipeline no longer selects on losses. The generation composite catches
+    both failure modes without being one: bad calibration shows up as the wrong
+    firing rate, bad ranking as the wrong spatial structure.
     """
     device = next(activity_prior.parameters()).device
     amp_enabled = bool(use_amp and device.type == "cuda")
@@ -2061,8 +2085,15 @@ def train_maskgit_activity_prior(
     _freeze_module(vqvae)
     os.makedirs(os.path.dirname(ckpt_out) or ".", exist_ok=True)
 
-    if select_on not in ("nll", "auprc", "f1"):
-        raise ValueError(f"select_on must be nll|auprc|f1, got {select_on!r}")
+    if select_on not in ("generation", "nll", "auprc", "f1"):
+        raise ValueError(
+            f"select_on must be generation|nll|auprc|f1, got {select_on!r}"
+        )
+    if select_on == "generation" and motif_prior is None:
+        raise ValueError(
+            "select_on='generation' scores the activity -> MaskGIT -> VQ-VAE "
+            "path and requires the Stage 4A motif_prior."
+        )
     lower_is_better = (select_on == "nll")
     best = float("inf") if lower_is_better else -float("inf")
     best_epoch, since_improve = -1, 0
@@ -2133,7 +2164,30 @@ def train_maskgit_activity_prior(
                 blank_code=blank_code, deterministic_masks=deterministic_val_masks,
             )
             row.update({f"val_{k}": v for k, v in vm.items()})
-            score = vm[select_on]
+
+            if select_on == "generation":
+                # Only scored from save_start_epoch: generation is the
+                # expensive path, and epochs before the handoff are not
+                # legitimate candidates anyway.
+                if epoch >= int(save_start_epoch):
+                    gen = evaluate_true_stage4_generation(
+                        activity_prior,
+                        motif_prior,
+                        vqvae,
+                        val_loader,
+                        blank_code=blank_code,
+                        max_batches=int(generation_val_max_batches),
+                        motif_steps=int(generation_motif_steps),
+                        null_baselines=null_baselines,
+                        gap_bins=generation_gap_bins,
+                        deterministic_masks=deterministic_val_masks,
+                    )
+                    row.update({f"gen_{k}": v for k, v in gen.items()})
+                    score = float(gen["generation_metric"])
+                else:
+                    score = -float("inf")
+            else:
+                score = vm[select_on]
             improved = (score < best - 1e-6) if lower_is_better else (score > best + 1e-6)
             # The gate covers the comparison baseline, not just the write: without
             # it the first post-warmup epoch is compared against an early-epoch
@@ -2172,7 +2226,9 @@ def train_maskgit_activity_prior(
                            ("loss", "loss_bce", "loss_count", "loss_adj_t",
                             "loss_spatial") if k in row) +
                   f" | val nll={vm['nll']:.4f} auprc={vm['auprc']:.4f} f1={vm['f1']:.4f}"
-                  f" meanP={vm['mean_p']:.4f} base={vm['base_rate']:.4f}"
+                  + (f" gen={row['gen_generation_metric']:.5f}"
+                     if "gen_generation_metric" in row else "")
+                  + f" meanP={vm['mean_p']:.4f} base={vm['base_rate']:.4f}"
                   f" best={best:.4f}@{best_epoch}", flush=True)
             if (epoch >= int(early_stop_start_epoch)
                     and since_improve >= int(early_stop_patience)):
