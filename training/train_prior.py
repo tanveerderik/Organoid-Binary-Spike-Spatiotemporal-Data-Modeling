@@ -223,6 +223,8 @@ def _masked_cls_metrics(logits, target, mask, num_classes: int, topk: int = 5):
         return {
             "acc": 0.0,
             "topk_acc": 0.0,
+            "mrr": 0.0,
+            "mean_rank": 0.0,
             "entropy": 0.0,
             "unique": 0.0,
             "n": 0,
@@ -239,6 +241,17 @@ def _masked_cls_metrics(logits, target, mask, num_classes: int, topk: int = 5):
     topk_pred = logit_m.topk(k, dim=-1).indices
     topk_acc = (topk_pred == y.unsqueeze(-1)).any(dim=-1).float().mean().item()
 
+    # Mean reciprocal rank of the true entry over the whole 961-way ranking.
+    # Selection needs a metric that is not a loss but still sees the tail:
+    # top-1 here is ~0.08 and top-5 ~0.36, so both discard most of the
+    # ordering the model actually learns. MRR reads the full ranking and
+    # moves when a target climbs from rank 40 to rank 12, which accuracy
+    # cannot see. Strict '>' gives the optimistic rank under ties.
+    target_logit = logit_m.gather(1, y.unsqueeze(1))
+    rank = (logit_m > target_logit).sum(dim=-1) + 1
+    mrr = (1.0 / rank.float()).mean().item()
+    mean_rank = rank.float().mean().item()
+
     counts = torch.bincount(y, minlength=num_classes).float()
     probs = counts / counts.sum().clamp_min(1.0)
     probs = probs[probs > 0]
@@ -249,6 +262,8 @@ def _masked_cls_metrics(logits, target, mask, num_classes: int, topk: int = 5):
     return {
         "acc": acc,
         "topk_acc": topk_acc,
+        "mrr": mrr,
+        "mean_rank": mean_rank,
         "entropy": entropy,
         "unique": float(unique),
         "n": n,
@@ -269,6 +284,17 @@ def train_motif_prior_mgit(
     ckpt_out: str = "ckpts/motif_prior_best.pt",
     early_stop_patience: int = 5,
     min_delta: float = 0.0,
+    scheduler=None,
+    # Selection metric. "loss" is kept only so an old call reproduces the old
+    # behaviour; the pipeline selects on a task metric, never on a loss.
+    select_on: str = "mrr",
+    # The dataset already hands validation a fixed crop/task/mask_spec
+    # (DeterministicSubset, dataset.py). The MaskGIT corruption in
+    # _make_motif_io does not go through it -- it draws from the main-process
+    # RNG, which is why supervised tokens/sample swung 26.0-31.6 between epochs
+    # and val loss carried an sd of 0.037 with no model change behind it.
+    deterministic_val_masks: bool = True,
+    val_mask_seed: int = 20260820,
     use_amp: bool = True,
     grad_accum_steps: int = 1,
     ensure_at_least_one_mask: bool = True,
@@ -378,6 +404,8 @@ def train_motif_prior_mgit(
         total_z2_cnt = 0.0
 
         total_z1_acc = 0.0
+        total_z1_mrr = 0.0
+        total_z1_rank = 0.0
         total_z2_acc = 0.0
         total_z1_topk = 0.0
         total_z2_topk = 0.0
@@ -850,6 +878,8 @@ def train_motif_prior_mgit(
                 total_z2 += float(aux["loss_flat"].item()) * n_z1
                 total_z2_cnt += n_z1
 
+            total_z1_mrr += mz1["mrr"] * mz1["n"]
+            total_z1_rank += mz1["mean_rank"] * mz1["n"]
             total_z1_acc += mz1["acc"] * mz1["n"]
             total_z2_acc += mz2["acc"] * mz2["n"]
             total_z1_topk += mz1["topk_acc"] * mz1["n"]
@@ -903,6 +933,8 @@ def train_motif_prior_mgit(
             "loss_spatial": total_spatial / den,
             
             "acc_z1": total_z1_acc / den_z1,
+            "mrr_z1": total_z1_mrr / den_z1,
+            "mean_rank_z1": total_z1_rank / den_z1,
             "acc_z2": total_z2_acc / den_z2,
             "topk_z1": topk_used_z1,
             "topk_z2": topk_used_z2,
@@ -920,16 +952,35 @@ def train_motif_prior_mgit(
             "unique_z2_per_batch": total_z2_unique / max(total_batches, 1.0),
         }
 
-    best_val = float("inf")
-    patience = 0
-    # Separate accuracy-selected checkpoint.
+    # Selection metric. Loss is not used: as the model sharpens, confident
+    # errors raise cross-entropy even while the ranking improves, so the
+    # loss-best epoch can be materially worse at the actual task.
     #
-    # Selecting on total validation loss alone is unsafe here: as the model
-    # sharpens, confident errors raise cross-entropy even while z1 accuracy
-    # improves, so loss and accuracy diverge and the loss-best epoch can be
-    # materially worse at the actual task. Track both and always keep a copy
-    # of the best-z1-accuracy epoch.
+    #   mrr   -- mean reciprocal rank of the true entry (default)
+    #   acc   -- top-1
+    #   topk  -- top-k as configured by `topk`
+    #   loss  -- legacy, reproduces the pre-2026-08-20 behaviour
+    _SELECT_KEYS = {
+        "mrr": ("mrr_z1", False),
+        "acc": ("acc_z1", False),
+        "topk": ("topk_acc_z1", False),
+        "loss": ("loss", True),
+    }
+    if select_on not in _SELECT_KEYS:
+        raise ValueError(
+            f"select_on must be one of {sorted(_SELECT_KEYS)}, got {select_on!r}"
+        )
+    select_key, select_lower_is_better = _SELECT_KEYS[select_on]
+
+    best_score = float("inf") if select_lower_is_better else -float("inf")
+    patience = 0
+
+    # Secondary checkpoints, saved but never used for early stopping. They cost
+    # one write each and make an alternative selection rule available after the
+    # fact instead of requiring a retrain to ask the question.
+    best_val_loss = float("inf")
     best_val_z1_acc = -1.0
+    ckpt_loss_out = os.path.splitext(ckpt_out)[0] + "_best_loss.pt"
     ckpt_acc_out = os.path.splitext(ckpt_out)[0] + "_best_z1acc.pt"
     history = {"train": [], "val": []}
 
@@ -939,7 +990,28 @@ def train_motif_prior_mgit(
         # condition on a committed parent. One flat head, trained against its
         # own predictions throughout.
         train_m = _run_epoch(train_loader, train=True)
-        val_m = _run_epoch(val_loader, train=False) if val_loader is not None else train_m
+
+        if val_loader is None:
+            val_m = train_m
+        elif deterministic_val_masks:
+            # Same corruption pattern every epoch, so consecutive validation
+            # numbers measure the model and nothing else. State is saved and
+            # restored so training's RNG stream is untouched.
+            cpu_state = torch.get_rng_state()
+            cuda_state = (
+                torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+            )
+            try:
+                torch.manual_seed(int(val_mask_seed))
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(int(val_mask_seed))
+                val_m = _run_epoch(val_loader, train=False)
+            finally:
+                torch.set_rng_state(cpu_state)
+                if cuda_state is not None:
+                    torch.cuda.set_rng_state_all(cuda_state)
+        else:
+            val_m = _run_epoch(val_loader, train=False)
 
         history["train"].append(train_m)
         history["val"].append(val_m)
@@ -959,6 +1031,8 @@ def train_motif_prior_mgit(
             f"sp={val_m['loss_spatial']:.4f} "
             f"z1={val_m['loss_z1']:.4f} "
             f"z2={val_m['loss_z2']:.4f} "
+            f"mrr={val_m['mrr_z1']:.4f} "
+            f"rank={val_m['mean_rank_z1']:.1f} "
             f"acc_z1={val_m['acc_z1']:.3f} "
             f"acc_z2={val_m['acc_z2']:.3f} "
             f"top{topk_z1_used}_z1={val_m['topk_acc_z1']:.3f} "
@@ -972,13 +1046,16 @@ def train_motif_prior_mgit(
             f"sup_z2/sample={val_m['supervised_z2_tokens_per_sample']:.1f}"
         )
 
-        current_z1_acc = float(val_m.get("z1_acc", -1.0))
+        # Secondary: best top-1. Key is "acc_z1" -- the metrics dict has never
+        # emitted "z1_acc", so the previous read silently returned its default
+        # and this checkpoint was never written.
+        current_z1_acc = float(val_m.get("acc_z1", -1.0))
         if current_z1_acc > best_val_z1_acc:
             best_val_z1_acc = current_z1_acc
             torch.save(
                 {
-                    # Key must be "model" to match the loss-selected checkpoint
-                    # and main._load_stage4_motif_best, which reads ckpt["model"].
+                    # Key must be "model" to match the primary checkpoint and
+                    # main._load_stage4_motif_best, which reads ckpt["model"].
                     "model": motif_prior.state_dict(),
                     "epoch": ep,
                     "best_val_z1_acc": best_val_z1_acc,
@@ -986,25 +1063,55 @@ def train_motif_prior_mgit(
                 },
                 ckpt_acc_out,
             )
-            print(f"  saved {ckpt_acc_out}  best_z1_acc={best_val_z1_acc:.4f}")
 
-        if val_m["loss"] < best_val - float(min_delta):
-            best_val = val_m["loss"]
+        # Secondary: best loss, for comparison against the old selection rule.
+        current_loss = float(val_m["loss"])
+        if current_loss < best_val_loss:
+            best_val_loss = current_loss
+            torch.save(
+                {
+                    "model": motif_prior.state_dict(),
+                    "epoch": ep,
+                    "best_val_loss": best_val_loss,
+                },
+                ckpt_loss_out,
+            )
+
+        # Primary: the configured task metric drives both the shipped
+        # checkpoint and early stopping.
+        score = float(val_m[select_key])
+        improved = (
+            score < best_score - float(min_delta)
+            if select_lower_is_better
+            else score > best_score + float(min_delta)
+        )
+        if improved:
+            best_score = score
             patience = 0
             torch.save(
                 {
                     "model": motif_prior.state_dict(),
                     "epoch": ep,
-                    "best_val_loss": best_val,
+                    "select_on": select_on,
+                    "best_score": best_score,
+                    "val_loss_at_best": current_loss,
+                    "val_acc_at_best": current_z1_acc,
+                    "val_mrr_at_best": float(val_m["mrr_z1"]),
                 },
                 ckpt_out,
             )
-            print(f"  saved {ckpt_out}  best={best_val:.4f}")
+            print(f"  saved {ckpt_out}  best {select_on}={best_score:.5f}")
         else:
             patience += 1
             if patience >= int(early_stop_patience):
-                print(f"Early stopping at epoch {ep}; best={best_val:.4f}")
+                print(
+                    f"Early stopping at epoch {ep}; "
+                    f"best {select_on}={best_score:.5f}"
+                )
                 break
+
+        if scheduler is not None:
+            scheduler.step()
 
     return history
 

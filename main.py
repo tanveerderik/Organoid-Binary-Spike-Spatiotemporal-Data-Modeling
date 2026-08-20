@@ -169,6 +169,13 @@ STAGE4A_WARM_START = False
 # Literal path: CKPT_DIR is defined further down in this config block.
 STAGE4A_WARM_START_PATH = Path("ckpts") / "motif_prior_warmstart.pt"
 STAGE4A_EPOCHS = 600
+# Linear warmup then cosine decay (make_warmup_cosine). Constant LR until
+# 2026-08-20; see that helper for why it changed.
+STAGE4A_WARMUP_EPOCHS = 10
+# Checkpoint selection and early stopping run on this, never on a loss.
+# mean reciprocal rank over the 961-way alphabet: non-loss, and unlike top-1
+# (~0.08) or top-5 (~0.36) it reads the whole ranking.
+STAGE4A_SELECT_ON = "mrr"
 STAGE4B_EPOCHS = 200
 STAGE4C_EPOCHS = 100
 
@@ -220,8 +227,16 @@ STAGE4B_MASKGIT_HYPERPARAMETERS = {
     # decoding produce exactly this distribution and the shipped specs never do.
     "random_mask_prob": 0.5,
     "random_mask_ratio": (0.15, 1.0),
-    # NLL, not F1: F1 is maximized by emitting the mode.
-    "select_on": "nll",
+    # AUPRC, not NLL and not F1.
+    #   - not NLL, because a loss is not a task metric and the pipeline no
+    #     longer selects on one anywhere.
+    #   - not F1, for the original reason recorded here: F1 is maximized by
+    #     emitting the mode, which is the wrong target for a checkpoint whose
+    #     whole purpose is to be sampled.
+    # AUPRC is threshold-free and rank-based, so it keeps the property that
+    # ruled F1 out while satisfying the first point.
+    "select_on": "auprc",
+    "warmup_epochs": 5,
     "save_start_epoch": 10,
     "early_stop_patience": 30,
 }
@@ -278,6 +293,9 @@ STAGE4C_HYPERPARAMETERS = {
     "lambda_adj": 0.25,
     "lambda_spatial": 0.25,
     "auxiliary_ramp_epochs": 10,
+    # Warmup matches the auxiliary ramp: the LR should not be at full value
+    # while the loss it is descending is still changing shape.
+    "warmup_epochs": 10,
     # No candidate accepted or tracked until the auxiliary losses finish ramping.
     "save_start_epoch": 10,
     # Raised from a hard-coded 20. Stage 4C moves 1.2% of parameters at 1e-5, so
@@ -922,6 +940,34 @@ def _json_safe(value):
     if isinstance(value, (np.floating, np.integer)):
         return value.item()
     return value
+
+
+def make_warmup_cosine(optimizer, *, epochs: int, warmup_epochs: int,
+                       min_lr_frac: float = 0.033):
+    """Linear warmup then cosine decay, stepped once per epoch.
+
+    Stage 4 ran at a constant LR until 2026-08-20. Measured on the 283-epoch
+    constant-LR 4A run, per-epoch validation scatter was sd 0.037 against a
+    genuine trend of only 0.066 per 80 epochs -- a signal-to-noise of 1.77.
+    Best-of-N selection over that band picks a point ~0.12 below the true
+    curve, roughly twice the real improvement it was meant to capture.
+    Decaying the LR narrows the band where it matters, at the end.
+
+    min_lr_frac defaults to 1/30 of base LR, matching the eta_min=1e-5 against
+    lr=3e-4 used by Stage 2A's cosine.
+    """
+    warmup_epochs = max(0, int(warmup_epochs))
+    epochs = max(1, int(epochs))
+
+    def lr_lambda(epoch: int) -> float:
+        if warmup_epochs and epoch < warmup_epochs:
+            return float(epoch + 1) / float(warmup_epochs)
+        progress = (epoch - warmup_epochs) / max(1, epochs - warmup_epochs)
+        progress = min(1.0, max(0.0, progress))
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return float(min_lr_frac + (1.0 - min_lr_frac) * cosine)
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
 def save_json_report(obj, path: Path):
@@ -1708,6 +1754,11 @@ def run_stage4a(prior, model, train_loader, val_loader, device):
         lr=3e-4,
         weight_decay=0.01,
     )
+    sched_motif = make_warmup_cosine(
+        opt_motif,
+        epochs=int(STAGE4A_EPOCHS),
+        warmup_epochs=int(STAGE4A_WARMUP_EPOCHS),
+    )
 
     history = train_motif_prior_mgit(
         motif_prior=prior.motif_prior,
@@ -1721,6 +1772,10 @@ def run_stage4a(prior, model, train_loader, val_loader, device):
         # Was 30. Both train and val z1 accuracy were still climbing at the old
         # 200-epoch limit with no overfit gap, so the run was budget-limited.
         early_stop_patience=150,
+        scheduler=sched_motif,
+        # Ranking metric, not a loss. See train_motif_prior_mgit.
+        select_on=str(STAGE4A_SELECT_ON),
+        deterministic_val_masks=True,
         grad_accum_steps=grad_accum_steps,
         full_mask_prob=0.15,
 
@@ -1787,6 +1842,11 @@ def run_stage4b(prior, model, train_loader, val_loader, device):
         lr=float(config["lr"]),
         weight_decay=0.01,
     )
+    sched_activity = make_warmup_cosine(
+        opt_activity,
+        epochs=int(STAGE4B_MASKGIT_HYPERPARAMETERS["epochs"]),
+        warmup_epochs=int(STAGE4B_MASKGIT_HYPERPARAMETERS["warmup_epochs"]),
+    )
     _print_stage4_startup(
         "Stage 4B",
         config,
@@ -1812,9 +1872,8 @@ def run_stage4b(prior, model, train_loader, val_loader, device):
     elif STAGE4B_USE_TOKEN_ADJ_BANK:
         raise FileNotFoundError(f"{_tab} missing; build it before enabling the bank.")
 
-    # Selected on NLL rather than F1:
-    # F1 is maximized by emitting the mode, which is the wrong target for a
-    # checkpoint that exists to be sampled.
+    # Selected on AUPRC: threshold-free and rank-based, so it does not reward
+    # mode-emission the way F1 does, and it is not a loss.
     dcfg = dict(STAGE4B_MASKGIT_HYPERPARAMETERS)
     history = train_maskgit_activity_prior(
         activity_prior=prior.activity_prior,
@@ -1835,6 +1894,7 @@ def run_stage4b(prior, model, train_loader, val_loader, device):
         random_mask_prob=float(dcfg["random_mask_prob"]),
         random_mask_ratio=tuple(dcfg["random_mask_ratio"]),
         select_on=str(dcfg["select_on"]),
+        scheduler=sched_activity,
         save_start_epoch=int(dcfg["save_start_epoch"]),
         early_stop_patience=int(dcfg["early_stop_patience"]),
         deterministic_val_masks=bool(config["deterministic_validation_masks"]),
@@ -1873,6 +1933,11 @@ def run_stage4c(prior, model, train_loader, val_loader, device):
         lr=float(config["lr"]),
         weight_decay=0.01,
     )
+    sched_refine = make_warmup_cosine(
+        opt_refine,
+        epochs=int(STAGE4C_EPOCHS),
+        warmup_epochs=int(config["warmup_epochs"]),
+    )
     _print_stage4_startup(
         "Stage 4C",
         config,
@@ -1895,6 +1960,7 @@ def run_stage4c(prior, model, train_loader, val_loader, device):
         grad_clip=1.0,
         ckpt_out=str(CKPTS["activity_prior_refined_best"]),
         early_stop_patience=int(config["early_stop_patience"]),
+        scheduler=sched_refine,
         grad_accum_steps=grad_accum_steps,
         freeze_motif=True,
         lambda_activity=float(config["lambda_activity"]),

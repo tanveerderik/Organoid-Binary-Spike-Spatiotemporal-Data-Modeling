@@ -1283,6 +1283,7 @@ def train_activity_prior_with_frozen_motif(
     generation_seed: int = 314159,
     hard_tolerance=(0, 0, 0),
     deterministic_val_masks: bool = True,
+    scheduler=None,
 ):
     """Inference-aligned Stage 4C event-placement calibration."""
     if not freeze_motif:
@@ -1883,6 +1884,9 @@ def train_activity_prior_with_frozen_motif(
                 )
                 break
 
+        if scheduler is not None:
+            scheduler.step()
+
     if best_state is None:
         activity_prior.load_state_dict(baseline_state, strict=True)
         torch.save({
@@ -2037,15 +2041,19 @@ def train_maskgit_activity_prior(
     lambda_spatial: float = 0.0,
     random_mask_prob: float = 0.5,
     random_mask_ratio: Tuple[float, float] = (0.15, 1.0),
-    select_on: str = "nll",
+    select_on: str = "auprc",
     deterministic_val_masks: bool = True,
+    scheduler=None,
 ):
     """Train the dense activity prior.
 
-    ``select_on`` defaults to NLL because this checkpoint is going to be sampled.
-    Selecting on F1 picks the model that best predicts the single most likely map,
-    which is the opposite of what a prior needs; a run selected that way scored
-    best-in-ladder AUPRC while being worse-calibrated than the per-assay marginal.
+    ``select_on`` is AUPRC: threshold-free and rank-based, and not a loss.
+
+    It is deliberately not F1. F1 picks the model that best predicts the single
+    most likely map, which is the opposite of what a prior needs; a run selected
+    that way scored best-in-ladder AUPRC while being worse-calibrated than the
+    per-assay marginal. AUPRC integrates over thresholds and so does not carry
+    that mode-seeking bias.
     """
     device = next(activity_prior.parameters()).device
     amp_enabled = bool(use_amp and device.type == "cuda")
@@ -2173,6 +2181,8 @@ def train_maskgit_activity_prior(
                 history.append(row)
                 break
         history.append(row)
+        if scheduler is not None:
+            scheduler.step()
 
     return {"history": history, "best_epoch": best_epoch,
             "best_score": best, "select_on": select_on, "ckpt": ckpt_out}
