@@ -1763,7 +1763,7 @@ def run_stage4a(prior, model, train_loader, val_loader, device):
 
 
 def run_stage4b(prior, model, train_loader, val_loader, device):
-    print("[3B] Training activity prior.")
+    print("[4B] Training activity prior.")
     for parameter in prior.activity_prior.parameters():
         parameter.requires_grad_(True)
 
@@ -1806,7 +1806,7 @@ def run_stage4b(prior, model, train_loader, val_loader, device):
         token_adj_bank = GlobalContextAdjacencyBank()
         token_adj_bank.load_state_dict(_p[STAGE4B_TOKEN_ADJ_VARIANT])
         print(
-            f"[3B] token adjacency bank: {_tab} variant={STAGE4B_TOKEN_ADJ_VARIANT} "
+            f"[4B] token adjacency bank: {_tab} variant={STAGE4B_TOKEN_ADJ_VARIANT} "
             f"bands={token_adj_bank.gap_bins} assays={len(token_adj_bank._num)}"
         )
     elif STAGE4B_USE_TOKEN_ADJ_BANK:
@@ -1847,7 +1847,7 @@ def run_stage4b(prior, model, train_loader, val_loader, device):
 
 
 def run_stage4c(prior, model, train_loader, val_loader, device):
-    print("[3C] Training inference-aligned event-placement calibration.")
+    print("[4C] Training inference-aligned event-placement calibration.")
     config = dict(STAGE4C_HYPERPARAMETERS)
     config.update({
         "coordinate_mode": prior.activity_prior.coordinate_mode,

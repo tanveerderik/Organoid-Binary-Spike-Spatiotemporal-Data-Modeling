@@ -875,7 +875,7 @@ def train_motif_prior_mgit(
 
             if train and log_every and (it % log_every == 0):
                 print(
-                    f"  [3A motif] it {it:05d}: "
+                    f"  [4A motif] it {it:05d}: "
                     f"loss={total_loss / max(total_cnt, 1.0):.4f} "
                     f"ce={total_ce / max(total_cnt, 1.0):.4f} "
                     f"topk_ce={total_topk_loss / max(total_cnt, 1.0):.4f} "

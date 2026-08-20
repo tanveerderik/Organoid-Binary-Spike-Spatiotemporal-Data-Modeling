@@ -821,7 +821,7 @@ def _safe_generation_global_rows(
             prob_threshold=float(vqvae.best_thr_tol.item()),
         )
     except (KeyError, RuntimeError, ValueError) as exc:
-        print(f"  [3C generation metrics] global-memory metrics unavailable: {exc}")
+        print(f"  [4C generation metrics] global-memory metrics unavailable: {exc}")
         return []
 
 
@@ -1363,7 +1363,7 @@ def train_activity_prior_with_frozen_motif(
         null_seed=null_seed,
     )
     print(
-        "[3C baseline hard generation] "
+        "[4C baseline hard generation] "
         f"score={baseline_metrics['generation_metric']:.6f} "
         f"activityK={baseline_metrics['hard_predicted_count_mean']:.2f}/"
         f"{baseline_metrics['hard_target_count_mean']:.2f} "
@@ -1669,7 +1669,7 @@ def train_activity_prior_with_frozen_motif(
                                 f"gradients to joint-head parameters: {failed_joint}"
                             )
                     print(
-                        "  [3C gradient audit] decoder/context losses connect to "
+                        "  [4C gradient audit] decoder/context losses connect to "
                         f"{connected}/{len(trainable_parameters)} trainable tensors; "
                         f"{nonzero} have non-zero finite gradients on this batch. "
                         f"Details={gradient_status}"
@@ -1744,7 +1744,7 @@ def train_activity_prior_with_frozen_motif(
             if train and log_every and iteration % log_every == 0:
                 denominator = max(total_samples, 1.0)
                 print(
-                    f"  [3C calibration] it {iteration:05d}: "
+                    f"  [4C calibration] it {iteration:05d}: "
                     f"loss={totals['loss'] / denominator:.4f} "
                     f"activity={totals['loss_activity'] / denominator:.4f} "
                     f"ctx={totals['loss_ctx'] / denominator:.4f} "
@@ -2114,7 +2114,7 @@ def train_maskgit_activity_prior(
                 agg[k] = agg.get(k, 0.0) + float(v)
             nb += 1
             if log_every and (it + 1) % log_every == 0:
-                print(f"  [3B maskgit] it {it+1:05d}: " +
+                print(f"  [4B maskgit] it {it+1:05d}: " +
                       " ".join(f"{k.replace('loss_','')}={agg[k]/nb:.4f}" for k in sorted(agg)),
                       flush=True)
 
