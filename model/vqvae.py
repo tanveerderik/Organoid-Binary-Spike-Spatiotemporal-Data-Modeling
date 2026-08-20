@@ -14,7 +14,7 @@ import numpy as np
 from .base import ConvStem3D, ActivePatchEmbed3D, PatchRenderer3D, CtxEmbed
 from .base import (
     SparseTokenTransformerEncoder,
-    DecoderCrossAttnBlock,
+    DecoderBlock,
     HierarchicalVectorQuantizerEMA,
 )
 from .spatial_map import SpatialMapPrior
@@ -61,25 +61,6 @@ class TransformerVQVAE(nn.Module):
         use_spatial_map_prior: bool = True,
         gap_bins = None,
 
-        # context dropout (helps prevent shortcutting) and CFG knobs
-        #
-        # NOTE: this is *element-wise* dropout on the context tokens.  On a
-        # 2-token, low-rank control signal it is mostly destructive noise and
-        # actively teaches the decoder to ignore context.  Whole-token CFG
-        # dropout (cfg_ctx_drop_p, via ctx_key_padding_mask) is the right
-        # mechanism, so this now defaults to off.
-        ctx_drop_p=0.0,
-        cfg_ctx_drop_p: float = 0.0,
-
-        # Number of decoder cross-attention tokens generated per context
-        # source.  With a single token per source, cross-attention degenerates
-        # (see _prepare_ctx_tokens) into a handful of scalar FiLM gates.
-        n_ctx_slots: int = 8,
-        ctx_gate_init: float = 0.1,
-        
-        use_decoder_cross_attn: bool = False,
-        decoder_cross_attn_layers: tuple = (),
-        
         # ---- decoder attention masking ----
         enc_attn_mask_kind: str = "temporal_band_bi",  # "none" | "temporal_causal" | "temporal_band" | "temporal_band_bi"
         enc_attn_window: int = 5,                      # window length in patch-time tokens
@@ -220,14 +201,13 @@ class TransformerVQVAE(nn.Module):
         nn.init.normal_(self.activity_type_offset, mean=0.0, std=0.02)
         
         self.dec_blocks = nn.ModuleList([
-            DecoderCrossAttnBlock(
+            DecoderBlock(
                 dim=decoder_embed_dim,
                 num_heads=decoder_num_heads,
                 mlp_ratio=mlp_ratio,
                 drop=drop,
                 attn_drop=attn_drop,
                 attn_mask_kind=dec_attn_mask_kind,
-                ctx_gate_init=ctx_gate_init,
             )
             for _ in range(decoder_depth)
         ])
@@ -247,84 +227,22 @@ class TransformerVQVAE(nn.Module):
         # Optional inverse-like initialization from patch embed
         # self.patch_renderer.init_from_patch_embed(self.patch_embed)
 
-        # ---- Context paths ----
-
-
-        # 1) globaland local embedding branch (assay-only or assay+task)
-        #    This produces a compact vector you can concat into the FiLM ctx.
-        # alpha_init must be nonzero.  CtxEmbed gates its MLP branch with
-        # alpha_max * tanh(alpha_raw); at alpha_raw == 0 the gradient of the
-        # entire MLP is exactly zero, so the local embedder collapses to its
-        # linear projection and never recovers.  (In the first Stage 2C run
-        # local_embedder.mlp.* moved by exactly 0.0 over every epoch.)
-        # local_ctx standardization.
+        # ---- Context path ----
         #
-        # The nine activity features are on wildly different scales:
-        # log_mean_firing_density sits near -9.3 while the second moments are
-        # ~0.01-0.3.  Fed raw into a Linear(9, .), dim 0's near-constant
-        # magnitude dominates every output unit and the remaining eight
-        # dimensions land in its noise floor, so the embedder emits an almost
-        # constant vector no matter what is requested.  Measured on the first
-        # Stage 2C run: local context tokens varied by 0.39% of their norm
-        # across samples, against 10.4% for the (already well-scaled) global
-        # tokens -- a 27x gap that no gate, loss, or attention change can fix.
+        # The decoder is dense: context never enters it directly.  Adherence
+        # comes from the output-space loss (utils.losses.ctx_loss_soft), which
+        # reads context features back out of the reconstructed logits volume.
         #
-        # Registered as buffers so the exact training-time normalization
-        # travels with the checkpoint into inference.
-        self.register_buffer(
-            "local_ctx_mean", torch.zeros(self.local_ctx_in_dim), persistent=True
-        )
-        self.register_buffer(
-            "local_ctx_scale", torch.ones(self.local_ctx_in_dim), persistent=True
-        )
-
-        self.local_embedder  = CtxEmbed(self.local_ctx_in_dim,  self.local_emb_dim,  mlp_ratio=2.0, drop=0.0, alpha_init=0.1)
+        # global_embedder stays here because it is half of the Stage-1 gct
+        # module pair -- it feeds spatial_map_prior via _global_emb_only and is
+        # trained with it.  The lct mapper is a standalone Stage-3 artifact and
+        # is no longer part of this model.
+        # alpha_init must be nonzero: CtxEmbed gates its MLP branch with
+        # alpha_max * tanh(alpha_raw), and at alpha_raw == 0 the gradient of the
+        # entire MLP is exactly zero, so the embedder collapses to its linear
+        # projection and never recovers.
         self.global_embedder = CtxEmbed(self.global_ctx_in_dim, self.global_emb_dim, mlp_ratio=2.0, drop=0.0, alpha_init=0.1)
 
-        # 2) Cross attention setup
-        # context -> decoder cross-attn tokens
-        self.ctx_dropout = nn.Dropout(ctx_drop_p)
-
-        # Each context source is expanded into a bank of n_ctx_slots tokens
-        # rather than a single token.  Cross-attention differentiates queries
-        # only by *which key they select*; with one key per source there is
-        # nothing to select among, and the layer collapses to a per-sample
-        # bias plus one sigmoid gate per head.  A bank of slots gives the
-        # decoder a genuine context basis: different patches can pull down
-        # different mixtures of the same clip-level context vector.
-        self.n_ctx_slots = int(n_ctx_slots)
-        if self.n_ctx_slots < 1:
-            raise ValueError(f"n_ctx_slots must be >= 1, got {n_ctx_slots}")
-
-        self.local_to_dec_ctx = nn.Linear(
-            self.local_emb_dim,
-            self.n_ctx_slots * decoder_embed_dim,
-            bias=True,
-        )
-        self.global_to_dec_ctx = nn.Linear(
-            self.global_emb_dim,
-            self.n_ctx_slots * decoder_embed_dim,
-            bias=True,
-        )
-
-        # Learned slot identity, added to every slot token.  This is what makes
-        # the keys distinguishable at initialization, so attention has real
-        # structure to work with before the projections have learned anything.
-        # Layout: [0 : n_ctx_slots] local, [n_ctx_slots : 2*n_ctx_slots] global.
-        self.ctx_slot_embed = nn.Parameter(
-            torch.randn(2 * self.n_ctx_slots, decoder_embed_dim) * 0.02
-        )
-
-        # Keep the content projections small at init so the slots start out
-        # separated mainly by ctx_slot_embed rather than by noise.
-        for projection in (self.local_to_dec_ctx, self.global_to_dec_ctx):
-            nn.init.normal_(projection.weight, mean=0.0, std=0.02)
-            nn.init.zeros_(projection.bias)
-        
-        # use cross-attn only in early decoder blocks
-        self.use_decoder_cross_attn = bool(use_decoder_cross_attn)
-        self.decoder_cross_attn_layers = set(decoder_cross_attn_layers) if self.use_decoder_cross_attn else set()
-        
         # global context based spatial support prior
         self.use_spatial_map_prior = bool(use_spatial_map_prior)
         self.use_learned_spatial_prior_diagnostics = False
@@ -366,7 +284,6 @@ class TransformerVQVAE(nn.Module):
             torch.tensor(0.5, dtype=torch.float32),
         )
         
-        self.cfg_ctx_drop_p = float(cfg_ctx_drop_p)
     
         
     def _global_emb_only(self, global_ctx: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
@@ -385,117 +302,6 @@ class TransformerVQVAE(nn.Module):
         # cast back to input dtype for consistency
         return g_emb.to(dtype=global_ctx.dtype, device=global_ctx.device)
     
-    def _prepare_ctx_tokens(
-        self,
-        local_ctx: Optional[torch.Tensor],
-        global_ctx: Optional[torch.Tensor],
-        *,
-        target_dtype: torch.dtype,
-        target_device: torch.device,
-        cfg_ctx_drop_p: Optional[float] = None,
-        cfg_ctx_force_unc: Optional[bool] = None,
-    ):
-        """
-        Build small context token set for decoder cross-attention.
-
-        Each source expands into self.n_ctx_slots tokens.
-
-        Why not one token per source: cross-attention separates queries only
-        through key selection.  With M keys shared by every query and H heads,
-
-            ca_out_i = W_o . concat_h[ sum_m a_{h,i,m} v_{h,m} ]
-
-        and for M = 2 that reduces to
-
-            ca_out_i = W_o . concat_h[ v_{h,2} + a_{h,i} (v_{h,1} - v_{h,2}) ],
-            a_{h,i} = sigmoid( q_i . (k_{h,1} - k_{h,2}) / sqrt(d_h) )
-
-        so the whole per-patch variation lives in an affine subspace of
-        dimension <= H, with each coordinate a sigmoid of one linear
-        functional of the decoder token.  That is a handful of scalar FiLM
-        gates, not attention.  Expanding to M = 2 * n_ctx_slots raises that
-        ceiling to min(M - 1, D) directions per head.
-
-        Returns:
-          ctx_tokens: (B, M, D_dec), M in {0, S, 2S} with S = n_ctx_slots
-          ctx_key_padding_mask: (B, M) bool, True = mask out / ignore token
-
-          token order:
-            [0 : S]   local context slots  (if present)
-            [S : 2S]  global context slots (if present)
-        """
-        parts = []
-        slot_indices = []
-        B = None
-        S = self.n_ctx_slots
-        D = self.decoder_embed_dim
-
-        if local_ctx is not None:
-            if local_ctx.dim() != 2 or local_ctx.size(1) != self.local_ctx_in_dim:
-                raise ValueError(f"local_ctx must be (B,{self.local_ctx_in_dim}), got {tuple(local_ctx.shape)}")
-            B = local_ctx.size(0)
-
-            l_param = next(self.local_embedder.parameters())
-            lc_in = local_ctx.to(device=target_device, dtype=l_param.dtype)
-            lc_in = (
-                lc_in - self.local_ctx_mean.to(lc_in)
-            ) / self.local_ctx_scale.to(lc_in).clamp_min(1e-6)
-            l_emb = self.local_embedder(lc_in)
-            l_tok = self.local_to_dec_ctx(l_emb).view(B, S, D)
-            parts.append(l_tok.to(device=target_device, dtype=target_dtype))
-            slot_indices.append(torch.arange(0, S, device=target_device))
-
-        if global_ctx is not None:
-            if global_ctx.dim() != 2 or global_ctx.size(1) != self.global_ctx_in_dim:
-                raise ValueError(f"global_ctx must be (B,{self.global_ctx_in_dim}), got {tuple(global_ctx.shape)}")
-            B = global_ctx.size(0) if B is None else B
-
-            g_param = next(self.global_embedder.parameters())
-            gc_in = global_ctx.to(device=target_device, dtype=g_param.dtype)
-            g_emb = self.global_embedder(gc_in)
-            g_tok = self.global_to_dec_ctx(g_emb).view(B, S, D)
-            parts.append(g_tok.to(device=target_device, dtype=target_dtype))
-            slot_indices.append(torch.arange(S, 2 * S, device=target_device))
-
-        if not parts:
-            return None, None
-
-        ctx_tokens = torch.cat(parts, dim=1)  # (B,M,D)
-
-        # Slot identity makes the keys distinguishable.
-        slot_ids = torch.cat(slot_indices, dim=0)
-        ctx_tokens = ctx_tokens + self.ctx_slot_embed.to(
-            device=target_device, dtype=target_dtype
-        )[slot_ids].unsqueeze(0)
-
-        if self.ctx_dropout is not None:
-            ctx_tokens = self.ctx_dropout(ctx_tokens)
-
-        M = ctx_tokens.size(1)
-        ctx_key_padding_mask = torch.zeros((ctx_tokens.size(0), M), device=target_device, dtype=torch.bool)
-
-        p_drop = self.cfg_ctx_drop_p if cfg_ctx_drop_p is None else float(cfg_ctx_drop_p)
-
-        if cfg_ctx_force_unc is True:
-            # fully unconditional: hide all context tokens
-            ctx_key_padding_mask[:] = True
-
-        elif cfg_ctx_force_unc is False:
-            # fully conditional: keep all context tokens
-            pass
-
-        elif self.training and p_drop > 0.0:
-            # classifier-free dropout per sample:
-            # with probability p_drop, hide all context tokens for that sample
-            drop_rows = (torch.rand((ctx_tokens.size(0),), device=target_device) < p_drop)
-            ctx_key_padding_mask[drop_rows] = True
-
-        # Safety:
-        # if every ctx token is masked for every sample, return no context at all
-        if bool(ctx_key_padding_mask.all().item()):
-            return None, None
-
-        return ctx_tokens, ctx_key_padding_mask
     
 
     def _apply_output_biases(
@@ -527,30 +333,6 @@ class TransformerVQVAE(nn.Module):
         return pred_patches, spatial_diag
     
     @torch.no_grad()
-    def set_local_ctx_normalization(self, mean, scale):
-        """Install the training-set mean/scale used to standardize local_ctx.
-
-        Must be the pooled statistics over the whole training split: this is
-        about putting the embedder's input on a sane scale, not about
-        within-assay variation.
-        """
-        mean = torch.as_tensor(mean, dtype=torch.float32).reshape(-1)
-        scale = torch.as_tensor(scale, dtype=torch.float32).reshape(-1)
-        if mean.numel() != self.local_ctx_in_dim or scale.numel() != self.local_ctx_in_dim:
-            raise ValueError(
-                f"local_ctx normalization must have {self.local_ctx_in_dim} entries, "
-                f"got mean={mean.numel()} scale={scale.numel()}"
-            )
-        self.local_ctx_mean.copy_(mean.to(self.local_ctx_mean.device))
-        self.local_ctx_scale.copy_(
-            scale.clamp_min(1e-6).to(self.local_ctx_scale.device)
-        )
-        print(
-            "local_ctx standardization installed:\n"
-            "  mean  " + ", ".join(f"{v:+.4f}" for v in mean.tolist()) + "\n"
-            "  scale " + ", ".join(f"{v:.4f}" for v in scale.tolist())
-        )
-
     @torch.no_grad()
     def _set_training_prob_threshold(self, value):
         value = float(value)
@@ -645,8 +427,6 @@ class TransformerVQVAE(nn.Module):
         grid,
         global_ctx=None,
         local_ctx=None,
-        cfg_ctx_drop_p=None,
-        cfg_ctx_force_unc=None,
         roi_hw=None,
         pad_hw=None,
     ):
@@ -682,23 +462,9 @@ class TransformerVQVAE(nn.Module):
         # ---------------------------------------------------------
         # Optional decoder context cross-attention
         # ---------------------------------------------------------
-        ctx_tokens, ctx_key_padding_mask = self._prepare_ctx_tokens(
-            local_ctx=local_ctx,
-            global_ctx=global_ctx,
-            target_dtype=z_d.dtype,
-            target_device=z_d.device,
-            cfg_ctx_drop_p=cfg_ctx_drop_p,
-            cfg_ctx_force_unc=cfg_ctx_force_unc,
-        )
-    
         self._ensure_dec_masks(grid, device=z_d.device)
-        for i, blk in enumerate(self.dec_blocks):
-            use_cross = (i in self.decoder_cross_attn_layers)
-            z_d = blk(
-                z_d,
-                ctx_tokens=ctx_tokens if use_cross else None,
-                ctx_key_padding_mask=ctx_key_padding_mask if use_cross else None,
-            )
+        for blk in self.dec_blocks:
+            z_d = blk(z_d)
     
         z_d = self.dec_norm(z_d)
         logits_vol_raw, pred_patches_raw = self.patch_renderer(
@@ -748,8 +514,6 @@ class TransformerVQVAE(nn.Module):
         grid,
         global_ctx=None,
         local_ctx=None,
-        cfg_ctx_drop_p=None,
-        cfg_ctx_force_unc=None,
         roi_hw=None,
         pad_hw=None,
         return_all_refinements: bool = False,
@@ -785,8 +549,6 @@ class TransformerVQVAE(nn.Module):
                     grid=grid,
                     global_ctx=global_ctx,
                     local_ctx=local_ctx,
-                    cfg_ctx_drop_p=cfg_ctx_drop_p,
-                    cfg_ctx_force_unc=cfg_ctx_force_unc,
                     roi_hw=roi_hw,
                     pad_hw=pad_hw,
                 )
@@ -805,8 +567,6 @@ class TransformerVQVAE(nn.Module):
             grid=grid,
             global_ctx=global_ctx,
             local_ctx=local_ctx,
-            cfg_ctx_drop_p=cfg_ctx_drop_p,
-            cfg_ctx_force_unc=cfg_ctx_force_unc,
             roi_hw=roi_hw,
             pad_hw=pad_hw,
         )
@@ -1251,8 +1011,6 @@ class TransformerVQVAE(nn.Module):
         x: torch.Tensor,                                   # (B,1,T,H,W)
         global_ctx: Optional[torch.Tensor] = None,          # (B,G)
         local_ctx:  Optional[torch.Tensor] = None,          # (B,L)
-        cfg_ctx_drop_p: Optional[float] = None,  # CFG: per-sample drop prob
-        cfg_ctx_force_unc: Optional[bool] = None,    # CFG: force drop/keep (True=drop, False=keep)
         predict_mask_tok: Optional[torch.Tensor] = None,    # (B,N) or (B,N,1)
         predict_mask_spec: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None,  # NEW
         roi_hw=None,
@@ -1388,8 +1146,6 @@ class TransformerVQVAE(nn.Module):
                     grid=grid,
                     global_ctx=global_ctx,
                     local_ctx=local_ctx,
-                    cfg_ctx_drop_p=cfg_ctx_drop_p,
-                    cfg_ctx_force_unc=cfg_ctx_force_unc,
                     roi_hw=roi_hw,
                     pad_hw=pad_hw,
                 )
@@ -1403,8 +1159,6 @@ class TransformerVQVAE(nn.Module):
             grid=grid,
             global_ctx=global_ctx,
             local_ctx=local_ctx,
-            cfg_ctx_drop_p=cfg_ctx_drop_p,
-            cfg_ctx_force_unc=cfg_ctx_force_unc,
             roi_hw=roi_hw,
             pad_hw=pad_hw,
         )
@@ -1433,8 +1187,6 @@ class TransformerVQVAE(nn.Module):
                     else counterfactual_global_ctx
                 ),
                 local_ctx=counterfactual_local_ctx,
-                cfg_ctx_drop_p=0.0,
-                cfg_ctx_force_unc=False,   # context must be on for this pass
                 roi_hw=roi_hw,
                 pad_hw=pad_hw,
             )

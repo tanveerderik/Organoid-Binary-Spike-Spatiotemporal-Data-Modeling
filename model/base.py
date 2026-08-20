@@ -1467,15 +1467,15 @@ class SparseTokenTransformerEncoder(nn.Module):
     
     
 
-class DecoderCrossAttnBlock(nn.Module):
+class DecoderBlock(nn.Module):
     """
-    Decoder block:
+    Pure dense decoder block:
       1) self-attention on decoder tokens
-      2) cross-attention: Q = decoder tokens, K/V = context tokens
-      3) MLP
+      2) MLP
 
-    Context is expected as (B, M, D), where M is small
-    (e.g. 2 tokens = [local_ctx_token, global_ctx_token]).
+    Context reaches the decoder only through the quantized latent and the
+    output-space context loss (utils.losses.ctx_loss_soft); there is no
+    cross-attention path.
     """
     def __init__(
         self,
@@ -1488,7 +1488,6 @@ class DecoderCrossAttnBlock(nn.Module):
         attn_mask_kind: str = "none",
         grid: Optional[Tuple[int, int, int]] = None,
         window: Optional[int] = None,
-        ctx_gate_init: float = 0.1,
     ):
         super().__init__()
         assert attn_mask_kind in {"none", "temporal_causal", "temporal_band", "temporal_band_bi"}
@@ -1498,32 +1497,9 @@ class DecoderCrossAttnBlock(nn.Module):
         self.self_attn = nn.MultiheadAttention(dim, num_heads, dropout=attn_drop, batch_first=True)
         self.drop1 = nn.Dropout(drop)
 
-        # cross-attn
-        self.norm2 = nn.LayerNorm(dim)
-        self.norm_ctx = nn.LayerNorm(dim)
-        self.cross_attn = nn.MultiheadAttention(dim, num_heads, dropout=attn_drop, batch_first=True)
-        self.drop2 = nn.Dropout(drop)
-
-        # Per-channel LayerScale on the cross-attention residual.
-        #
-        # A single scalar gate initialized at exactly 0 is a saddle: with
-        # scale == 0 the gradient of every parameter behind the gate
-        # (cross_attn, norm2, norm_ctx, and the upstream context projections)
-        # is identically zero, so the branch can only bootstrap through the
-        # gate's own gradient <dL/dx, ca_out>, which at random init is noise
-        # with no consistent sign.  Stage 2C stalled there.  A small nonzero
-        # per-channel init keeps the block close to a no-op for the frozen
-        # Stage-2A decoder while giving every parameter behind it real
-        # gradient from the first step.
-        self.ctx_gate = nn.Parameter(
-            torch.full((dim,), float(ctx_gate_init))
-        )
-
-        # Diagnostics (opt-in; populated in forward when enabled).
-        self.collect_ctx_stats: bool = False
-        self._last_ctx_stats: Optional[dict] = None
-
-        # mlp
+        # mlp. norm3/drop3 keep their names (there is no 2) so existing
+        # checkpoints keep loading; renaming them would invalidate every
+        # dec_blocks.* key on disk.
         self.norm3 = nn.LayerNorm(dim)
         self.mlp = MLP(dim, mlp_ratio, drop)
         self.drop3 = nn.Dropout(drop)
@@ -1605,65 +1581,10 @@ class DecoderCrossAttnBlock(nn.Module):
         self._attn_mask_kind = "none"
         self._attn_mask = None
 
-    @torch.no_grad()
-    def _summarize_ctx(
-        self,
-        delta: Optional[torch.Tensor],       # (B, N, D) gated cross-attn residual
-        attn_w: Optional[torch.Tensor],      # (B, N, M) head-averaged attention
-    ) -> dict:
-        """
-        Quantify how much the context branch actually does, and whether it
-        does anything *different* per patch.
-
-        ctx_delta_rms
-            Overall magnitude of the injected residual.
-        ctx_delta_patch_rms
-            Magnitude of the part that varies across patches, i.e. the
-            residual after removing the per-sample mean.  If this is ~0 the
-            branch is a per-sample constant bias and cross-attention is
-            buying nothing over a plain additive embedding.
-        ctx_patch_selectivity
-            ctx_delta_patch_rms / ctx_delta_rms in [0, 1].
-        ctx_attn_entropy_frac
-            Attention entropy over context tokens, normalized by log(M).
-            1.0 means every patch attends uniformly to every context token
-            (no selection at all).
-        ctx_attn_query_spread
-            Std across patches of the attention weight per context token,
-            summed over tokens.  0 means all patches attend identically.
-        """
-        stats: dict = {}
-
-        if delta is not None and delta.numel() > 0:
-            d = delta.float()
-            stats["ctx_delta_rms"] = float(d.pow(2).mean().sqrt())
-            d_centered = d - d.mean(dim=1, keepdim=True)
-            patch_rms = float(d_centered.pow(2).mean().sqrt())
-            stats["ctx_delta_patch_rms"] = patch_rms
-            stats["ctx_patch_selectivity"] = float(
-                patch_rms / max(stats["ctx_delta_rms"], 1e-12)
-            )
-
-        if attn_w is not None and attn_w.numel() > 0:
-            a = attn_w.float().clamp_min(1e-12)
-            M = a.size(-1)
-            ent = -(a * a.log()).sum(dim=-1)
-            stats["ctx_attn_entropy_frac"] = float(
-                ent.mean() / max(math.log(max(M, 2)), 1e-12)
-            )
-            stats["ctx_attn_query_spread"] = float(
-                attn_w.float().std(dim=1).sum(dim=-1).mean()
-            )
-
-        stats["ctx_gate_absmean"] = float(self.ctx_gate.detach().abs().mean())
-        return stats
-
     def forward(
         self,
         x: torch.Tensor,                     # (B, N, D)
-        ctx_tokens: Optional[torch.Tensor] = None,   # (B, M, D)
         key_padding_mask: Optional[torch.Tensor] = None,
-        ctx_key_padding_mask: Optional[torch.Tensor] = None,
     ):
         # 1) self-attn
         x1 = self.norm1(x).to(dtype=x.dtype)
@@ -1678,50 +1599,7 @@ class DecoderCrossAttnBlock(nn.Module):
         )
         x = x + self.drop1(sa_out)
 
-        # 2) cross-attn
-        self._last_ctx_stats = None
-
-        if ctx_tokens is not None and ctx_tokens.size(1) > 0:
-            want_weights = bool(self.collect_ctx_stats)
-            ctx_scale = self.ctx_gate.to(device=x.device, dtype=x.dtype)
-
-            if ctx_key_padding_mask is None:
-                q = self.norm2(x).to(dtype=x.dtype)
-                kv = self.norm_ctx(ctx_tokens).to(dtype=ctx_tokens.dtype)
-
-                ca_out, attn_w = self.cross_attn(
-                    q, kv, kv,
-                    need_weights=want_weights,
-                    average_attn_weights=True,
-                    key_padding_mask=None,
-                )
-                delta = ctx_scale * self.drop2(ca_out)
-                x = x + delta
-            else:
-                keep_rows = ~ctx_key_padding_mask.all(dim=1)
-                attn_w = None
-                delta = None
-
-                if keep_rows.any():
-                    q = self.norm2(x[keep_rows]).to(dtype=x.dtype)
-                    kv = self.norm_ctx(ctx_tokens[keep_rows]).to(dtype=ctx_tokens.dtype)
-                    kpm = ctx_key_padding_mask[keep_rows]
-
-                    ca_out, attn_w = self.cross_attn(
-                        q, kv, kv,
-                        need_weights=want_weights,
-                        average_attn_weights=True,
-                        key_padding_mask=kpm,
-                    )
-
-                    delta = ctx_scale * self.drop2(ca_out)
-                    x = x.clone()
-                    x[keep_rows] = x[keep_rows] + delta
-
-            if want_weights:
-                self._last_ctx_stats = self._summarize_ctx(delta, attn_w)
-
-        # 3) mlp
+        # 2) mlp
         x3 = self.norm3(x).to(dtype=x.dtype)
         x = x + self.drop3(self.mlp(x3))
         return x

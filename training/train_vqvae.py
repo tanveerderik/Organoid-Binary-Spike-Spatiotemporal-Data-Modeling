@@ -310,12 +310,6 @@ def fit_vqvae(
         num_batches = 0
         ctx_diag_keys: set = set()
 
-        # Opt-in per-block context diagnostics.  These are what would have
-        # caught the first Stage 2C run immediately: a gate pinned at ~0 and a
-        # cross-attention output with zero across-patch variation.
-        for block in getattr(model, "dec_blocks", []):
-            block.collect_ctx_stats = bool(log_ctx_diagnostics)
-
         cfg_p = _cosine_ramp(
             epoch_idx=epoch,
             start_epoch=cfg_ctx_start_epoch,
@@ -430,7 +424,6 @@ def fit_vqvae(
                     counterfactual_local_ctx=lct_cf,
                     counterfactual_global_ctx=gct_cf,
                     predict_mask_spec=predict_mask_spec,
-                    cfg_ctx_drop_p=cfg_p,
                     roi_hw=roi_hw,
                     pad_hw=pad_hw,
                     return_all_refinements=do_refinement_supervision,
@@ -1038,20 +1031,6 @@ def fit_vqvae(
                             ).detach().cpu()
                         )
 
-            if log_ctx_diagnostics:
-                for layer_index in sorted(
-                    getattr(model, "decoder_cross_attn_layers", set())
-                ):
-                    block_stats = getattr(
-                        model.dec_blocks[layer_index], "_last_ctx_stats", None
-                    )
-                    if not block_stats:
-                        continue
-                    for stat_name, stat_value in block_stats.items():
-                        key = f"L{layer_index}_{stat_name}"
-                        sums[key] = sums.get(key, 0.0) + float(stat_value)
-                        ctx_diag_keys.add(key)
-
             sums["loss_ctx"] += float(loss_ctx.detach().cpu())
             sums["loss_ctx_raw"] += float(loss_ctx_raw.detach().cpu())
             sums["loss_ctx_cf"] += float(loss_ctx_cf.detach().cpu())
@@ -1479,26 +1458,6 @@ def fit_vqvae(
                     train_log.get("ctx_steer_gain", 0.0),
                 )
             ]
-            for layer_index in sorted(
-                getattr(model, "decoder_cross_attn_layers", set())
-            ):
-                prefix = f"L{layer_index}_"
-                fields = [
-                    (name, train_log[prefix + name])
-                    for name in (
-                        "ctx_gate_absmean",
-                        "ctx_delta_rms",
-                        "ctx_patch_selectivity",
-                        "ctx_attn_entropy_frac",
-                        "ctx_attn_query_spread",
-                    )
-                    if (prefix + name) in train_log
-                ]
-                if fields:
-                    ctx_lines.append(
-                        f"  [ctx] block{layer_index} "
-                        + " ".join(f"{n}={v:.4f}" for n, v in fields)
-                    )
             if val_loader is not None and len(history["val_metrics"]) > 0:
                 last_val = history["val_metrics"][-1]
                 ctx_lines.append(

@@ -49,8 +49,9 @@ def evaluate_vqvae(
     """
     Deterministic evaluation.
 
-    - "Conditional" = FiLM always ON  (cfg_ctx_force_unc=False)
-    - "Unconditional" = FiLM always OFF (cfg_ctx_force_unc=True)
+    NOTE: the decoder is dense and takes no context input, so the
+    conditional and unconditional arms are now identical by
+    construction. Kept only so report keys stay stable.
 
     PR metrics are calculated once from TP/FP/FN accumulated over the complete
     loader. Conditional keys end in ``_cond``; optional unconditional keys end
@@ -346,7 +347,6 @@ def evaluate_vqvae(
                 global_ctx=gct,
                 local_ctx=lct,
                 predict_mask_spec=mask_spec,
-                cfg_ctx_force_unc=False,   # conditioned
                 roi_hw=roi_hw,
                 pad_hw=pad_hw,
                 return_all_refinements=bool(eval_per_level_refinements),
@@ -371,7 +371,6 @@ def evaluate_vqvae(
                     global_ctx=gct,
                     local_ctx=lct,
                     predict_mask_spec=mask_spec,
-                    cfg_ctx_force_unc=True,  # unconditional
                     roi_hw=roi_hw,
                     pad_hw=pad_hw,
                     return_all_refinements=bool(eval_per_level_refinements),
@@ -385,7 +384,6 @@ def evaluate_vqvae(
                     global_ctx=gct,
                     local_ctx=torch.roll(lct, shifts=1, dims=0),
                     predict_mask_spec=mask_spec,
-                    cfg_ctx_force_unc=False,
                     roi_hw=roi_hw,
                     pad_hw=pad_hw,
                     return_all_refinements=False,

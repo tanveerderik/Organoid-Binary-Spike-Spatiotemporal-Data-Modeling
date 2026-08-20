@@ -157,8 +157,6 @@ def decode_motif_logits_soft_given_activity(
     global_ctx,
     local_ctx,
     tau_z=0.25,
-    cfg_ctx_drop_p=None,
-    cfg_ctx_force_unc=None,
     roi_hw=None,
     pad_hw=None,
 ):
@@ -245,18 +243,9 @@ def decode_motif_logits_soft_given_activity(
     type_offset = model.activity_type_offset.to(z_dec_base_no_pos)
     signed_type_offset = (2.0 * p_active.unsqueeze(-1) - 1.0) * type_offset.view(1, 1, -1)
     z_d = z_dec_base_no_pos + model.offset_scale * signed_type_offset + pos_dec
-    ctx_tokens, ctx_key_padding_mask = model._prepare_ctx_tokens(
-        local_ctx=local_ctx, global_ctx=global_ctx, target_dtype=z_d.dtype,
-        target_device=z_d.device, cfg_ctx_drop_p=cfg_ctx_drop_p,
-        cfg_ctx_force_unc=cfg_ctx_force_unc,
-    )
     model._ensure_dec_masks(grid, device=z_d.device)
-    for i, blk in enumerate(model.dec_blocks):
-        use_cross = i in model.decoder_cross_attn_layers
-        z_d = blk(
-            z_d, ctx_tokens=ctx_tokens if use_cross else None,
-            ctx_key_padding_mask=ctx_key_padding_mask if use_cross else None,
-        )
+    for blk in model.dec_blocks:
+        z_d = blk(z_d)
     z_d = model.dec_norm(z_d)
     logits_vol_raw, pred_patches_raw = model.patch_renderer(z_d, grid, return_patches=True)
     pred_patches, spatial_diag = model._apply_output_biases(

@@ -142,17 +142,6 @@ STAGE2_EVAL_PHASES = ("2a", "2b")
 STAGE2A_EPOCHS = 150
 STAGE2B_EPOCHS = 50
 
-# ---- Stage 2B context conditioning ----
-# Number of decoder cross-attention tokens generated per context source.
-# One token per source collapses cross-attention into a few scalar FiLM gates
-# (see TransformerVQVAE._prepare_ctx_tokens).
-STAGE2B_CTX_SLOTS = 8
-
-# Per-channel LayerScale init on the cross-attention residual.  Must be
-# nonzero: an exactly-zero gate is a saddle that zeroes the gradient of every
-# parameter behind it, which is what stalled the first Stage 2B run.
-STAGE2B_CTX_GATE_INIT = 0.1
-
 # Hide a subset of latent tokens from the decoder during Stage 2B.
 #
 # OFF, and it should stay off while counterfactual conditioning is on.
@@ -168,9 +157,6 @@ STAGE2B_MASK_LATENTS = False
 
 # Hole size for plain "recon" samples, which carry no mask_spec hole.
 STAGE2B_LATENT_RECON_DROP_P = 0.5
-
-# Cross-attention is applied in these decoder blocks during Stage 2B.
-STAGE2B_CROSS_ATTN_LAYERS = (0, 1)
 
 # ---- counterfactual context conditioning ----
 # Weight on the controllability loss: decode the same latents a second time
@@ -610,7 +596,7 @@ def compute_short_gap_target_rates_from_loader(
 
 
 
-def make_vqvae(img_size, device: str, *, full_spatial_size=None, use_decoder_cross_attn: bool, decoder_cross_attn_layers: tuple[int, ...]):
+def make_vqvae(img_size, device: str, *, full_spatial_size=None):
     model = TransformerVQVAE(
         img_size=img_size,
         full_spatial_size=full_spatial_size,
@@ -643,12 +629,6 @@ def make_vqvae(img_size, device: str, *, full_spatial_size=None, use_decoder_cro
         # Element-wise context dropout off: on a low-rank control signal it is
         # noise that teaches the decoder to ignore context.  Whole-token CFG
         # dropout is the intended mechanism.
-        ctx_drop_p=0.0,
-        cfg_ctx_drop_p=0.0,
-        n_ctx_slots=STAGE2B_CTX_SLOTS,
-        ctx_gate_init=STAGE2B_CTX_GATE_INIT,
-        use_decoder_cross_attn=use_decoder_cross_attn,
-        decoder_cross_attn_layers=decoder_cross_attn_layers,
     ).to(device)
 
     # Keep norms in fp32 for stability.
@@ -669,13 +649,6 @@ def set_requires_grad(module: Optional[nn.Module], flag: bool):
 def set_all_trainable(model: nn.Module, flag: bool):
     for p in model.parameters():
         p.requires_grad = bool(flag)
-
-
-def set_decoder_cross_attention(model: nn.Module, enabled: bool, layers: Iterable[int] = (0,)):
-    # Requires the small vqvae.py edit: use_decoder_cross_attn and decoder_cross_attn_layers.
-    model.use_decoder_cross_attn = bool(enabled)
-    model.decoder_cross_attn_layers = set(int(i) for i in layers) if enabled else set()
-    print(f"decoder cross-attn enabled={enabled}, layers={sorted(model.decoder_cross_attn_layers)}")
 
 
 def freeze_for_stage(model: nn.Module, stage: float):
@@ -700,7 +673,6 @@ def freeze_for_stage(model: nn.Module, stage: float):
     set_all_trainable(model, False)
 
     if stage == 1:
-        set_decoder_cross_attention(model, enabled=False, layers=())
         for name in ["stem", "patch_embed", "sparse_encoder", "to_code", "vq", "code_to_dec",
                      "dec_blocks", "dec_norm", "patch_renderer"]:
             set_requires_grad(getattr(model, name, None), True)
@@ -708,11 +680,8 @@ def freeze_for_stage(model: nn.Module, stage: float):
         if hasattr(model, "activity_type_offset"):
             model.activity_type_offset.requires_grad = True
 
-        # Context paths stay frozen in stage 1.
-        set_requires_grad(getattr(model, "local_embedder", None), False)
+        # The Stage-1 gct pair stays frozen here.
         set_requires_grad(getattr(model, "global_embedder", None), False)
-        set_requires_grad(getattr(model, "local_to_dec_ctx", None), False)
-        set_requires_grad(getattr(model, "global_to_dec_ctx", None), False)
         set_requires_grad(getattr(model, "spatial_map_prior", None), False)
         
         model.vq.freeze_codebook_updates = False
@@ -724,13 +693,8 @@ def freeze_for_stage(model: nn.Module, stage: float):
                 p.requires_grad = False
 
     elif stage == 2:
-        set_decoder_cross_attention(
-            model,
-            enabled=False,
-            layers=(),
-        )
-    
-        # Stage 2A decoder components. Context injection remains off.
+        # Stage 2A decoder components. The decoder is dense: context never
+        # enters it, only the output-space ctx loss shapes it.
         for name in [
             "dec_blocks",
             "dec_norm",
@@ -741,8 +705,8 @@ def freeze_for_stage(model: nn.Module, stage: float):
                 True,
             )
     
-        # Decoder adaptation to continuous points includes the first linear
-        # code-space interface.  The z1/z2 codebook geometry itself stays fixed.
+        # The first linear code-space interface adapts with the decoder.
+        # The codebook ladder geometry itself stays fixed.
         set_requires_grad(
             getattr(model, "code_to_dec", None),
             True,
@@ -750,18 +714,6 @@ def freeze_for_stage(model: nn.Module, stage: float):
 
         set_requires_grad(
             getattr(model, "global_embedder", None),
-            False,
-        )
-        set_requires_grad(
-            getattr(model, "local_embedder", None),
-            False,
-        )
-        set_requires_grad(
-            getattr(model, "local_to_dec_ctx", None),
-            False,
-        )
-        set_requires_grad(
-            getattr(model, "global_to_dec_ctx", None),
             False,
         )
         set_requires_grad(
@@ -782,13 +734,7 @@ def freeze_for_stage(model: nn.Module, stage: float):
         model.vq.duplicate_restart_every = 0
 
     elif stage == 3:
-        # Stage 3 uses the corrected exact convex projection to produce alpha
-        # training targets. The VQVAE remains completely frozen.
-        set_decoder_cross_attention(
-            model,
-            enabled=True,
-            layers=STAGE2B_CROSS_ATTN_LAYERS,
-        )
+        # Prior training: the VQVAE is completely frozen.
         set_all_trainable(model, False)
         model.eval()
 
@@ -800,67 +746,6 @@ def freeze_for_stage(model: nn.Module, stage: float):
     print(f"Stage {stage}: trainable params = {n_trainable:,} / {n_total:,}")
 
 
-
-
-def freeze_for_stage2b(model: nn.Module):
-    """
-    Freeze encoder, codebooks, alpha projector, and decoder backbone.  Train
-    only the context projections and zero-gated cross-attention at decoder
-    layer 0.
-    """
-    freeze_for_stage(model, 2)
-
-    set_decoder_cross_attention(
-        model,
-        enabled=True,
-        layers=STAGE2B_CROSS_ATTN_LAYERS,
-    )
-
-    # Freeze the complete Stage-2A decoder, then reopen only the context branch.
-    set_requires_grad(model.code_to_dec, False)
-    set_requires_grad(model.dec_blocks, False)
-    set_requires_grad(model.dec_norm, False)
-    set_requires_grad(model.patch_renderer, False)
-
-    set_requires_grad(model.local_embedder, True)
-    set_requires_grad(model.local_to_dec_ctx, True)
-
-    # Re-arm the local embedder's internal MLP gate.  Stage 1 and 2A leave
-    # CtxEmbed.alpha_raw at 0, where alpha_max * tanh(alpha_raw) == 0 zeroes
-    # the gradient of the whole MLP branch, and the checkpoint load restores
-    # that 0 over the constructor's nonzero default.  The first Stage 2B run
-    # therefore trained local_embedder.mlp with exactly zero gradient for
-    # every step.  The global embedder is pretrained and stays frozen.
-    with torch.no_grad():
-        if float(model.local_embedder.alpha_raw.abs()) < 1e-3:
-            model.local_embedder.alpha_raw.fill_(0.1)
-
-    set_requires_grad(model.global_to_dec_ctx, True)
-    model.ctx_slot_embed.requires_grad = True
-    set_requires_grad(model.global_embedder, False)
-    set_requires_grad(model.spatial_map_prior, False)
-
-    for layer_index in sorted(model.decoder_cross_attn_layers):
-        block = model.dec_blocks[layer_index]
-        set_requires_grad(block.norm2, True)
-        set_requires_grad(block.norm_ctx, True)
-        set_requires_grad(block.cross_attn, True)
-        block.ctx_gate.requires_grad = True
-
-    set_requires_grad(model.stem, False)
-    set_requires_grad(model.patch_embed, False)
-    set_requires_grad(model.sparse_encoder, False)
-    set_requires_grad(model.to_code, False)
-    for parameter in model.vq.parameters():
-        parameter.requires_grad = False
-
-    model.vq.freeze_codebook_updates = True
-    model.vq.dead_code_restart_every = 0
-    model.vq.duplicate_restart_every = 0
-
-    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    n_total = sum(p.numel() for p in model.parameters())
-    print(f"Stage 2B: trainable params = {n_trainable:,} / {n_total:,}")
 
 
 def make_optimizer(model: nn.Module, lr: float, weight_decay: float):
@@ -1496,207 +1381,8 @@ def _select_stage2a_ckpt():
 
 
 
-def run_stage2b(model, train_loader, val_loader, blank_logit_threshold):
-    print("\n" + "=" * 80)
-    print("STAGE 2B: context-conditioned projected-latent calibration")
-    print("=" * 80)
-
-    map_location = next(model.parameters()).device
-    stage2a_ckpt = _select_stage2a_ckpt()
-    model.load_checkpoint(
-        str(stage2a_ckpt),
-        map_location=map_location,
-    )
-    model._set_training_prob_threshold(0.5)
-    freeze_for_stage2b(model)
-
-    print(
-        f"Loaded Stage 2A best weights from: {stage2a_ckpt}\n"
-        "The exact convex projection remains active. Encoder/codebooks and "
-        "decoder backbone are frozen. Only context projections, cross-attention, "
-        "and its zero-initialized residual gate are trainable."
-    )
-
-    context_params = [
-        parameter
-        for module in (
-            model.local_embedder,
-            model.local_to_dec_ctx,
-            model.global_to_dec_ctx,
-        )
-        for parameter in module.parameters()
-        if parameter.requires_grad
-    ]
-    if model.ctx_slot_embed.requires_grad:
-        context_params.append(model.ctx_slot_embed)
-
-    cross_params = []
-    gate_params = []
-    for layer_index in sorted(model.decoder_cross_attn_layers):
-        block = model.dec_blocks[layer_index]
-        for module in (block.norm2, block.norm_ctx, block.cross_attn):
-            cross_params.extend(
-                parameter
-                for parameter in module.parameters()
-                if parameter.requires_grad
-            )
-        if block.ctx_gate.requires_grad:
-            gate_params.append(block.ctx_gate)
-
-    # The LayerScale gates and the slot embeddings are the branch's own
-    # "how much / which slot" controls.  Weight decay on them pulls the branch
-    # back toward the no-op it has to escape, so they get their own
-    # decay-free group with a faster learning rate.
-    optimizer = torch.optim.AdamW(
-        [
-            {
-                "params": context_params,
-                "lr": 3e-4,
-                "weight_decay": 1e-4,
-            },
-            {
-                "params": cross_params,
-                "lr": 3e-4,
-                "weight_decay": 1e-4,
-            },
-            {
-                "params": gate_params,
-                "lr": 1e-3,
-                "weight_decay": 0.0,
-            },
-        ]
-    )
-
-    local_ctx_bank, local_ctx_std, local_ctx_norm = build_local_ctx_bank(train_loader)
-    if local_ctx_std is None:
-        raise RuntimeError(
-            "Stage 2B needs local_ctx statistics for counterfactual "
-            "conditioning, but the training loader emits no local_ctx."
-        )
-    device_for_ctx = next(model.parameters()).device
-    local_ctx_std = local_ctx_std.to(device_for_ctx)
-
-    # Standardize the embedder's input before anything else.  Without this the
-    # local head receives a near-constant vector (dim 0 sits at ~-9.3 and
-    # swamps the second moments) and cannot produce a varying output no matter
-    # how it is gated or supervised.
-    model.set_local_ctx_normalization(*local_ctx_norm)
-
-    # Per-dimension loss weights, w_d = 1 / var_d, from the pooled training
-    # spread.  ctx_loss_soft otherwise sums raw squared error with uniform
-    # weight, so log_mean_firing_density (std ~0.85) contributes on the order
-    # of 1500x more than cov_xt (std ~0.02) and the seven second-moment
-    # dimensions are effectively never optimized.  Measured after the first
-    # balanced-input run: density and active_site_ratio responded at 0.62 and
-    # 0.76 pooled std, every moment at 0.04-0.19.
-    #
-    # Scoped to Stage 2B on purpose.  Stage 1 and 2A also call ctx_loss_soft,
-    # but there it is an output-statistics regularizer with the context
-    # embedders frozen; changing it would alter the frozen baseline that
-    # everything downstream is calibrated against.
-    ctx_pooled_std = local_ctx_norm[1].to(device_for_ctx)
-    ctx_dim_weights = 1.0 / ctx_pooled_std.pow(2).clamp_min(1e-12)
-    print(
-        "ctx loss per-dim weights (1/var): "
-        + ", ".join(f"{v:.1f}" for v in ctx_dim_weights.tolist())
-    )
-    local_ctx_bank = {
-        a: {
-            "local": entry["local"].to(device_for_ctx),
-            "global": entry["global"].to(device_for_ctx),
-        }
-        for a, entry in local_ctx_bank.items()
-    }
-
-    n_epoch = int(STAGE2B_EPOCHS)
-    scheduler = _make_stage2_scheduler(optimizer, n_epoch)
-
-    report = fit_vqvae(
-        model,
-        train_loader,
-        val_loader,
-        optimizer,
-        scheduler,
-        epochs=n_epoch,
-        ckpt_best_path=str(CKPTS["stage2_best"]),
-        ckpt_last_path=str(CKPTS["stage2_last"]),
-        early_stop_patience=20,
-        val_metric_name="AUPRC_tol_cond",
-        val_metric_goal="max",
-        use_ROI_mask=False,
-        lambda_vq=0.0,
-        lambda_ctx=1e-1,
-        lambda_ctx_field=1e-2,
-        ctx_start_epoch=STAGE2B_CTX_START_EPOCH,
-        ctx_warmup_epochs=STAGE2B_CTX_WARMUP_EPOCHS,
-        ctx_epoch_schedule=_stage2_ctx_schedule(),
-        mask_latents=bool(STAGE2B_MASK_LATENTS),
-        latent_recon_drop_p=float(STAGE2B_LATENT_RECON_DROP_P),
-        log_ctx_diagnostics=True,
-        lambda_ctx_cf=float(STAGE2B_LAMBDA_CTX_CF),
-        local_ctx_std=local_ctx_std,
-        local_ctx_bank=local_ctx_bank,
-        ctx_dim_weights=ctx_dim_weights,
-        ctx_cf_sigma_start=float(STAGE2B_CTX_CF_SIGMA_START),
-        ctx_cf_sigma_end=float(STAGE2B_CTX_CF_SIGMA_END),
-        ctx_cf_pair_p=float(STAGE2B_CTX_CF_PAIR_P),
-        ctx_cf_start_epoch=int(STAGE2B_CTX_CF_START_EPOCH),
-        ctx_cf_warmup_epochs=int(STAGE2B_CTX_CF_WARMUP_EPOCHS),
-        # Classifier-free dropout is what makes the conditional and
-        # unconditional decoders share weights honestly, and it is the only
-        # thing that stops the branch from being a free per-sample bias.
-        cfg_ctx_drop_start=0.0,
-        cfg_ctx_drop_end=0.15,
-        cfg_ctx_start_epoch=STAGE2B_CFG_CTX_START_EPOCH,
-        cfg_ctx_warmup_epochs=STAGE2B_CFG_CTX_WARMUP_EPOCHS,
-        pos_weight_start=1.0,
-        pos_weight_end=1.0,
-        pos_decay_epochs=1,
-        blank_logit_margin=blank_logit_threshold,
-        continuous_gumbel_tau_start=1.0,
-        continuous_gumbel_tau_end=1.0,
-        continuous_posterior_temperature=0.35,
-        save_start_epoch=STAGE2B_SAVE_START_EPOCH,
-        **{
-            **common_fit_kwargs(model),
-            "lambda_isi": 1e-1,
-            "lambda_sp_pixel": 1e-3,
-            "lambda_enc_var": 0.0,
-            "level2_start_epoch": 1,
-            "level2_full_loss_epoch": 1,
-        },
-    )
-
-    save_json_report(report, REPORTS["stage2"])
-    return report
-
-
 def run_stage2(model, train_loader, val_loader, blank_logit_threshold):
-    phases = _normalize_substage_phases(
-        STAGE2_PHASES,
-        ("2a", "2b"),
-        name="STAGE2_PHASES",
-    )
-
-    reports = {}
-    if "2a" in phases:
-        reports["2a"] = run_stage2a(
-            model,
-            train_loader,
-            val_loader,
-            blank_logit_threshold,
-        )
-
-
-    if "2b" in phases:
-        reports["2b"] = run_stage2b(
-            model,
-            train_loader,
-            val_loader,
-            blank_logit_threshold,
-        )
-
-    return reports
+    return {"2a": run_stage2a(model, train_loader, val_loader, blank_logit_threshold)}
 
 
 @torch.no_grad()
@@ -3631,14 +3317,6 @@ def evaluate_existing_checkpoints_on_temporal_split(model, test_loader, device):
             continue
 
         model.load_checkpoint(str(checkpoint), map_location=device)
-        if stage_label == "stage1":
-            set_decoder_cross_attention(model, enabled=False, layers=())
-        else:
-            set_decoder_cross_attention(
-                model,
-                enabled=(stage_label == "stage2b"),
-                layers=STAGE2B_CROSS_ATTN_LAYERS,
-            )
 
         report = evaluate_vqvae(
             model,
@@ -4108,16 +3786,6 @@ def evaluate_and_visualize(
 
     device = next(model.parameters()).device
     model.load_checkpoint(str(ckpt), map_location=device)
-
-    using_stage2b_context = bool(
-        stage == 2 and stage2_phase == "2b"
-    )
-
-    set_decoder_cross_attention(
-        model,
-        enabled=using_stage2b_context,
-        layers=STAGE2B_CROSS_ATTN_LAYERS if using_stage2b_context else (),
-    )
 
 
     if RUN_EVAL:
@@ -4761,8 +4429,6 @@ def main():
         img_size=img_size,
         device=device,
         full_spatial_size=full_hw0,
-        use_decoder_cross_attn=False,
-        decoder_cross_attn_layers=(),
     )
 
     # ============================================================
