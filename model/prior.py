@@ -577,9 +577,24 @@ class MaskGITMotifPrior(nn.Module):
         roi_mask: Optional[torch.Tensor] = None,
         targets: Optional[Dict[str, torch.Tensor]] = None,
         loss_weights: Tuple[float, ...] = (1.0,),
+        activity_prob: Optional[torch.Tensor] = None,
     ):
         """
         a_in, f_in: (B,N)
+
+        activity_prob: optional (B,N) float in [0,1]. When given, the activity
+        stream is embedded as the convex blend
+        ``(1-p)*a_emb[blank] + p*a_emb[active]`` instead of the hard lookup
+        ``a_emb(a_in)``, and the same blend is used for the logit head. At
+        p in {0,1} the blend equals the hard lookup exactly, so passing a
+        binary tensor reproduces the a_in path and passing None leaves this
+        forward bit-identical to before.
+
+        This exists so Stage 4D can hand the motif prior 4B's CALIBRATED
+        probability field rather than only its thresholded map. The generation
+        interface currently does ``activity.long().clamp(0,1)``
+        (inference/sample_prior.py), which discards exactly the uncertainty a
+        consumer needs to know which cells to trust.
 
         targets:
             {
@@ -601,7 +616,23 @@ class MaskGITMotifPrior(nn.Module):
         if roi_mask is None and targets is not None:
             roi_mask = targets.get("predict_mask", None)
 
-        x_tok = self._embed_layer_streams(a_in, f_in, roi_mask=roi_mask)
+        if activity_prob is None:
+            x_tok = self._embed_layer_streams(a_in, f_in, roi_mask=roi_mask)
+        else:
+            if activity_prob.shape != (B, N):
+                raise ValueError(
+                    f"activity_prob must have shape {(B, N)}, "
+                    f"got {tuple(activity_prob.shape)}"
+                )
+            ap = activity_prob.to(dtype=self.a_emb.weight.dtype)
+            blank_e = self.a_emb.weight[self.a_blank_id]
+            active_e = self.a_emb.weight[self.a_active_id]
+            x_tok = (
+                (1.0 - ap).unsqueeze(-1) * blank_e + ap.unsqueeze(-1) * active_e
+            ) + self.flat_emb(f_in)
+            if roi_mask is not None:
+                _rm = roi_mask.squeeze(-1) if roi_mask.dim() == 3 else roi_mask
+                x_tok = x_tok + self.roi_emb(_rm.to(device=f_in.device).bool().long())
         x_tok = self.drop(x_tok + self._pos_embed(N, a_in.device) + ctx_tok)
 
         sparse_keep = self._build_motif_sparse_mask(
@@ -613,10 +644,15 @@ class MaskGITMotifPrior(nn.Module):
         )
         h = self.ln_f(h)
 
-        activity_ids = (
-            targets["a"].long() if targets is not None else a_in.long().clamp(0, 1)
-        )
-        logits = self._compute_motif_logits(h, activity_ids=activity_ids)
+        if activity_prob is None:
+            activity_ids = (
+                targets["a"].long() if targets is not None else a_in.long().clamp(0, 1)
+            )
+            logits = self._compute_motif_logits(h, activity_ids=activity_ids)
+        else:
+            logits = self._compute_motif_logits(
+                h, activity_prob=activity_prob.to(dtype=self.a_emb.weight.dtype)
+            )
 
         if targets is None:
             return logits, None, {}
@@ -984,6 +1020,29 @@ class MaskGITActivityPrior(nn.Module):
         # One query per token: query i always reads out cell i, so there is
         # nothing to match and no permutation to resolve.
         self.cell_queries = nn.Parameter(torch.randn(self.Ntok, d_model) * 0.02)
+
+        # Per-cell conditioning ON THE QUERY, matching what MaskGITMotifPrior
+        # gives its tokens (a_emb + roi_emb).
+        #
+        # Without these the query for cell i is the same tensor for every clip,
+        # and every clip-specific fact has to arrive through cross-attention to
+        # `memory`. But memory holds only visible-ACTIVE tokens: a visible-blank
+        # cell and a masked cell are both absent from it, so the model could not
+        # tell which cells it was being asked to predict -- the only mask signal
+        # was 16 region-occupancy tokens at 64-cell granularity. Measured
+        # consequence: within-assay residual correlation with the truth was
+        # +0.0043 even with 36% of the clip visible.
+        #
+        # Safe against leakage: maskgit_activity_loss restricts the BCE to
+        # predict_mask, so visible cells are never scored and telling the query
+        # "cell i is visible-active" cannot buy a free correct answer.
+        #
+        # Zero-initialised, so a freshly built model reproduces the old forward
+        # exactly and an existing checkpoint loads unchanged.
+        self.q_a_emb = nn.Embedding(3, d_model)
+        self.q_roi_emb = nn.Embedding(2, d_model)
+        nn.init.zeros_(self.q_a_emb.weight)
+        nn.init.zeros_(self.q_roi_emb.weight)
         layer = nn.TransformerDecoderLayer(
             d_model=d_model, nhead=int(n_head), dim_feedforward=int(4 * d_model),
             dropout=float(dropout), batch_first=True, norm_first=True,
@@ -1249,9 +1308,17 @@ class MaskGITActivityPrior(nn.Module):
 
         memory, memory_pad, cls_out, _ = self._build_memory(g, l, task, a_in, roi_mask)
 
+        queries = self.cell_queries.unsqueeze(0).expand(B, -1, -1)
+        if a_in is not None:
+            a_q = a_in.squeeze(-1) if a_in.dim() == 3 else a_in
+            queries = queries + self.q_a_emb(a_q.to(queries.device).long())
+        if roi_mask is not None:
+            r_q = roi_mask.squeeze(-1) if roi_mask.dim() == 3 else roi_mask
+            queries = queries + self.q_roi_emb(r_q.to(queries.device).bool().long())
+
         h = self.maskgit_norm(
             self.maskgit_decoder(
-                self.cell_queries.unsqueeze(0).expand(B, -1, -1),
+                queries,
                 memory,
                 memory_key_padding_mask=memory_pad,
             )
@@ -1297,6 +1364,7 @@ class MaskGITActivityPrior(nn.Module):
         count_mode: str = "expected",
         count_temperature: float = 1.0,
         count_stochastic_round: bool = False,
+        count_scale: float = 1.0,
     ) -> torch.Tensor:
         """Deterministic MAP-style readout: the top-K cells. Best point estimate,
         and the correct thing to score with F1 -- but it returns the SAME map for
@@ -1306,6 +1374,7 @@ class MaskGITActivityPrior(nn.Module):
             out["count_logits"], mode=count_mode,
             temperature=count_temperature, stochastic_round=count_stochastic_round,
         )
+        counts = self._apply_count_scale(counts, count_scale)
         score = self.activity_prob_flat(out, roi_mask=roi_mask)
         device = score.device
         B = score.shape[0]
@@ -1324,6 +1393,34 @@ class MaskGITActivityPrior(nn.Module):
             activity[b, torch.topk(score[b], k=n).indices] = 1
         return activity
 
+    @staticmethod
+    def _apply_count_scale(counts, count_scale: float):
+        """Multiplicative recalibration of the predicted ROI count.
+
+        The count head is unbiased under the RANDOM masks it trains on
+        (count_expected_mean 39.79 vs count_target_mean 40.01 in the 4B run-2
+        log) but over-predicts by +13.2% on train clips and +15.2% on val clips
+        under ``deterministic_validation_task_and_masks``, whose ROI-size
+        distribution it never saw and which is what validation AND generation
+        use. Fitting a single scale on TRAIN clips under that same protocol --
+        disjoint clips, no leakage from val -- takes held-out count MAE from
+        10.500 to 8.913 and the bias from +15.2% to +2.4% at a = 0.8892. An
+        affine fit (8.908) and an ROI-size covariate (8.978) add nothing over
+        the one scalar.
+
+        Default 1.0 is a no-op, so nothing changes unless a fitted value is
+        passed deliberately. The scale is protocol-specific and checkpoint-
+        specific: refit it whenever either changes, and note that the root fix
+        is to match the training mask distribution to the generation protocol,
+        which would also move placement but invalidates every existing
+        comparison.
+        """
+        if count_scale == 1.0:
+            return counts
+        if count_scale <= 0.0:
+            raise ValueError(f"count_scale must be positive, got {count_scale}")
+        return (counts.float() * float(count_scale)).round().to(counts.dtype)
+
     def soft_activity_flat(self, out, roi_mask=None):
         return self.activity_prob_flat(out, roi_mask=roi_mask)
 
@@ -1339,6 +1436,98 @@ class MaskGITActivityPrior(nn.Module):
             out, roi_mask=roi_mask, count_mode=count_mode,
             count_temperature=count_temperature,
             count_stochastic_round=count_stochastic_round,
+        )
+
+    @torch.no_grad()
+    def sample_hard_activity_gumbel_topk(
+        self,
+        out: Dict[str, torch.Tensor],
+        roi_mask: Optional[torch.Tensor] = None,
+        count_mode: str = "expected",
+        count_temperature: float = 1.0,
+        count_stochastic_round: bool = False,
+        tau: float = 1.0,
+        count_scale: float = 1.0,
+    ) -> torch.Tensor:
+        """A DRAW of K distinct active cells, probability proportional to
+        p^(1/tau). This is the sampling counterpart of
+        ``sample_hard_activity_topk``, which is a MAP point estimate.
+
+        Use this whenever the map feeds a generative pipeline whose output is
+        scored distributionally; use the topk version for F1 and other
+        agreement-with-one-target metrics. Getting this backwards makes the
+        metric penalise a sharper model: a deterministic top-K over a confident
+        field returns the same concentrated cells every time, so the generated
+        ensemble is under-dispersed and its avalanche/ISI statistics degrade as
+        the model improves. Measured on three Stage 4B checkpoints, switching
+        this readout moved the generation composite +0.051 to +0.063 (t 13-14
+        over 4 paired seeds), more than the entire model-to-oracle gap -- and a
+        perfect oracle map read out deterministically still scored BELOW a
+        trained model read out this way.
+
+        Gumbel top-K: adding Gumbel(0,1) noise to log-probabilities and taking
+        the top K is exactly sampling K distinct items without replacement with
+        probability proportional to p (Plackett-Luce). tau=1.0 is the exact
+        draw; tau -> 0 collapses back to ``sample_hard_activity_topk``.
+
+        The count is taken from the same ``select_counts`` call the
+        deterministic path uses, so the two readouts place an IDENTICAL number
+        of cells and differ only in which. ``count_mode="categorical"`` is
+        available but measured worse than ``"expected"`` here (composite 0.7287
+        vs 0.7417): the count posterior's spread degrades the decoded count
+        error without buying diversity that helps.
+        """
+        counts = self.select_counts(
+            out["count_logits"], mode=count_mode,
+            temperature=count_temperature, stochastic_round=count_stochastic_round,
+        )
+        counts = self._apply_count_scale(counts, count_scale)
+        score = self.activity_prob_flat(out, roi_mask=roi_mask)
+        device = score.device
+        B = score.shape[0]
+        if roi_mask is not None:
+            roi = (roi_mask.squeeze(-1) if roi_mask.dim() == 3 else roi_mask).bool()
+        else:
+            roi = torch.ones_like(score, dtype=torch.bool)
+
+        logits = score.float().clamp_min(1e-9).log() / max(float(tau), 1e-6)
+        u = torch.rand_like(logits).clamp_(1e-9, 1.0 - 1e-9)
+        perturbed = (logits - torch.log(-torch.log(u))).masked_fill(~roi, -1e9)
+
+        activity = torch.zeros(B, self.Ntok, device=device, dtype=torch.long)
+        for b in range(B):
+            nv = int(roi[b].sum().item())
+            n = int(counts[b].clamp(0, min(self.Kmax, max(nv, 0))).item())
+            if n <= 0:
+                continue
+            activity[b, torch.topk(perturbed[b], k=n).indices] = 1
+        return activity
+
+    def sample_hard_activity_for_generation(
+        self, out, roi_mask=None, readout: str = "gumbel",
+        tau: float = 1.0, count_mode: str = "expected",
+        count_scale: float = 1.0,
+    ) -> torch.Tensor:
+        """Single entry point for the generation path, so the readout is one
+        named choice rather than a call site that silently means MAP.
+
+        ``count_scale`` recalibrates the predicted ROI count; see
+        ``_apply_count_scale``. It is 1.0 (no-op) unless a value fitted on train
+        clips under this protocol is passed in."""
+        if readout == "topk":
+            return self.sample_hard_activity_topk(
+                out, roi_mask=roi_mask, count_mode=count_mode,
+                count_temperature=1.0, count_stochastic_round=False,
+                count_scale=count_scale,
+            )
+        if readout == "gumbel":
+            return self.sample_hard_activity_gumbel_topk(
+                out, roi_mask=roi_mask, count_mode=count_mode, tau=tau,
+                count_scale=count_scale,
+            )
+        raise ValueError(
+            f"Unsupported activity readout={readout!r}. Use 'gumbel' (a draw, "
+            "correct for distributional scoring) or 'topk' (MAP, correct for F1)."
         )
 
     @torch.no_grad()

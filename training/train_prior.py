@@ -5,13 +5,14 @@ import os
 import torch
 import torch.nn.functional as F
 
-from typing import Union
+from typing import Union, Optional
 
 from ..model.prior import (
     build_activity_targets_from_codes,
 )
 
 from ..inference.decode import decode_motif_logits_soft_given_activity
+from .stage4d_adapt import build_adapted_motif_io, adapt_probability
 
 from ..utils.losses import (
     ctx_loss_soft,
@@ -329,6 +330,17 @@ def train_motif_prior_mgit(
     memory_adj=None,
     memory_tok=None,
     memory_adj_conf_den_scale: float = 100.0,
+    # ---- Stage 4D: adapt to the activity maps Stage 4B actually emits -----
+    # None keeps this function bit-identical to Stage 4A. See
+    # training/stage4d_adapt.py for why the adaptation runs on 4A rather than
+    # on 4B (unbiased gradients over a frozen sampling distribution, versus a
+    # straight-through surrogate through a top-K selection).
+    adapt_activity_prior=None,
+    adapt_ramp_epochs: int = 20,
+    adapt_max_p: float = 0.8,
+    adapt_readout: str = "gumbel",
+    adapt_readout_tau: float = 1.0,
+    adapt_soft_field: bool = True,
 ):
     """
     Stage 4A.
@@ -392,8 +404,10 @@ def train_motif_prior_mgit(
         )
         return a_in, f_in, targets
 
-    def _run_epoch(loader, train: bool):
+    def _run_epoch(loader, train: bool, adapt_p: Optional[float] = None):
         motif_prior.train(train)
+        if adapt_activity_prior is not None:
+            adapt_activity_prior.eval()
 
         total_loss = 0.0
         total_cnt = 0.0
@@ -435,7 +449,22 @@ def train_motif_prior_mgit(
                 codes, pmask, grid = _vq_codes_and_pmask_for_prior(
                     vqvae, x, gct, lct, mask_spec, device
                 )
-                a_in, f_in, targets = _make_motif_io(codes, pmask)
+                if adapt_activity_prior is None:
+                    a_in, f_in, targets = _make_motif_io(codes, pmask)
+                    activity_prob = None
+                else:
+                    a_in, f_in, targets, activity_prob = build_adapted_motif_io(
+                        motif_prior=motif_prior,
+                        activity_prior=adapt_activity_prior,
+                        codes=codes, predict_mask=pmask,
+                        global_ctx=gct, local_ctx=lct, task_id=task_id,
+                        blank_code=blank_code,
+                        p_model=float(adapt_p if adapt_p is not None else 0.0),
+                        readout=adapt_readout, readout_tau=adapt_readout_tau,
+                        full_mask_prob=full_mask_prob,
+                        ensure_at_least_one_mask=ensure_at_least_one_mask,
+                        use_soft_field=bool(adapt_soft_field),
+                    )
 
             if train:
                 if (it - 1) % grad_accum_steps == 0:
@@ -450,6 +479,7 @@ def train_motif_prior_mgit(
                         task_id=task_id,
                         targets=targets,
                         loss_weights=loss_weights,
+                        activity_prob=activity_prob,
                     )
                     
                     loss_ce_raw = loss_ce
@@ -658,6 +688,7 @@ def train_motif_prior_mgit(
                         task_id=task_id,
                         targets=targets,
                         loss_weights=loss_weights,
+                        activity_prob=activity_prob,
                     )
                     
                     loss_ce_raw = loss_ce
@@ -989,7 +1020,10 @@ def train_motif_prior_mgit(
         # No teacher-forcing schedule: there is no second cascade stage to
         # condition on a committed parent. One flat head, trained against its
         # own predictions throughout.
-        train_m = _run_epoch(train_loader, train=True)
+        # Linear ramp from Stage 4A's own regime (p=0) to adapt_max_p.
+        adapt_p = (adapt_probability(ep, adapt_ramp_epochs, adapt_max_p)
+                   if adapt_activity_prior is not None else None)
+        train_m = _run_epoch(train_loader, train=True, adapt_p=adapt_p)
 
         if val_loader is None:
             val_m = train_m
@@ -1005,13 +1039,32 @@ def train_motif_prior_mgit(
                 torch.manual_seed(int(val_mask_seed))
                 if torch.cuda.is_available():
                     torch.cuda.manual_seed_all(int(val_mask_seed))
-                val_m = _run_epoch(val_loader, train=False)
+                val_m = _run_epoch(
+                    val_loader, train=False,
+                    adapt_p=(1.0 if adapt_activity_prior is not None else None))
+                if adapt_activity_prior is not None:
+                    # Oracle arm, same seed so the corruption pattern matches
+                    # and the two arms differ only in the activity map. Logged,
+                    # never selected on: it is the guard that adapting to a
+                    # noisy map has not destroyed the model's ability to use a
+                    # good one, which the inpainting tasks still need.
+                    torch.manual_seed(int(val_mask_seed))
+                    if torch.cuda.is_available():
+                        torch.cuda.manual_seed_all(int(val_mask_seed))
+                    oracle_m = _run_epoch(val_loader, train=False, adapt_p=0.0)
+                    val_m = dict(val_m)
+                    val_m["oracle_mrr_z1"] = oracle_m["mrr_z1"]
+                    val_m["oracle_mean_rank_z1"] = oracle_m["mean_rank_z1"]
+                    val_m["oracle_loss_ce"] = oracle_m["loss_ce"]
+                    val_m["adapt_p"] = float(adapt_p)
             finally:
                 torch.set_rng_state(cpu_state)
                 if cuda_state is not None:
                     torch.cuda.set_rng_state_all(cuda_state)
         else:
-            val_m = _run_epoch(val_loader, train=False)
+            val_m = _run_epoch(
+                val_loader, train=False,
+                adapt_p=(1.0 if adapt_activity_prior is not None else None))
 
         history["train"].append(train_m)
         history["val"].append(val_m)
@@ -1041,6 +1094,9 @@ def train_motif_prior_mgit(
             f"H_z2={val_m['entropy_z2']:.3f} "
             f"CE-H_z1={val_m['ce_minus_entropy_z1']:.3f} "
             f"CE-H_z2={val_m['ce_minus_entropy_z2']:.3f} "
+            + (f"p={val_m['adapt_p']:.2f} "
+               f"ORACLEmrr={val_m['oracle_mrr_z1']:.4f} "
+               if 'oracle_mrr_z1' in val_m else "") +
             f"act/sample={val_m['active_tokens_per_sample']:.1f} "
             f"sup_z1/sample={val_m['supervised_z1_tokens_per_sample']:.1f} "
             f"sup_z2/sample={val_m['supervised_z2_tokens_per_sample']:.1f}"

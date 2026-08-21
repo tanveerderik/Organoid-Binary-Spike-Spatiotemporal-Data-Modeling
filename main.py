@@ -216,7 +216,18 @@ STAGE4B_MASKGIT_HYPERPARAMETERS = {
     # F1/AUPRC (both rank-based, blind to it) and destroys calibration, which is
     # the property a sampled prior actually needs.
     "pos_weight": 1.0,
-    "lambda_count": 1.0,
+    # 0.065, not 1.0. The nominal weights were equal but the terms are not
+    # commensurable: count is a (Kmax+1)=257-way cross-entropy (~3.9) while bce
+    # is a mean over 1024 cells (~0.21). Measured gradient into the SHARED trunk
+    # was 7.934 from count against 0.516 from bce -- count supplied 93.9% of the
+    # learning signal and the per-cell map, which is the thing being sampled,
+    # got 6%. 0.065 equalises the two (see tmp/grad_balance_4b.py).
+    #
+    # Same reasoning already applied to lambda_spatial below; count was missed.
+    # Count is a per-clip scalar and converges easily, so it can afford this:
+    # the composite's decoded_count_consistency (0.15) and
+    # activity_count_consistency (0.05) terms will catch it if it cannot.
+    "lambda_count": 0.065,
     "lambda_adj_t": 0.10,
     "lambda_adj_s": 0.10,
     # loss_spatial lands near 8.0 against ~1.6 for BCE, so its weight is scaled
@@ -235,9 +246,83 @@ STAGE4B_MASKGIT_HYPERPARAMETERS = {
     # samples correctly from one that does not -- a run selected on F1 here once
     # scored best-in-ladder AUPRC while being worse-calibrated than the
     # per-assay marginal. Not NLL either: diagnostic, but a loss.
-    "select_on": "generation",
+    # Epoch selection is on val NLL, NOT the generation composite. Measured
+    # Fri 2026-08-21 with 3 sampling seeds averaged per epoch (selection noise
+    # sd 0.0044), the composite is statistically independent of every axis on
+    # which the model improves -- corr with AUPRC -0.0221 (t=-0.14), val NLL
+    # +0.0506 (t=+0.32), hard F1 -0.0300 (t=-0.19), epoch -0.0379 (t=-0.24) over
+    # 43 epochs. Worse, it is anti-correlated with placement accuracy: swapping
+    # in the TRUE activity as the ranking score at the model's own count raises
+    # hard_exact_f1 0.647 -> 0.918 and LOWERS the composite by 0.0127 (t=-2.95).
+    # A metric that ranks the ground truth below the model cannot select epochs.
+    #
+    # The damage was concrete. Run 1 was early-stopped at ep126 with val NLL
+    # 0.1032 and AUPRC 0.7845 both still improving -- no plateau on any axis --
+    # and handed over ep66. Run 2's argmax sat at ep15 (AUPRC 0.659) while ep50
+    # reached 0.725, then "improved" at ep62 by 0.0005, an eighth of the seed
+    # noise. 4B has never been trained to convergence.
+    #
+    # NLL rather than AUPRC because gumbel top-K draws K distinct cells with
+    # probability proportional to p: the calibrated probability field is what
+    # the sampler consumes, not just its ranking. NLL is the proper scoring rule
+    # for exactly that object, and it is low-noise and monotone.
+    #
+    # The composite keeps its job as the ACCEPTANCE metric, where the
+    # differences it must resolve are large (the readout change was
+    # +0.051..+0.063) rather than epoch-scale. Its weights were re-validated by
+    # Dirichlet perturbation and LOO and were never the problem.
+    "select_on": "nll",
+    # Gumbel top-K, not the deterministic top-K used before 2026-08-20.
+    #
+    # The old readout was a MAP point estimate -- sample_hard_activity_topk's own
+    # docstring says "it is not a sample" -- yet the composite scores the
+    # DISTRIBUTION of generated statistics. A confident map returns the same
+    # concentrated cells every draw, so the generated ensemble was
+    # under-dispersed and the metric got WORSE as the model got better: over
+    # three checkpoints spanning AUPRC .70-.76, distribution_match fell
+    # monotonically 0.567 -> 0.520 -> 0.500 while AUPRC rose. It selected the
+    # blurriest checkpoint, and ranked a worse model above a better one
+    # (paired -0.0196, t=-16).
+    #
+    # Switching the readout is worth +0.051 to +0.063 on the composite (t 13-14,
+    # 4 paired seeds, all three checkpoints) -- more than the entire
+    # model-to-oracle gap, and enough that a trained model read out this way
+    # beats a PERFECT oracle map read out deterministically. On the reference
+    # ladder it moves the distribution subscore from 37% to 59% of
+    # floor->ceiling, ~4x the metric's resolution limit.
+    #
+    # F1 and the other hard_* statistics are unaffected: _hard_activity_batch_stats
+    # calls the deterministic readout itself, which is correct -- F1 grades
+    # agreement with one target, and a draw is not a point estimate.
+    "activity_readout": "gumbel",
+    # 1.0 is the exact Plackett-Luce draw. 0.5 recovers only half the gain
+    # (0.7135 vs 0.7417) and tau->0 is the old behaviour.
+    "activity_readout_tau": 1.0,
+    # Multiplicative recalibration of the count head at GENERATION time. 1.0 is
+    # a no-op and is the shipped default until a value is fitted and measured.
+    #
+    # The head is unbiased under the random masks it trains on
+    # (count_expected_mean 39.79 vs count_target_mean 40.01) but over-predicts
+    # by +13.2% on train clips and +15.2% on val clips under
+    # deterministic_validation_task_and_masks -- the protocol validation AND
+    # generation use, whose ROI-size distribution the head never saw. Fitting one
+    # scale on TRAIN clips under that protocol (disjoint clips, no leakage) took
+    # held-out count MAE 10.500 -> 8.913 and bias +15.2% -> +2.4% at a = 0.8892;
+    # affine (8.908) and an ROI-size covariate (8.978) add nothing over it.
+    #
+    # Not enabled by default because the direction on the composite is not
+    # obvious: the decode path already under-produces spikes by 25.5pp, so the
+    # activity over-count may have been partly compensating. Refit per
+    # checkpoint and measure before turning it on.
+    "activity_count_scale": 1.0,
     "generation_val_max_batches": 4,
     "generation_motif_steps": 12,
+    # Seeds averaged per epoch before selecting. 1 seed carries sd 0.0076 under
+    # the gumbel readout while the genuine epoch-to-epoch spread is only ~0.0081,
+    # so single-seed selection picks among statistical ties -- which is also why
+    # the Dirichlet weight-perturbation stability fell 90% -> 75% when the
+    # readout changed. 3 seeds brings selection noise to 0.0044.
+    "generation_selection_seeds": 3,
     "warmup_epochs": 5,
     "save_start_epoch": 10,
     "early_stop_patience": 30,
@@ -304,7 +389,27 @@ STAGE4C_HYPERPARAMETERS = {
     # twenty epochs is very little actual movement and "no improvement" is weaker
     # evidence of convergence here than the same count would be in Stage 4B.
     "early_stop_patience": 45,
-    "generation_val_max_batches": 4,
+    # Must match Stage 4B: 4C refines the same activity prior and is selected
+    # on the same composite, so a different readout would make the two
+    # incomparable. See STAGE4B_MASKGIT_HYPERPARAMETERS for the evidence.
+    "activity_readout": "gumbel",
+    "activity_readout_tau": 1.0,
+    # Must match Stage 4B -- see the note on the 4B key.
+    "activity_count_scale": 1.0,
+    # The acceptance gate's evaluation budget. At the old 4 batches / 1 seed the
+    # composite carries per-seed sd 0.0076, while Stage 4C refines at lr=1e-5 and
+    # produces per-epoch changes far below that -- the gate was accepting and
+    # rejecting on sampling noise. Two independent knobs shrink it: more val
+    # batches (sd 0.0076 -> 0.0042 going 4 -> 8, because the three distribution
+    # terms are finite-sample statistics) and averaging seeds (1/sqrt(k)).
+    # Together 8 batches x 4 seeds gives ~0.0021.
+    #
+    # Raising max_batches also RAISES the composite's absolute value (+0.036 from
+    # 4 to 8 on a fixed checkpoint), so 4C numbers are not comparable to 4B
+    # numbers recorded at 4 batches. Inside 4C the comparison stays valid because
+    # the baseline is scored at the same budget as every candidate.
+    "generation_val_max_batches": 8,
+    "generation_selection_seeds": 4,
     "generation_motif_steps": 12,
     "deterministic_validation_masks": True,
     "hard_activity_mode": "expected-count unique grid top-K straight-through",
@@ -378,6 +483,15 @@ CKPTS = {
 
     # --- Stage 4: prior ---
     "motif_prior_best": CKPT_DIR / "motif_prior_best.pt",
+    # Stage 4D: 4A adapted to the activity maps 4B actually produces. This is
+    # the prior we SHIP -- evaluation and generation load it, and it must be
+    # paired with a soft activity field (generate_regimes --activity-field soft).
+    # Feeding it a hard 0/1 map is measurably WORSE than the unadapted 4A, so
+    # the two are not separable options.
+    # Training paths deliberately keep loading "motif_prior_best": 4B and 4C
+    # were defined against the teacher-forced control, and quietly swapping it
+    # would make their frozen teacher circular (4D was trained against 4B).
+    "motif_prior_ship": CKPT_DIR / "motif_prior_adapt_best.pt",
     # Legacy alias retained for external scripts. New Stage 4B runs write this
     # alias from the generation-aligned hard-metric checkpoint.
     "activity_prior_best": CKPT_DIR / "activity_prior_best.pt",
@@ -1561,6 +1675,13 @@ def _load_activity_state_compat(
     allowed_missing = {
         "count_event_film.weight",
         "count_event_film.bias",
+        # Per-cell query conditioning, added 2026-08-20. Both are zero-
+        # initialised, so a checkpoint that predates them loads to a model that
+        # is numerically identical to the one that produced it -- absence is a
+        # missing extension, not a mismatch. Kept in this list rather than
+        # relaxing the check: a genuinely wrong checkpoint must still raise.
+        "q_a_emb.weight",
+        "q_roi_emb.weight",
     }
     if coordinate_partial:
         if model_mode == "joint_dense":
@@ -1689,8 +1810,20 @@ def _resolve_stage4_kmax(model, train_loader, device):
     return int(stage4_kmax)
 
 
-def _load_stage4_motif_best(prior, device):
-    path = CKPTS["motif_prior_best"]
+def _load_stage4_motif_best(prior, device, *, prefer_adapted: bool = False,
+                            path=None):
+    """Load the motif prior.
+
+    prefer_adapted=True picks the Stage 4D adapted checkpoint when it exists,
+    falling back to the Stage 4A control. Evaluation and generation want the
+    adapted one; 4B/4C TRAINING wants the control, because that is the teacher
+    they were defined against.
+    """
+    if path is None:
+        ship = CKPTS.get("motif_prior_ship")
+        path = ship if (prefer_adapted and ship is not None and ship.exists()) \
+            else CKPTS["motif_prior_best"]
+    path = Path(path)
     if not path.exists():
         raise FileNotFoundError(
             f"Missing Stage 4A checkpoint: {path}. Run with "
@@ -1698,7 +1831,8 @@ def _load_stage4_motif_best(prior, device):
         )
     ckpt = torch.load(path, map_location=device)
     prior.motif_prior.load_state_dict(ckpt["model"], strict=True)
-    print(f"Loaded Stage 4A motif checkpoint: {path}")
+    tag = "4D adapted" if path == CKPTS.get("motif_prior_ship") else "4A"
+    print(f"Loaded Stage {tag} motif checkpoint: {path}")
 
 
 def _load_stage4_activity_best(prior, model, device):
@@ -1894,6 +2028,10 @@ def run_stage4b(prior, model, train_loader, val_loader, device):
         lambda_adj_t=float(dcfg["lambda_adj_t"]),
         lambda_adj_s=float(dcfg["lambda_adj_s"]),
         lambda_spatial=float(dcfg["lambda_spatial"]),
+        generation_selection_seeds=int(dcfg["generation_selection_seeds"]),
+        activity_readout=str(dcfg["activity_readout"]),
+        activity_readout_tau=float(dcfg["activity_readout_tau"]),
+        activity_count_scale=float(dcfg["activity_count_scale"]),
         random_mask_prob=float(dcfg["random_mask_prob"]),
         random_mask_ratio=tuple(dcfg["random_mask_ratio"]),
         select_on=str(dcfg["select_on"]),
@@ -1990,6 +2128,10 @@ def run_stage4c(prior, model, train_loader, val_loader, device):
         isi_max_gap=max_gap_from_bins(gap_bins),
         generation_val_max_batches=int(config["generation_val_max_batches"]),
         generation_motif_steps=int(config["generation_motif_steps"]),
+        activity_readout=str(config["activity_readout"]),
+        activity_readout_tau=float(config["activity_readout_tau"]),
+        activity_count_scale=float(config["activity_count_scale"]),
+        generation_selection_seeds=int(config["generation_selection_seeds"]),
         deterministic_val_masks=bool(config["deterministic_validation_masks"]),
         hard_tolerance=STAGE4_HARD_TOLERANCE,
         null_baselines=_NULL_BASELINES,
@@ -2106,6 +2248,8 @@ def _load_stage4_eval_prior(
     phase: str,
     load_generation_memories: bool = False,
     load_motif: bool = True,
+    motif_ckpt=None,
+    prefer_adapted_motif: bool = True,
 ):
     phase = str(phase).lower()
     if phase not in ("4a", "4b", "4c"):
@@ -2141,7 +2285,8 @@ def _load_stage4_eval_prior(
         coordinate_mode=activity_coordinate_mode,
     )
     if load_motif:
-        _load_stage4_motif_best(prior, device)
+        _load_stage4_motif_best(prior, device, path=motif_ckpt,
+                                prefer_adapted=prefer_adapted_motif)
 
     if activity_ckpt_path is not None:
         activity_ckpt = torch.load(

@@ -846,6 +846,19 @@ def evaluate_true_stage4_generation(
     gap_bins=((1, 1), (2, 2), (3, 3)),
     deterministic_masks: bool = True,
     seed: int = 314159,
+    # How the activity map is read out for GENERATION. "gumbel" draws K distinct
+    # cells with probability ~ p; "topk" is the old deterministic MAP readout.
+    # The hard/F1 statistics below always use MAP regardless of this setting --
+    # see _hard_activity_batch_stats -- because F1 grades agreement with one
+    # target and a draw is not a point estimate.
+    activity_readout: str = "gumbel",
+    activity_readout_tau: float = 1.0,
+    # Multiplicative recalibration of the predicted ROI count. 1.0 is a no-op.
+    # The count head is unbiased under the random TRAINING masks but
+    # over-predicts ~15% under the deterministic masks used here and at
+    # generation; a scale fitted on train clips under this protocol removes it.
+    # See MaskGITActivityPrior._apply_count_scale.
+    activity_count_scale: float = 1.0,
 ) -> Dict[str, float]:
     """Evaluate the exact hard activity -> MaskGIT -> VQ-VAE path."""
     device = next(activity_prior.parameters()).device
@@ -917,12 +930,13 @@ def evaluate_true_stage4_generation(
                 count_target=None,
                 count_teacher_prob=0.0,
             )
-            hard_roi = activity_prior.sample_hard_activity_gridtopk(
+            hard_roi = activity_prior.sample_hard_activity_for_generation(
                 activity_output,
-                count_mode="expected",
-                count_temperature=1.0,
-                count_stochastic_round=False,
                 roi_mask=predict_mask,
+                readout=str(activity_readout),
+                tau=float(activity_readout_tau),
+                count_mode="expected",
+                count_scale=float(activity_count_scale),
             ).long()
             roi = predict_mask.squeeze(-1) if predict_mask.dim() == 3 else predict_mask
             roi = roi.bool()
@@ -1184,6 +1198,12 @@ def evaluate_true_stage4_generation(
         "global_adjacency_mae": global_adjacency_error,
         "decoded_spatial_support_violation": spatial_violation,
         "spatial_support_metric_source": spatial_source,
+        # Provenance: a composite scored under a different readout is not
+        # comparable. Reports written before 2026-08-20 have no such key
+        # and were all "topk".
+        "activity_readout": str(activity_readout),
+        "activity_readout_tau": float(activity_readout_tau),
+        "activity_count_scale": float(activity_count_scale),
         "generation_metric": float(generation_metric),
         "generation_metric_formula": STAGE4C_GENERATION_COMPOSITE_FORMULA,
         "deterministic_validation_masks": bool(deterministic_masks),
@@ -1275,6 +1295,22 @@ def train_activity_prior_with_frozen_motif(
     memory_adj_conf_den_scale: float = 100.0,
     generation_val_max_batches: int = 4,
     generation_motif_steps: int = 12,
+    # Generation readout, shared with Stage 4B. "gumbel" is a real draw from the
+    # activity posterior; "topk" is the pre-2026-08-20 deterministic MAP readout,
+    # kept so earlier numbers can be reproduced. See
+    # MaskGITActivityPrior.sample_hard_activity_gumbel_topk.
+    activity_readout: str = "gumbel",
+    activity_readout_tau: float = 1.0,
+    activity_count_scale: float = 1.0,
+    # Sampling seeds averaged before the acceptance gate compares a candidate to
+    # the baseline. The composite is a DRAW under the gumbel readout, so a
+    # single-seed score carries sd ~0.0076 at 4 val batches and ~0.0042 at 8 --
+    # far larger than anything an lr=1e-5 refinement produces in one epoch, so a
+    # single-seed gate accepts and rejects on noise. Averaging k seeds divides
+    # that by sqrt(k). The baseline is averaged over the SAME number of seeds,
+    # otherwise the two sides of the comparison have different noise floors.
+    # Masks stay deterministic; only the sampling seed varies.
+    generation_selection_seeds: int = 1,
     # Optional matched-null reference. Pass the payload from
     # training.baselines.build_null_baselines to score null0/null1/null2
     # alongside the model in every hard-activity report.
@@ -1348,21 +1384,52 @@ def train_activity_prior_with_frozen_motif(
         key: value.detach().cpu().clone()
         for key, value in activity_prior.state_dict().items()
     }
-    baseline_metrics = evaluate_true_stage4_generation(
-        activity_prior,
-        motif_prior,
-        vqvae,
-        val_loader,
-        blank_code=blank_code,
-        max_batches=generation_val_max_batches,
-        motif_steps=generation_motif_steps,
-        hard_tolerance=hard_tolerance,
-        gap_bins=gap_bins,
-        deterministic_masks=deterministic_val_masks,
-        seed=generation_seed,
-        null_baselines=null_baselines,
-        null_seed=null_seed,
-    )
+    def _generation_scored(n_seeds: int) -> Dict[str, float]:
+        """The generation composite, averaged over n sampling seeds.
+
+        Used for BOTH the baseline and every candidate so the acceptance gate
+        compares two estimates with the same noise floor. See
+        generation_selection_seeds.
+        """
+        n = max(1, int(n_seeds))
+        runs = [
+            evaluate_true_stage4_generation(
+                activity_prior,
+                motif_prior,
+                vqvae,
+                val_loader,
+                blank_code=blank_code,
+                max_batches=generation_val_max_batches,
+                motif_steps=generation_motif_steps,
+                hard_tolerance=hard_tolerance,
+                gap_bins=gap_bins,
+                deterministic_masks=deterministic_val_masks,
+                seed=int(generation_seed) + 1009 * i,
+                activity_readout=activity_readout,
+                activity_readout_tau=activity_readout_tau,
+                activity_count_scale=activity_count_scale,
+                null_baselines=null_baselines,
+                null_seed=int(null_seed) + 1009 * i,
+            )
+            for i in range(n)
+        ]
+        if n == 1:
+            return runs[0]
+        avg = dict(runs[0])
+        for k in runs[0]:
+            vals = [r[k] for r in runs
+                    if isinstance(r.get(k), (int, float))
+                    and not isinstance(r.get(k), bool)]
+            if len(vals) == n:
+                avg[k] = float(sum(vals) / n)
+        scores = [float(r["generation_metric"]) for r in runs]
+        mean = sum(scores) / n
+        avg["generation_metric_seed_sd"] = float(
+            (sum((v - mean) ** 2 for v in scores) / max(n - 1, 1)) ** 0.5)
+        avg["generation_selection_seeds"] = int(n)
+        return avg
+
+    baseline_metrics = _generation_scored(generation_selection_seeds)
     print(
         "[4C baseline hard generation] "
         f"score={baseline_metrics['generation_metric']:.6f} "
@@ -1698,8 +1765,39 @@ def train_activity_prior_with_frozen_motif(
             visible_gt_k = ((~roi) & motif_targets["active"].bool()).sum(dim=1).float().mean()
             full_activity_k = activity_full_st.detach().sum(dim=1).mean()
             target_roi_k = (roi & motif_targets["active"].bool()).sum(dim=1).float().mean()
+            # Motif MRR: the rank of the TRUE 961-way code under the frozen
+            # motif prior, given this epoch's activity map. Logged only -- the
+            # selector is still the generation composite. It is here because 4C
+            # is the 4A+4B merger (activity probabilities feed
+            # forward_with_activity_prob, whose output is soft-decoded to a
+            # voxel volume), so a 961-way ranking of the merged output is
+            # well-defined, deterministic and noise-free, unlike the composite.
+            # Whether it should SELECT is an empirical question this logging
+            # answers: correlate it against the composite across epochs the way
+            # the 4B orthogonality test did.
+            with torch.no_grad():
+                flat_logits = motif_logits["flat"].detach().float()
+                flat_target = motif_targets["f"].long()
+                flat_mask = motif_inputs["targets"]["f_loss_mask"].bool()
+                true_logit = flat_logits.gather(
+                    -1, flat_target.clamp_min(0).unsqueeze(-1)
+                ).squeeze(-1)
+                # Rank = how many codes strictly outscore the true one, +1. Ties
+                # therefore favour the model; with 961 continuous logits exact
+                # ties are vanishingly rare.
+                flat_rank = (flat_logits > true_logit.unsqueeze(-1)).sum(-1) + 1
+                reciprocal = torch.where(
+                    flat_mask, 1.0 / flat_rank.float(), torch.zeros_like(true_logit)
+                )
+                per_sample = reciprocal.sum(dim=1) / flat_mask.sum(dim=1).clamp_min(1).float()
+                motif_mrr = per_sample.mean()
+                motif_medrank = flat_rank[flat_mask].float().median() if bool(flat_mask.any()) \
+                    else torch.zeros((), device=flat_rank.device)
+
             metrics = {
                 "loss": loss,
+                "motif_mrr": motif_mrr,
+                "motif_median_rank": motif_medrank,
                 "loss_activity": loss_activity,
                 "loss_ctx": loss_ctx,
                 "loss_ctx_field": loss_ctx_field,
@@ -1790,21 +1888,7 @@ def train_activity_prior_with_frozen_motif(
     for epoch in range(1, int(epochs) + 1):
         train_metrics = _run_epoch(train_loader, train=True, epoch=epoch)
         validation_metrics = _run_epoch(val_loader, train=False, epoch=epoch)
-        generation_metrics = evaluate_true_stage4_generation(
-            activity_prior,
-            motif_prior,
-            vqvae,
-            val_loader,
-            blank_code=blank_code,
-            max_batches=generation_val_max_batches,
-            motif_steps=generation_motif_steps,
-            hard_tolerance=hard_tolerance,
-            gap_bins=gap_bins,
-            deterministic_masks=deterministic_val_masks,
-            seed=generation_seed,
-            null_baselines=null_baselines,
-            null_seed=null_seed,
-        )
+        generation_metrics = _generation_scored(generation_selection_seeds)
         history["train"].append(train_metrics)
         history["val"].append(validation_metrics)
         history["generation_val"].append(generation_metrics)
@@ -1838,6 +1922,8 @@ def train_activity_prior_with_frozen_motif(
             f"targetRoiK={validation_metrics['target_roiK']:.2f} "
             f"exactF1={generation_metrics['hard_exact_f1']:.4f} "
             f"tolF1={generation_metrics['hard_tolerance_f1']:.4f} "
+            f"mrr={validation_metrics['motif_mrr']:.5f} "
+            f"medRk={validation_metrics['motif_median_rank']:.1f} "
             f"decodedRelErr={generation_metrics['decoded_spike_count_relative_error']:.4f} "
             f"genScore={generation_metrics['generation_metric']:.6f} "
             f"peakMB={validation_metrics['peak_gpu_memory_mb']:.1f} "
@@ -2057,6 +2143,20 @@ def train_maskgit_activity_prior(
     # printed warning. 4B has no earlier baseline to stay comparable with, so it
     # scores the whole composite.
     generation_gap_bins=DEFAULT_GAP_BINS,
+    # Generation readout. "gumbel" is a real draw from the activity posterior;
+    # "topk" is the pre-2026-08-20 deterministic MAP readout, kept so old
+    # numbers can be reproduced. See sample_hard_activity_gumbel_topk.
+    # Seeds averaged when scoring an epoch for SELECTION. The composite is
+    # sampled, so a single-seed score carries sd ~0.0076 under the gumbel
+    # readout while the real epoch-to-epoch spread is only ~0.0081 -- about
+    # half of what looks like a trajectory is sampling noise, and the argmax
+    # wanders among statistical ties. Averaging k seeds divides that sd by
+    # sqrt(k): 4 seeds -> 0.0038, 8 -> 0.0027. Masks stay deterministic, so
+    # this averages sampling noise only.
+    generation_selection_seeds: int = 1,
+    activity_readout: str = "gumbel",
+    activity_readout_tau: float = 1.0,
+    activity_count_scale: float = 1.0,
     null_baselines=None,
 ):
     """Train the dense activity prior.
@@ -2170,18 +2270,46 @@ def train_maskgit_activity_prior(
                 # expensive path, and epochs before the handoff are not
                 # legitimate candidates anyway.
                 if epoch >= int(save_start_epoch):
-                    gen = evaluate_true_stage4_generation(
-                        activity_prior,
-                        motif_prior,
-                        vqvae,
-                        val_loader,
-                        blank_code=blank_code,
-                        max_batches=int(generation_val_max_batches),
-                        motif_steps=int(generation_motif_steps),
-                        null_baselines=null_baselines,
-                        gap_bins=generation_gap_bins,
-                        deterministic_masks=deterministic_val_masks,
-                    )
+                    # Average the composite over several sampling seeds before
+                    # selecting. See generation_selection_seeds: one seed is
+                    # noisier (sd ~0.0076) than the differences being ranked.
+                    n_sel = max(1, int(generation_selection_seeds))
+                    gen_runs = []
+                    for _s in range(n_sel):
+                        gen_runs.append(evaluate_true_stage4_generation(
+                            activity_prior,
+                            motif_prior,
+                            vqvae,
+                            val_loader,
+                            blank_code=blank_code,
+                            max_batches=int(generation_val_max_batches),
+                            motif_steps=int(generation_motif_steps),
+                            null_baselines=null_baselines,
+                            gap_bins=generation_gap_bins,
+                            deterministic_masks=deterministic_val_masks,
+                            activity_readout=activity_readout,
+                            activity_readout_tau=activity_readout_tau,
+                            activity_count_scale=activity_count_scale,
+                            # Distinct sampling seeds; masks stay deterministic.
+                            seed=314159 + 1009 * _s,
+                            null_seed=20240917 + 1009 * _s,
+                        ))
+                    gen = gen_runs[0]
+                    if n_sel > 1:
+                        # Mean over seeds for every numeric key, so the logged
+                        # components describe the same thing the score does.
+                        gen = dict(gen_runs[0])
+                        for k in gen_runs[0]:
+                            vals = [r[k] for r in gen_runs
+                                    if isinstance(r.get(k), (int, float))
+                                    and not isinstance(r.get(k), bool)]
+                            if len(vals) == n_sel:
+                                gen[k] = float(sum(vals) / n_sel)
+                        _sc = [float(r["generation_metric"]) for r in gen_runs]
+                        gen["generation_metric_seed_sd"] = float(
+                            (sum((v - sum(_sc) / n_sel) ** 2 for v in _sc)
+                             / max(n_sel - 1, 1)) ** 0.5)
+                        gen["generation_selection_seeds"] = int(n_sel)
                     row.update({f"gen_{k}": v for k, v in gen.items()})
                     score = float(gen["generation_metric"])
                 else:
@@ -2240,5 +2368,31 @@ def train_maskgit_activity_prior(
         if scheduler is not None:
             scheduler.step()
 
+    # Also keep the FINAL weights, not just the composite-best ones. Under the
+    # gumbel readout the composite is noise-limited across epochs (real spread
+    # ~0.0081 against single-seed noise 0.0076), so the selected epoch can have a
+    # visibly worse activity map than the last one at an indistinguishable
+    # score -- in the 126-epoch run, ep66 was selected at AUPRC 0.735 while
+    # ep126 reached 0.785. Stage 4A consumes this map un-teacher-forced, so that
+    # difference is worth being able to test rather than discard.
+    last_out = str(ckpt_out).replace(".pt", "_last.pt")
+    torch.save({
+        "model": activity_prior.state_dict(),
+        "epoch": int(epoch),
+        "select_on": select_on,
+        "score": float(score) if score == score else float("nan"),
+        "val": vm,
+        "coordinate_metadata": activity_prior.coordinate_metadata(),
+        "Kmax": int(activity_prior.Kmax),
+        "token_grid": (activity_prior.Ttok, activity_prior.Htok,
+                       activity_prior.Wtok),
+        "region_grid": getattr(activity_prior, "region_grid", None),
+        "coordinate_mode": activity_prior.coordinate_mode,
+        "arch": "maskgit",
+        "is_last_epoch": True,
+    }, last_out)
+    print(f"Saved final-epoch checkpoint: {last_out} (epoch {epoch})", flush=True)
+
     return {"history": history, "best_epoch": best_epoch,
-            "best_score": best, "select_on": select_on, "ckpt": ckpt_out}
+            "best_score": best, "select_on": select_on, "ckpt": ckpt_out,
+            "last_ckpt": last_out, "last_epoch": int(epoch)}

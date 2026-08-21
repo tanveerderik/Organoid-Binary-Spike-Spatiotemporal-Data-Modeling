@@ -12,3 +12,9 @@ ckpts_oldsplit_backup/
 reports_pre2Cfix/
 reports_oldsplit_backup/
 *.log
+
+# Generated sample sets: the mp4s and the per-sample stats/*.json are both
+# reproducible from manifest.json + run_config.json (which carry every number
+# and the exact arguments), so only those are tracked.
+reports/generation_regimes_*/*/videos/
+reports/generation_regimes_*/*/stats/

@@ -62,6 +62,7 @@ def iterative_unmask_motif_given_activity(
     steps: int = 12,
     temperature: float = 1.0,
     top_k: int = 5,
+    activity_prob=None,
 ):
     """MaskGIT sampling over the flat Stage-2B alphabet.
 
@@ -69,6 +70,27 @@ def iterative_unmask_motif_given_activity(
     alpha was a distribution over the children of ONE parent, so it had to be
     re-conditioned on the z1 actually sampled. A flat code has no parent, so
     that entire dance disappears.
+
+    ``activity`` is always the HARD map and always governs STRUCTURE: which
+    cells are active, therefore which get masked and resampled, therefore which
+    end up with a code at all. That is unchanged.
+
+    ``activity_prob`` (optional, (B,N) in [0,1]) changes only what the motif
+    prior is TOLD about each cell. Without it the activity stream is a hard
+    lookup, so a cell the activity prior was 51% sure about is presented as an
+    unqualified "active" -- the prior cannot distinguish it from a cell at 99%,
+    and has no way to hedge. With it the stream is the convex blend
+    ``(1-p)*e_blank + p*e_active``, which is exact at p in {0,1} and interpolates
+    between two embeddings the prior already understands.
+
+    Measured on 24 val batches, full-ROI protocol, paired: motif MRR
+    0.15698 -> 0.20281 (median rank 22 -> 11) on the UNADAPTED Stage 4A prior,
+    and 0.15969 -> 0.21797 (median rank 20 -> 9) on the Stage 4D adapted prior,
+    against an oracle-activity ceiling of ~0.231. Hard-clamping here was
+    discarding most of the usable signal in the activity prior's output.
+
+    Outside the ROI activity is observed rather than predicted, so the hard
+    value is used there regardless.
     """
     device = global_ctx.device
     activity = activity.to(device).long().clamp(0, 1)
@@ -102,6 +124,19 @@ def iterative_unmask_motif_given_activity(
     masked = active & roi
     f[masked] = prior.f_mask_id
 
+    if activity_prob is None:
+        a_prob = None
+    else:
+        a_prob = activity_prob.to(device=device, dtype=torch.float32)
+        if a_prob.dim() == 3 and a_prob.size(-1) == 1:
+            a_prob = a_prob.squeeze(-1)
+        if a_prob.shape != (B, N):
+            raise ValueError(
+                f"activity_prob must have shape {(B, N)}, got {tuple(a_prob.shape)}"
+            )
+        # Observed cells keep their exact value; only the predicted ROI is soft.
+        a_prob = torch.where(roi, a_prob.clamp(0.0, 1.0), a.to(a_prob.dtype))
+
     def _logits(f_state):
         out, _, _ = prior(
             a, f_state,
@@ -110,6 +145,7 @@ def iterative_unmask_motif_given_activity(
             task_id=task_id,
             roi_mask=roi_mask,
             targets=None,
+            activity_prob=a_prob,
         )
         return out["flat"]
 

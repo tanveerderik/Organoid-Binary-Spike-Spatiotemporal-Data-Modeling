@@ -1,0 +1,45 @@
+{
+  "args": {
+    "batches": 24,
+    "split": "val",
+    "seed": 20260821,
+    "protocol": "inpaint",
+    "motif_ckpt": "ckpts/motif_prior_adapt_best.pt",
+    "out": "reports/motif_robustness_inpaint_4D.json"
+  },
+  "activity_recall": 0.7205090543874677,
+  "arms": {
+    "oracle": {
+      "mrr": 0.2362862527370453,
+      "median_rank": 8.0,
+      "mean_rank": 36.50398254394531,
+      "top1": 0.09648863971233368,
+      "top10": 0.5792269110679626,
+      "n": 6778
+    },
+    "model": {
+      "mrr": 0.16628524661064148,
+      "median_rank": 18.0,
+      "mean_rank": 79.09707641601562,
+      "top1": 0.06639126688241959,
+      "top10": 0.3995278775691986,
+      "n": 6778
+    },
+    "model_soft": {
+      "mrr": 0.22455596923828125,
+      "median_rank": 9.0,
+      "mean_rank": 40.798316955566406,
+      "top1": 0.090144582092762,
+      "top10": 0.5486869215965271,
+      "n": 6778
+    },
+    "marginal": {
+      "mrr": 0.05025126412510872,
+      "median_rank": 166.0,
+      "mean_rank": 221.92431640625,
+      "top1": 0.017114192247390747,
+      "top10": 0.11050457507371902,
+      "n": 6778
+    }
+  }
+}
