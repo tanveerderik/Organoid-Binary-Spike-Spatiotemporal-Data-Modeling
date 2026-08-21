@@ -12,7 +12,7 @@ from ..model.prior import (
 )
 
 from ..inference.decode import decode_motif_logits_soft_given_activity
-from .stage4d_adapt import build_adapted_motif_io, adapt_probability
+from .stage4c_adapt import build_adapted_motif_io, adapt_probability
 
 from ..utils.losses import (
     ctx_loss_soft,
@@ -330,9 +330,9 @@ def train_motif_prior_mgit(
     memory_adj=None,
     memory_tok=None,
     memory_adj_conf_den_scale: float = 100.0,
-    # ---- Stage 4D: adapt to the activity maps Stage 4B actually emits -----
+    # ---- Stage 4C: adapt to the activity maps Stage 4B actually emits -----
     # None keeps this function bit-identical to Stage 4A. See
-    # training/stage4d_adapt.py for why the adaptation runs on 4A rather than
+    # training/stage4c_adapt.py for why the adaptation runs on 4A rather than
     # on 4B (unbiased gradients over a frozen sampling distribution, versus a
     # straight-through surrogate through a top-K selection).
     adapt_activity_prior=None,

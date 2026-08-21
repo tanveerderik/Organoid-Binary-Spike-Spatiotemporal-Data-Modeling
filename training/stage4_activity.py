@@ -46,8 +46,8 @@ from .train_prior import (
 )
 
 
-def stage4c_trainable_modules(activity_prior) -> Tuple[str, ...]:
-    """Modules Stage 4C is allowed to move.
+def stage4b_refine_trainable_modules(activity_prior) -> Tuple[str, ...]:
+    """Modules Stage 4B-refine is allowed to move.
 
     3C is a calibration pass, not a retrain: it aligns the Stage 4B prior with
     what the frozen motif prior and decoder actually do at inference, so the
@@ -66,7 +66,7 @@ def stage4c_trainable_modules(activity_prior) -> Tuple[str, ...]:
             "count_head",
         )
     raise AttributeError(
-        "Stage 4C expects a MaskGIT activity prior exposing cell_head / "
+        "Stage 4B-refine expects a MaskGIT activity prior exposing cell_head / "
         "maskgit_norm / count_head; got "
         f"{type(activity_prior).__name__}."
     )
@@ -81,7 +81,7 @@ HARD_ACTIVITY_COMPOSITE_FORMULA = (
 # exact_f1 is recorded but carries ZERO weight: it is a reconstruction metric,
 # maximised by emitting the mode, and would undo the calibration that makes the
 # prior samplable.
-STAGE4C_GENERATION_COMPOSITE_FORMULA = (
+STAGE4B_REFINE_GENERATION_COMPOSITE_FORMULA = (
     "0.35*distribution_match(1/(1+stat_error)) "
     "+ 0.15*(1-ks_avalanche) + 0.10*(1-ks_isi) "
     "+ 0.15*decoded_count_consistency + 0.05*activity_count_consistency "
@@ -91,13 +91,13 @@ STAGE4C_GENERATION_COMPOSITE_FORMULA = (
 )
 
 
-def configure_stage4c_event_calibration(activity_prior) -> list[str]:
+def configure_stage4b_refine_event_calibration(activity_prior) -> list[str]:
     """Freeze Stage 4B except the conservative event-placement allowlist."""
     for parameter in activity_prior.parameters():
         parameter.requires_grad_(False)
 
     missing = []
-    for module_name in stage4c_trainable_modules(activity_prior):
+    for module_name in stage4b_refine_trainable_modules(activity_prior):
         module = getattr(activity_prior, module_name, None)
         if module is None:
             missing.append(module_name)
@@ -106,7 +106,7 @@ def configure_stage4c_event_calibration(activity_prior) -> list[str]:
             parameter.requires_grad_(True)
     if missing:
         raise AttributeError(
-            "Stage 4C activity prior is missing required modules: "
+            "Stage 4B-refine activity prior is missing required modules: "
             + ", ".join(missing)
         )
     return [
@@ -134,7 +134,7 @@ def _validate_optimizer_scope(module, optimizer, expected_names: Sequence[str]) 
             name for name in expected_names if id(named[name]) not in optimizer_ids
         ]
         raise RuntimeError(
-            "Stage 4C optimizer does not match the event-side allowlist. "
+            "Stage 4B-refine optimizer does not match the event-side allowlist. "
             f"Unexpected={unexpected}; missing={missing}."
         )
 
@@ -821,7 +821,7 @@ def _safe_generation_global_rows(
             prob_threshold=float(vqvae.best_thr_tol.item()),
         )
     except (KeyError, RuntimeError, ValueError) as exc:
-        print(f"  [4C generation metrics] global-memory metrics unavailable: {exc}")
+        print(f"  [4B-refine generation metrics] global-memory metrics unavailable: {exc}")
         return []
 
 
@@ -1205,7 +1205,7 @@ def evaluate_true_stage4_generation(
         "activity_readout_tau": float(activity_readout_tau),
         "activity_count_scale": float(activity_count_scale),
         "generation_metric": float(generation_metric),
-        "generation_metric_formula": STAGE4C_GENERATION_COMPOSITE_FORMULA,
+        "generation_metric_formula": STAGE4B_REFINE_GENERATION_COMPOSITE_FORMULA,
         "deterministic_validation_masks": bool(deterministic_masks),
         "hard_activity_mode": {
             "count_mode": "expected",
@@ -1321,14 +1321,14 @@ def train_activity_prior_with_frozen_motif(
     deterministic_val_masks: bool = True,
     scheduler=None,
 ):
-    """Inference-aligned Stage 4C event-placement calibration."""
+    """Inference-aligned Stage 4B-refine event-placement calibration."""
     if not freeze_motif:
         raise ValueError(
-            "Stage 4C requires the complete Stage 4A motif prior to remain frozen."
+            "Stage 4B-refine requires the complete Stage 4A motif prior to remain frozen."
         )
     if val_loader is None:
         raise ValueError(
-            "Stage 4C checkpoint gating requires a validation loader."
+            "Stage 4B-refine checkpoint gating requires a validation loader."
         )
 
     device = next(activity_prior.parameters()).device
@@ -1338,7 +1338,7 @@ def train_activity_prior_with_frozen_motif(
     _freeze_module(vqvae)
     _freeze_module(motif_prior)
 
-    trainable_names = configure_stage4c_event_calibration(activity_prior)
+    trainable_names = configure_stage4b_refine_event_calibration(activity_prior)
     _validate_optimizer_scope(activity_prior, opt, trainable_names)
     trainable_parameters = [
         parameter
@@ -1431,7 +1431,7 @@ def train_activity_prior_with_frozen_motif(
 
     baseline_metrics = _generation_scored(generation_selection_seeds)
     print(
-        "[4C baseline hard generation] "
+        "[4B-refine baseline hard generation] "
         f"score={baseline_metrics['generation_metric']:.6f} "
         f"activityK={baseline_metrics['hard_predicted_count_mean']:.2f}/"
         f"{baseline_metrics['hard_target_count_mean']:.2f} "
@@ -1447,7 +1447,7 @@ def train_activity_prior_with_frozen_motif(
             return 1.0
         return float(np.clip((int(epoch) - 1) / float(ramp_epochs - 1), 0.0, 1.0))
 
-    trainable_module_names = stage4c_trainable_modules(activity_prior)
+    trainable_module_names = stage4b_refine_trainable_modules(activity_prior)
 
     def _set_activity_mode(train: bool) -> None:
         activity_prior.eval()
@@ -1559,7 +1559,7 @@ def train_activity_prior_with_frozen_motif(
                         activity_roi_st.detach().bool(), hard_roi.detach().bool()
                     ):
                         raise RuntimeError(
-                            "Stage 4C straight-through activity lost its hard binary forward values."
+                            "Stage 4B-refine straight-through activity lost its hard binary forward values."
                         )
                     gt_activity = motif_targets["active"].to(
                         device=device, dtype=activity_roi_st.dtype
@@ -1612,7 +1612,7 @@ def train_activity_prior_with_frozen_motif(
                         target_volume = x[:, :1, :dec_t, :dec_h, :dec_w]
                         if target_volume.shape != logits_volume.shape:
                             raise RuntimeError(
-                                "Stage 4C local-field target/decoder shape mismatch: "
+                                "Stage 4B-refine local-field target/decoder shape mismatch: "
                                 f"target={tuple(target_volume.shape)}, "
                                 f"logits={tuple(logits_volume.shape)}"
                             )
@@ -1714,7 +1714,7 @@ def train_activity_prior_with_frozen_motif(
                     )
                     if connected == 0:
                         raise RuntimeError(
-                            "Stage 4C decoder/context losses are disconnected from all event-side parameters."
+                            "Stage 4B-refine decoder/context losses are disconnected from all event-side parameters."
                         )
                     gradient_status = {
                         name: (
@@ -1733,11 +1733,11 @@ def train_activity_prior_with_frozen_motif(
                         ]
                         if failed_joint:
                             raise RuntimeError(
-                                "Stage 4C auxiliary losses do not provide non-zero finite "
+                                "Stage 4B-refine auxiliary losses do not provide non-zero finite "
                                 f"gradients to joint-head parameters: {failed_joint}"
                             )
                     print(
-                        "  [4C gradient audit] decoder/context losses connect to "
+                        "  [4B-refine gradient audit] decoder/context losses connect to "
                         f"{connected}/{len(trainable_parameters)} trainable tensors; "
                         f"{nonzero} have non-zero finite gradients on this batch. "
                         f"Details={gradient_status}"
@@ -1767,7 +1767,7 @@ def train_activity_prior_with_frozen_motif(
             target_roi_k = (roi & motif_targets["active"].bool()).sum(dim=1).float().mean()
             # Motif MRR: the rank of the TRUE 961-way code under the frozen
             # motif prior, given this epoch's activity map. Logged only -- the
-            # selector is still the generation composite. It is here because 4C
+            # selector is still the generation composite. It is here because 4B-refine
             # is the 4A+4B merger (activity probabilities feed
             # forward_with_activity_prob, whose output is soft-decoded to a
             # voxel volume), so a 961-way ranking of the merged output is
@@ -1843,7 +1843,7 @@ def train_activity_prior_with_frozen_motif(
             if train and log_every and iteration % log_every == 0:
                 denominator = max(total_samples, 1.0)
                 print(
-                    f"  [4C calibration] it {iteration:05d}: "
+                    f"  [4B-refine calibration] it {iteration:05d}: "
                     f"loss={totals['loss'] / denominator:.4f} "
                     f"activity={totals['loss_activity'] / denominator:.4f} "
                     f"ctx={totals['loss_ctx'] / denominator:.4f} "
@@ -1877,7 +1877,7 @@ def train_activity_prior_with_frozen_motif(
         "generation_val": [],
         "baseline_generation": baseline_metrics,
         "hyperparameters": hyperparameters,
-        "generation_metric_formula": STAGE4C_GENERATION_COMPOSITE_FORMULA,
+        "generation_metric_formula": STAGE4B_REFINE_GENERATION_COMPOSITE_FORMULA,
     }
     best_score = float(baseline_metrics["generation_metric"])
     best_epoch = 0
@@ -1931,7 +1931,7 @@ def train_activity_prior_with_frozen_motif(
             f"accepted={accepted}"
         )
         if rejection_reasons:
-            print("  Stage 4C checkpoint gate: " + "; ".join(rejection_reasons))
+            print("  Stage 4B-refine checkpoint gate: " + "; ".join(rejection_reasons))
 
         if not checkpointing_active:
             patience = 0
@@ -1951,7 +1951,7 @@ def train_activity_prior_with_frozen_motif(
                 "selection": "true_hard_generation_composite",
                 "generation_metrics": best_metrics,
                 "baseline_generation_metrics": baseline_metrics,
-                "generation_metric_formula": STAGE4C_GENERATION_COMPOSITE_FORMULA,
+                "generation_metric_formula": STAGE4B_REFINE_GENERATION_COMPOSITE_FORMULA,
                 "token_grid": token_grid,
                 "Kmax": int(activity_prior.Kmax),
                 **activity_prior.coordinate_metadata(),
@@ -1960,12 +1960,12 @@ def train_activity_prior_with_frozen_motif(
                 "frozen_motif_prior": True,
                 "deterministic_validation_masks": bool(deterministic_val_masks),
             }, ckpt_out)
-            print(f"  saved accepted Stage 4C checkpoint: {ckpt_out}")
+            print(f"  saved accepted Stage 4B-refine checkpoint: {ckpt_out}")
         else:
             patience += 1
             if patience >= int(early_stop_patience):
                 print(
-                    f"Early stopping Stage 4C at epoch {epoch}; no accepted "
+                    f"Early stopping Stage 4B-refine at epoch {epoch}; no accepted "
                     f"hard-generation improvement for {patience} epochs."
                 )
                 break
@@ -1982,7 +1982,7 @@ def train_activity_prior_with_frozen_motif(
             "selection": "fallback_to_unrefined_stage4b",
             "generation_metrics": baseline_metrics,
             "baseline_generation_metrics": baseline_metrics,
-            "generation_metric_formula": STAGE4C_GENERATION_COMPOSITE_FORMULA,
+            "generation_metric_formula": STAGE4B_REFINE_GENERATION_COMPOSITE_FORMULA,
             "token_grid": token_grid,
             "Kmax": int(activity_prior.Kmax),
             **activity_prior.coordinate_metadata(),
@@ -1990,16 +1990,16 @@ def train_activity_prior_with_frozen_motif(
             "trainable_parameter_names": trainable_names,
             "frozen_motif_prior": True,
             "deterministic_validation_masks": bool(deterministic_val_masks),
-            "reason": "No Stage 4C epoch passed the hard-generation checkpoint gate.",
+            "reason": "No Stage 4B-refine epoch passed the hard-generation checkpoint gate.",
         }, ckpt_out)
         print(
-            "Stage 4C did not outperform the unrefined Stage 4B checkpoint; "
+            "Stage 4B-refine did not outperform the unrefined Stage 4B checkpoint; "
             "restored Stage 4B event heads."
         )
     else:
         activity_prior.load_state_dict(best_state, strict=True)
         print(
-            f"Restored accepted Stage 4C epoch {best_epoch} with "
+            f"Restored accepted Stage 4B-refine epoch {best_epoch} with "
             f"generation_metric={best_score:.6f}."
         )
 
@@ -2161,7 +2161,7 @@ def train_maskgit_activity_prior(
 ):
     """Train the dense activity prior.
 
-    ``select_on`` is the true-generation composite, the same family Stage 4C
+    ``select_on`` is the true-generation composite, the same family Stage 4B-refine
     selects on. This checkpoint exists to be sampled, so it is scored by
     sampling it and comparing generated statistics against real ones.
 

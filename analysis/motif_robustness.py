@@ -1,6 +1,6 @@
 """How much does Stage 4A degrade when it is fed 4B's activity map instead of the truth?
 
-This is the question Stage 4C existed to answer, and dropping 4C only makes
+This is the question Stage 4B-refine existed to answer, and dropping 4B-refine only makes
 sense if the degradation is small. Three arms, paired on the same clips and the
 same deterministic masks, graded on the SAME token set (roi & gt_active) so the
 arms are comparable:
@@ -8,7 +8,7 @@ arms are comparable:
   oracle    activity = ground truth. The ceiling: 4A as it was trained and
             evaluated in isolation.
   model     activity = 4B's sampled hard map inside the ROI, ground truth
-            outside. Exactly what inference does, and what 4C saw at its ep1.
+            outside. Exactly what inference does, and what 4B-refine saw at its ep1.
   marginal  activity = a random map with the SAME per-clip cell count as the
             model arm, placed uniformly in the ROI. The null: it isolates how
             much of 4A's performance needs the activity map to be in the RIGHT
@@ -40,7 +40,7 @@ ap.add_argument("--protocol", default="inpaint", choices=("inpaint", "free"),
                      "trained on teacher-forced activity.")
 ap.add_argument("--motif-ckpt", default=None,
                 help="optional state_dict to load into the motif prior (e.g. the "
-                     "Stage 4D adapted checkpoint). Default = whatever "
+                     "Stage 4C adapted checkpoint). Default = whatever "
                      "_load_stage4_eval_prior loads, i.e. ckpts/motif_prior_best.pt.")
 ap.add_argument("--out", default="reports/motif_robustness.json")
 args = ap.parse_args()
@@ -57,7 +57,7 @@ M.load_stage1_gct_for_eval(vqvae)
 blank_code = getattr(vqvae.vq, "blank_code", -1)
 # Pinned to the Stage 4A control unless --motif-ckpt says otherwise, so the
 # recorded baselines (model 0.15698 free / 0.16366 inpaint, oracle 0.23257 /
-# 0.23582) stay reproducible even though the eval loader now prefers 4D.
+# 0.23582) stay reproducible even though the eval loader now prefers 4C.
 prior = M._load_stage4_eval_prior(vqvae, dev, phase="4b", load_motif=True,
                                   prefer_adapted_motif=False)
 ap_, mp_ = prior.activity_prior, prior.motif_prior
@@ -142,7 +142,7 @@ with torch.no_grad():
         # model_soft: same STRUCTURAL map as "model" (so the same cells are
         # masked and scored -- paired, identical token set), but the activity
         # stream carries 4B's calibrated probability instead of a hard 0/1.
-        # This is what Stage 4D trained on; the hard "model" arm is what
+        # This is what Stage 4C trained on; the hard "model" arm is what
         # inference/sample_prior.py currently feeds (it clamps to long).
         soft = torch.sigmoid(out["cell_logits"].float())
         if soft.dim() == 3:

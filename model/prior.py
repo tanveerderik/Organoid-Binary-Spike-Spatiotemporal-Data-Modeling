@@ -590,7 +590,7 @@ class MaskGITMotifPrior(nn.Module):
         binary tensor reproduces the a_in path and passing None leaves this
         forward bit-identical to before.
 
-        This exists so Stage 4D can hand the motif prior 4B's CALIBRATED
+        This exists so Stage 4C can hand the motif prior 4B's CALIBRATED
         probability field rather than only its thresholded map. The generation
         interface currently does ``activity.long().clamp(0,1)``
         (inference/sample_prior.py), which discards exactly the uncertainty a

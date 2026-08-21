@@ -29,14 +29,14 @@ from MAGVIT_project import main as M
 from MAGVIT_project.training.stage4_activity import evaluate_true_stage4_generation
 
 ap = argparse.ArgumentParser(description=__doc__)
-ap.add_argument("--phase", default="4b", choices=("4b", "4c"))
+ap.add_argument("--phase", default="4b", choices=("4b", "4b_refine"))
 ap.add_argument("--split", default="val", choices=("val", "test"))
 ap.add_argument("--seeds", type=int, default=8)
 ap.add_argument("--batches", type=int, default=4)
 ap.add_argument("--motif-steps", type=int, default=12)
 ap.add_argument("--base-seed", type=int, default=20260820)
 ap.add_argument("--activity-ckpt", default=None,
-                help="Override the Stage 4B/4C activity checkpoint. Useful for "
+                help="Override the Stage 4B/4B-refine activity checkpoint. Useful for "
                      "scoring a specific candidate, or a smoke checkpoint.")
 ap.add_argument("--motif-ckpt", default=None,
                 help="Override the Stage 4A motif checkpoint.")
@@ -68,6 +68,15 @@ b0 = next(iter(train_loader))
 _, _, T0, H0, W0 = b0["x"].shape
 model = M.make_vqvae((T0, H0, W0), dev,
                      full_spatial_size=tuple(map(int, b0["full_hw"][0])))
+# The Stage 1 global-memory bank must be attached BEFORE scoring. Without
+# memory_tok/memory_pix/memory_adj, _safe_generation_global_rows returns []
+# and the composite silently swaps its spatial term from the decoded
+# violation (~0.487) to the hard-activity fallback (~0.004). At weight 0.05
+# that inflates the composite by ~0.024 -- six times the sampling noise this
+# script exists to measure, and it produces numbers that look like a real
+# improvement over the training-time figures. Same failure mode as the stale
+# gap_bins default: a silent fallback, not an error.
+M.load_stage1_gct_for_eval(model)
 prior = M._load_stage4_eval_prior(model, dev, phase=args.phase, load_motif=True)
 blank_code = getattr(model.vq, "blank_code", -1)
 
@@ -75,7 +84,8 @@ blank_code = getattr(model.vq, "blank_code", -1)
 # statistics to real ones, plus the composite.
 KEYS = ("generation_metric", "generation_stat_error",
         "generation_ks_avalanche", "generation_ks_isi",
-        "decoded_spike_count_relative_error", "hard_count_mae")
+        "decoded_spike_count_relative_error", "hard_count_mae",
+        "decoded_spatial_support_violation")
 
 runs = []
 print(f"\nscoring {args.seeds} seeds x {args.batches} batches "
@@ -95,6 +105,14 @@ for i in range(args.seeds):
         seed=seed,
         null_seed=seed,
     )
+    src = g.get("spatial_support_metric_source")
+    if src != "decoded_global_memory":
+        raise SystemExit(
+            f"spatial_support_metric_source is {src!r}, expected "
+            "'decoded_global_memory'. The composite took its fallback branch, "
+            "so these numbers are not comparable to the training-time ones. "
+            "Check that the Stage 1 memory bank loaded."
+        )
     runs.append({k: float(g[k]) for k in KEYS if k in g})
     print(f"  seed {seed}: composite={runs[-1]['generation_metric']:.6f} "
           f"stat_error={runs[-1].get('generation_stat_error', float('nan')):.4f}",

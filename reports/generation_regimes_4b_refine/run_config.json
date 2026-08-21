@@ -1,0 +1,37 @@
+{
+  "args": {
+    "phase": "4c",
+    "split": "test",
+    "batches": 8,
+    "samples_per_clip": 4,
+    "motif_steps": 12,
+    "motif_temperature": 1.0,
+    "motif_top_k": 5,
+    "activity_readout": "gumbel",
+    "activity_readout_tau": 1.0,
+    "activity_count_scale": 1.0,
+    "task_id": 0,
+    "partial_local": "log_mean_firing_density,active_site_ratio",
+    "bank": "ckpts/context_prior.pkl",
+    "activity_ckpt": null,
+    "motif_ckpt": null,
+    "out": "reports/generation_regimes_4c",
+    "seed": 20260821,
+    "no_video": false,
+    "regimes": "random,global_only,global_partial_local,global_full_local"
+  },
+  "partial_local_features": [
+    "log_mean_firing_density",
+    "active_site_ratio"
+  ],
+  "regime_definitions": {
+    "random": "gct and lct both sampled unconditionally from the train bank",
+    "global_only": "gct pinned to the held-out clip; lct retrieved given gct",
+    "global_partial_local": "gct pinned; lct features ['log_mean_firing_density', 'active_site_ratio'] pinned exactly, rest retrieved",
+    "global_full_local": "gct and lct both pinned to the held-out clip"
+  },
+  "free_generation": true,
+  "activity_checkpoint": "ckpts/activity_prior_refined_best.pt",
+  "motif_checkpoint": "ckpts/motif_prior_best.pt",
+  "context_bank": "ckpts/context_prior.pkl"
+}

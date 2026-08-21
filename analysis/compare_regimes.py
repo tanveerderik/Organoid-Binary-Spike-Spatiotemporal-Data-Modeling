@@ -2,9 +2,9 @@
 
 Two questions:
 
-  1. Does 4C change the samples at all? Both sets were generated from the same
+  1. Does 4B-refine change the samples at all? Both sets were generated from the same
      clips, the same regimes and the same seeds, so any per-regime difference is
-     attributable to 4C's calibration. The Stage 4C training run says it should
+     attributable to 4B-refine's calibration. The Stage 4B-refine training run says it should
      be ~nothing (all epoch variation inside 0.92 seed sd, motif MRR declining
      t=-10.45), and this is the end-product check of that claim.
 
@@ -274,7 +274,7 @@ for ph in PHASES:
 #
 # The sections above ask "does conditioning help?" within one set. This asks
 # "does the model change help?" -- which is the question the soft activity
-# field and Stage 4D exist to answer, and it cannot be read off the pooled
+# field and Stage 4C exist to answer, and it cannot be read off the pooled
 # summary (see the conditioning-ladder result: pooled stat_error inverted the
 # sign of an effect the paired test found clearly).
 #

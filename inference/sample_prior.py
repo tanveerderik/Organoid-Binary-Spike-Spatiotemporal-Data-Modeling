@@ -85,7 +85,7 @@ def iterative_unmask_motif_given_activity(
 
     Measured on 24 val batches, full-ROI protocol, paired: motif MRR
     0.15698 -> 0.20281 (median rank 22 -> 11) on the UNADAPTED Stage 4A prior,
-    and 0.15969 -> 0.21797 (median rank 20 -> 9) on the Stage 4D adapted prior,
+    and 0.15969 -> 0.21797 (median rank 20 -> 9) on the Stage 4C adapted prior,
     against an oracle-activity ceiling of ~0.231. Hard-clamping here was
     discarding most of the usable signal in the activity prior's output.
 

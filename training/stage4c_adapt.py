@@ -1,8 +1,8 @@
-"""Stage 4D: adapt the motif prior to the activity maps Stage 4B actually emits.
+"""Stage 4C: adapt the motif prior to the activity maps Stage 4B actually emits.
 
-WHY THIS AND NOT STAGE 4C
+WHY THIS AND NOT STAGE 4B-refine
 
-4C froze 4A and tuned 4B. That direction is handicapped three ways: the sampled
+4B-refine froze 4A and tuned 4B. That direction is handicapped three ways: the sampled
 activity map is discrete, so the gradient into 4B is a straight-through
 surrogate through a top-K selection whose true Jacobian is zero almost
 everywhere; the trainable surface (cell_head / maskgit_norm / count_head) cannot

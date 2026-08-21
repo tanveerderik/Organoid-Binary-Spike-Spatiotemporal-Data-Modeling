@@ -64,8 +64,8 @@ PARTIAL_LOCAL_DEFAULT = ("log_mean_firing_density", "active_site_ratio")
 
 ap = argparse.ArgumentParser(description=__doc__,
                              formatter_class=argparse.RawDescriptionHelpFormatter)
-ap.add_argument("--phase", default="4b", choices=("4b", "4c"),
-                help="which activity prior to sample from. Default 4b: Stage 4C "
+ap.add_argument("--phase", default="4b", choices=("4b", "4b_refine"),
+                help="which activity prior to sample from. Default 4b: Stage 4B-refine "
                      "was rejected (all epoch variation inside 0.92 seed sd, "
                      "motif-MRR declining t=-10.45) and 4c would silently load "
                      "activity_prior_refined_best.pt instead of the shipped 4B.")
@@ -342,10 +342,10 @@ summary = writer.close()
     },
     "free_generation": True,
     "activity_checkpoint": str(M.CKPTS.get("activity_prior_refined_best"
-                                           if args.phase == "4c"
+                                           if args.phase == "4b_refine"
                                            else "activity_prior_best_hard_metric")),
     # Record what was ACTUALLY loaded, not the fallback key: the eval loader
-    # prefers "motif_prior_ship" (the Stage 4D adapted prior) when it exists.
+    # prefers "motif_prior_ship" (the Stage 4C adapted prior) when it exists.
     "motif_checkpoint": str(_MOTIF_CKPT_USED),
     "context_bank": args.bank,
 }, indent=2, default=str))

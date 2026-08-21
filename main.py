@@ -53,7 +53,7 @@ from .training import (
     train_motif_prior_mgit,
     train_maskgit_activity_prior,
     train_activity_prior_with_frozen_motif,
-    configure_stage4c_event_calibration,
+    configure_stage4b_refine_event_calibration,
 )
 from .training.stage4_activity import token_frequency_for_batch
 from .training.stage2b_flatten import run_stage2b_flatten
@@ -155,9 +155,20 @@ STAGE3_TEXTON_BASIS = "z1"
 # always 2A -> 2B, regardless of tuple order.
 
 
-# Stage-4 training substages. Any subset of ("4a", "4b", "4c") is valid;
-# execution order remains 3A -> 3B -> 3C. Missing prerequisites are loaded
-# from their best checkpoints.
+# Stage-4 training substages. Any subset of ("4a", "4b", "4c", "4b_refine") is
+# valid; execution order is always 4A -> 4B -> 4C. Missing prerequisites are
+# loaded from their best checkpoints.
+#
+#   4a         motif prior over the 961-way flat alphabet, teacher-forced on the
+#              ground-truth activity map.
+#   4b         activity prior: which cells fire, given the context prefix.
+#   4c         adapt 4A to the maps 4B actually emits. This is the SHIPPED
+#              motif prior; it must be paired with a soft activity field at
+#              generation time (see inference/sample_prior.py).
+#   4b_refine  ABLATION, rejected. Tried to close the same gap from the other
+#              side -- move 4B using gradients from a frozen 4A. 56 epochs, all
+#              variation inside 0.92 seed sd, motif-MRR declining t=-10.45.
+#              Kept so the paper can show why 4C moves the motif prior instead.
 STAGE4_PHASES = ("4a",)
 # Warm-start 3A from ckpts/motif_prior_warmstart.pt when present. The z1 trunk
 # from the previous run reached 0.288 top-1; retraining from scratch would spend
@@ -177,7 +188,35 @@ STAGE4A_WARMUP_EPOCHS = 10
 # (~0.08) or top-5 (~0.36) it reads the whole ranking.
 STAGE4A_SELECT_ON = "mrr"
 STAGE4B_EPOCHS = 200
-STAGE4C_EPOCHS = 100
+STAGE4B_REFINE_EPOCHS = 100
+
+# ---------------------------------------------------------------------------
+# Stage 4C: adapt the motif prior to the activity maps Stage 4B actually emits.
+#
+# 4A is trained teacher-forced on the true activity map, but at generation time
+# it is handed 4B's prediction, and the mismatch is expensive: free-generation
+# motif MRR falls 0.228 -> 0.155 (median rank 8 -> 21) on the test split.
+#
+# LR is a tenth of 4A's: this is an adaptation, not a retrain. p(4B map) ramps
+# 0 -> 0.8, so epoch 1 is exactly 4A's own regime and any early divergence is
+# attributable to the substitution alone.
+#
+# Selection uses val MRR under the model arm (p=1). The ORACLE arm (p=0) is
+# logged every epoch and NEVER selected on -- it is the guard against buying
+# generation quality with the ability to use a GOOD activity map, which the
+# inpainting tasks still need.
+# ---------------------------------------------------------------------------
+STAGE4C_EPOCHS = 120
+STAGE4C_LR = 3e-5
+STAGE4C_WARMUP_EPOCHS = 5
+STAGE4C_EARLY_STOP_PATIENCE = 40
+STAGE4C_RAMP_EPOCHS = 20
+STAGE4C_MAX_P = 0.8
+STAGE4C_READOUT = "gumbel"
+# The soft field is not optional. 4C fed a HARD 0/1 map is measurably worse than
+# the unadapted 4A on five sample statistics; it trained on probabilities, so a
+# hard map just relocates the train/deploy mismatch it exists to remove.
+STAGE4C_SOFT_FIELD = True
 
 # Stage 4B/3C activity-coordinate parameterization. Use "factorized" for the
 # original axis-head ablation or "joint_dense" for one categorical THW head.
@@ -238,7 +277,7 @@ STAGE4B_MASKGIT_HYPERPARAMETERS = {
     # decoding produce exactly this distribution and the shipped specs never do.
     "random_mask_prob": 0.5,
     "random_mask_ratio": (0.15, 1.0),
-    # True-generation composite, the same family Stage 4C selects on.
+    # True-generation composite, the same family Stage 4B-refine selects on.
     #
     # Not AUPRC and not F1: both depend only on the ordering of p, so both are
     # invariant under monotone rescaling of it. Sampling draws Bernoulli from
@@ -366,10 +405,10 @@ STAGE4B_HYPERPARAMETERS = {
     "save_start_epoch": 60,
 }
 
-# Stage 4C is a low-LR event-placement calibration, not a second activity-prior
+# Stage 4B-refine is a low-LR event-placement calibration, not a second activity-prior
 # training stage. Its true-generation validation is deliberately limited to a
 # fixed subset because every validation pass runs iterative MaskGIT + decoding.
-STAGE4C_HYPERPARAMETERS = {
+STAGE4B_REFINE_HYPERPARAMETERS = {
     "lr": 1e-5,
     "lambda_activity": 1.0,
     "lambda_count": 1.0,
@@ -385,11 +424,11 @@ STAGE4C_HYPERPARAMETERS = {
     "warmup_epochs": 10,
     # No candidate accepted or tracked until the auxiliary losses finish ramping.
     "save_start_epoch": 10,
-    # Raised from a hard-coded 20. Stage 4C moves 1.2% of parameters at 1e-5, so
+    # Raised from a hard-coded 20. Stage 4B-refine moves 1.2% of parameters at 1e-5, so
     # twenty epochs is very little actual movement and "no improvement" is weaker
     # evidence of convergence here than the same count would be in Stage 4B.
     "early_stop_patience": 45,
-    # Must match Stage 4B: 4C refines the same activity prior and is selected
+    # Must match Stage 4B: 4B-refine refines the same activity prior and is selected
     # on the same composite, so a different readout would make the two
     # incomparable. See STAGE4B_MASKGIT_HYPERPARAMETERS for the evidence.
     "activity_readout": "gumbel",
@@ -397,7 +436,7 @@ STAGE4C_HYPERPARAMETERS = {
     # Must match Stage 4B -- see the note on the 4B key.
     "activity_count_scale": 1.0,
     # The acceptance gate's evaluation budget. At the old 4 batches / 1 seed the
-    # composite carries per-seed sd 0.0076, while Stage 4C refines at lr=1e-5 and
+    # composite carries per-seed sd 0.0076, while Stage 4B-refine refines at lr=1e-5 and
     # produces per-epoch changes far below that -- the gate was accepting and
     # rejecting on sampling noise. Two independent knobs shrink it: more val
     # batches (sd 0.0076 -> 0.0042 going 4 -> 8, because the three distribution
@@ -405,8 +444,8 @@ STAGE4C_HYPERPARAMETERS = {
     # Together 8 batches x 4 seeds gives ~0.0021.
     #
     # Raising max_batches also RAISES the composite's absolute value (+0.036 from
-    # 4 to 8 on a fixed checkpoint), so 4C numbers are not comparable to 4B
-    # numbers recorded at 4 batches. Inside 4C the comparison stays valid because
+    # 4 to 8 on a fixed checkpoint), so 4B-refine numbers are not comparable to 4B
+    # numbers recorded at 4 batches. Inside 4B-refine the comparison stays valid because
     # the baseline is scored at the same budget as every candidate.
     "generation_val_max_batches": 8,
     "generation_selection_seeds": 4,
@@ -427,7 +466,7 @@ STAGE4_KMAX_MARGIN = 1.25
 # 3A: held-out teacher-forced activity / masked motif prediction metrics.
 # 3B: held-out activity-count and coordinate metrics.
 # 3C: held-out refined activity metrics.
-STAGE4_EVAL_PHASES = ("4c",)
+STAGE4_EVAL_PHASES = ("4b",)
 
 # Stable Stage-3A evaluation starts from a fully masked motif ROI. Set this to
 # 0.15 to reproduce the mixed masking regime used during training validation.
@@ -483,14 +522,14 @@ CKPTS = {
 
     # --- Stage 4: prior ---
     "motif_prior_best": CKPT_DIR / "motif_prior_best.pt",
-    # Stage 4D: 4A adapted to the activity maps 4B actually produces. This is
+    # Stage 4C: 4A adapted to the activity maps 4B actually produces. This is
     # the prior we SHIP -- evaluation and generation load it, and it must be
     # paired with a soft activity field (generate_regimes --activity-field soft).
     # Feeding it a hard 0/1 map is measurably WORSE than the unadapted 4A, so
     # the two are not separable options.
-    # Training paths deliberately keep loading "motif_prior_best": 4B and 4C
+    # Training paths deliberately keep loading "motif_prior_best": 4B and 4B-refine
     # were defined against the teacher-forced control, and quietly swapping it
-    # would make their frozen teacher circular (4D was trained against 4B).
+    # would make their frozen teacher circular (4C was trained against 4B).
     "motif_prior_ship": CKPT_DIR / "motif_prior_adapt_best.pt",
     # Legacy alias retained for external scripts. New Stage 4B runs write this
     # alias from the generation-aligned hard-metric checkpoint.
@@ -514,6 +553,7 @@ REPORTS = {
     "prior_refine_eval": Path("reports/evaluation_report_prior_3C_refine.json"),
     "prior_activity": Path("reports/training_report_prior_3B_activity.json"),
     "prior_refine": Path("reports/training_report_prior_3C_refine.json"),
+    "prior_adapt": Path("reports/training_report_prior_4C_adapt.json"),
 
     "leakage_delta": Path("reports/evaluation_report_leakage_delta.json"),
     "count_nulls": Path("reports/evaluation_report_count_nulls.json"),
@@ -1814,9 +1854,9 @@ def _load_stage4_motif_best(prior, device, *, prefer_adapted: bool = False,
                             path=None):
     """Load the motif prior.
 
-    prefer_adapted=True picks the Stage 4D adapted checkpoint when it exists,
+    prefer_adapted=True picks the Stage 4C adapted checkpoint when it exists,
     falling back to the Stage 4A control. Evaluation and generation want the
-    adapted one; 4B/4C TRAINING wants the control, because that is the teacher
+    adapted one; 4B/4B-refine TRAINING wants the control, because that is the teacher
     they were defined against.
     """
     if path is None:
@@ -1831,7 +1871,7 @@ def _load_stage4_motif_best(prior, device, *, prefer_adapted: bool = False,
         )
     ckpt = torch.load(path, map_location=device)
     prior.motif_prior.load_state_dict(ckpt["model"], strict=True)
-    tag = "4D adapted" if path == CKPTS.get("motif_prior_ship") else "4A"
+    tag = "4C adapted" if path == CKPTS.get("motif_prior_ship") else "4A"
     print(f"Loaded Stage {tag} motif checkpoint: {path}")
 
 
@@ -1935,7 +1975,7 @@ def run_stage4a(prior, model, train_loader, val_loader, device):
         topk=(5, 2),
 
         # Voxel-domain auxiliary losses reduced from 1.0 so the motif objective
-        # dominates while z1 is still improving. Stage 4C performs the
+        # dominates while z1 is still improving. Stage 4B-refine performs the
         # inference-aligned statistical calibration; 3A's job is motif identity.
         lambda_ctx=0.25,
         lambda_ctx_field=0.05,
@@ -2050,9 +2090,9 @@ def run_stage4b(prior, model, train_loader, val_loader, device):
 
 
 
-def run_stage4c(prior, model, train_loader, val_loader, device):
-    print("[4C] Training inference-aligned event-placement calibration.")
-    config = dict(STAGE4C_HYPERPARAMETERS)
+def run_stage4b_refine(prior, model, train_loader, val_loader, device):
+    print("[4B-refine] Training inference-aligned event-placement calibration.")
+    config = dict(STAGE4B_REFINE_HYPERPARAMETERS)
     config.update({
         "coordinate_mode": prior.activity_prior.coordinate_mode,
         "token_grid": [
@@ -2067,7 +2107,7 @@ def run_stage4c(prior, model, train_loader, val_loader, device):
         "optimizer": "AdamW",
         "amp_dtype": "CUDA autocast default FP16",
     })
-    trainable_names = configure_stage4c_event_calibration(prior.activity_prior)
+    trainable_names = configure_stage4b_refine_event_calibration(prior.activity_prior)
     opt_refine = torch.optim.AdamW(
         [
             parameter
@@ -2079,11 +2119,11 @@ def run_stage4c(prior, model, train_loader, val_loader, device):
     )
     sched_refine = make_warmup_cosine(
         opt_refine,
-        epochs=int(STAGE4C_EPOCHS),
+        epochs=int(STAGE4B_REFINE_EPOCHS),
         warmup_epochs=int(config["warmup_epochs"]),
     )
     _print_stage4_startup(
-        "Stage 4C",
+        "Stage 4B-refine",
         config,
         prior.activity_prior,
         checkpoint_paths=(
@@ -2100,7 +2140,7 @@ def run_stage4c(prior, model, train_loader, val_loader, device):
         opt=opt_refine,
         train_loader=train_loader,
         val_loader=val_loader,
-        epochs=int(STAGE4C_EPOCHS),
+        epochs=int(STAGE4B_REFINE_EPOCHS),
         grad_clip=1.0,
         ckpt_out=str(CKPTS["activity_prior_refined_best"]),
         early_stop_patience=int(config["early_stop_patience"]),
@@ -2140,6 +2180,96 @@ def run_stage4c(prior, model, train_loader, val_loader, device):
     return history
 
 
+def run_stage4c(prior, model, train_loader, val_loader, device):
+    """Adapt the Stage 4A motif prior to the maps Stage 4B actually emits.
+
+    Writes CKPTS["motif_prior_ship"]. CKPTS["motif_prior_best"] is left alone,
+    so the teacher-forced 4A model survives as the control arm for the paper.
+    """
+    print("[4C] Adapting the motif prior to Stage 4B's activity maps.")
+
+    # 4B is frozen, and that is the whole point: the sampling distribution must
+    # not depend on the parameters being optimised, or the gradient stops being
+    # an unbiased estimate of the deployment risk. (This is also the difference
+    # from the rejected 4B-refine ablation, which pushed gradients the other way
+    # through a straight-through top-K and got a biased estimator for its
+    # trouble.)
+    prior.activity_prior.eval()
+    for q in prior.activity_prior.parameters():
+        q.requires_grad_(False)
+    for q in prior.motif_prior.parameters():
+        q.requires_grad_(True)
+    assert not any(q.requires_grad for q in prior.activity_prior.parameters()), \
+        "Stage 4C requires a frozen activity prior"
+
+    n_train = sum(q.numel() for q in prior.motif_prior.parameters()
+                  if q.requires_grad)
+    n_frozen = sum(q.numel() for q in prior.activity_prior.parameters())
+    print(f"  trainable motif params {n_train:,} | "
+          f"frozen activity params {n_frozen:,}")
+    print(f"  4B (frozen) = {_best_stage4b_checkpoint_path()}")
+    print(f"  4A (init)   = {CKPTS['motif_prior_best']}   [NOT overwritten]")
+    print(f"  ckpt     -> {CKPTS['motif_prior_ship']}")
+    print(f"  ramp 0 -> {STAGE4C_MAX_P} over {STAGE4C_RAMP_EPOCHS} epochs, "
+          f"lr={STAGE4C_LR}", flush=True)
+
+    opt = torch.optim.AdamW(
+        [q for q in prior.motif_prior.parameters() if q.requires_grad],
+        lr=float(STAGE4C_LR),
+        weight_decay=0.01,
+    )
+    sched = make_warmup_cosine(
+        opt,
+        epochs=int(STAGE4C_EPOCHS),
+        warmup_epochs=int(STAGE4C_WARMUP_EPOCHS),
+    )
+
+    history = train_motif_prior_mgit(
+        motif_prior=prior.motif_prior,
+        vqvae=model,
+        opt=opt,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        epochs=int(STAGE4C_EPOCHS),
+        grad_clip=1.0,
+        ckpt_out=str(CKPTS["motif_prior_ship"]),
+        early_stop_patience=int(STAGE4C_EARLY_STOP_PATIENCE),
+        scheduler=sched,
+        select_on="mrr",
+        deterministic_val_masks=True,
+        grad_accum_steps=grad_accum_steps,
+        full_mask_prob=0.15,
+
+        # Every loss term below is IDENTICAL to Stage 4A. The activity map is
+        # the only thing that changes, so any difference is attributable to it.
+        loss_weights=(1.0, 0.1),
+        lambda_z1_distance=0.05,
+        lambda_z1_neighbor_ce=0.05,
+        z1_neighbor_tau=0.25,
+        topk=(5, 2),
+        lambda_ctx=0.25,
+        lambda_ctx_field=0.05,
+        lambda_adj=0.25,
+        lambda_spatial=0.25,
+        ctx_tau=0.25,
+        ctx_field_tau=0.25,
+        memory_tok=getattr(model, "memory_tok", None),
+        memory_adj=getattr(model, "memory_adj", None),
+        isi_gap_bins=gap_bins,
+        isi_max_gap=max_gap_from_bins(gap_bins),
+
+        # ---- Stage 4C ----
+        adapt_activity_prior=prior.activity_prior,
+        adapt_ramp_epochs=int(STAGE4C_RAMP_EPOCHS),
+        adapt_max_p=float(STAGE4C_MAX_P),
+        adapt_readout=str(STAGE4C_READOUT),
+        adapt_soft_field=bool(STAGE4C_SOFT_FIELD),
+    )
+    save_json_report(history, REPORTS["prior_adapt"])
+    _load_stage4_motif_best(prior, device, prefer_adapted=True)
+    return history
+
+
 def run_stage4_prior(model, train_loader, val_loader, device):
     print("\n" + "=" * 80)
     print("STAGE 4: staged prior learning")
@@ -2147,7 +2277,7 @@ def run_stage4_prior(model, train_loader, val_loader, device):
 
     phases = _normalize_substage_phases(
         STAGE4_PHASES,
-        ("4a", "4b", "4c"),
+        ("4a", "4b", "4c", "4b_refine"),
         name="STAGE4_PHASES",
     )
     if not phases:
@@ -2161,12 +2291,12 @@ def run_stage4_prior(model, train_loader, val_loader, device):
 
     stage4_kmax = _resolve_stage4_kmax(model, train_loader, device)
     stage4_coordinate_mode = STAGE4_COORDINATE_MODE
-    if "4c" in phases and "4b" not in phases:
+    if ("4b_refine" in phases or "4c" in phases) and "4b" not in phases:
         stage4b_path = _best_stage4b_checkpoint_path()
         stage4b_meta = _read_stage4_activity_metadata(stage4b_path, model)
         stage4_coordinate_mode = stage4b_meta["coordinate_mode"]
         print(
-            "Stage 4C-only run will use the coordinate mode stored in its "
+            "A 4C / 4B-refine run without 4B uses the coordinate mode stored in its "
             f"Stage 4B checkpoint: {stage4_coordinate_mode!r}."
         )
     prior = build_prior_from_model(
@@ -2200,11 +2330,21 @@ def run_stage4_prior(model, train_loader, val_loader, device):
         )
 
     if "4c" in phases:
+        # 4C starts from the teacher-forced 4A control, never from a previous
+        # 4C run: adapting an already-adapted prior would compound the shift.
+        _load_stage4_motif_best(prior, device, prefer_adapted=False)
+        if "4b" not in phases:
+            _load_stage4_activity_best(prior, model, device)
+        reports["4c"] = run_stage4c(
+            prior, model, train_loader, val_loader, device
+        )
+
+    if "4b_refine" in phases:
         if "4a" not in phases:
             _load_stage4_motif_best(prior, device)
         if "4b" not in phases:
             _load_stage4_activity_best(prior, model, device)
-        reports["4c"] = run_stage4c(
+        reports["4b_refine"] = run_stage4b_refine(
             prior, model, train_loader, val_loader, device
         )
 
@@ -2216,21 +2356,21 @@ def _select_stage4_activity_checkpoint(phase: str):
     if phase == "4b":
         path = _best_stage4b_checkpoint_path()
         state_key = "model"
-    elif phase == "4c":
+    elif phase == "4b_refine":
         refined_path = CKPTS["activity_prior_refined_best"]
         if refined_path.exists():
             refined = torch.load(refined_path, map_location="cpu")
             if refined.get("accepted", False):
                 return refined_path, "activity_prior"
             print(
-                f"Stage 4C checkpoint {refined_path} was not accepted by the "
+                f"Stage 4B-refine checkpoint {refined_path} was not accepted by the "
                 "hard-generation gate; evaluating the unrefined Stage 4B checkpoint."
             )
         path = _best_stage4b_checkpoint_path()
         state_key = "model"
     else:
         raise ValueError(
-            f"Stage-4 activity checkpoint phase must be '4b' or '4c', got {phase!r}."
+            f"Stage-4 activity checkpoint phase must be '4b' or '4b_refine', got {phase!r}."
         )
 
     if not path.exists():
@@ -2252,7 +2392,7 @@ def _load_stage4_eval_prior(
     prefer_adapted_motif: bool = True,
 ):
     phase = str(phase).lower()
-    if phase not in ("4a", "4b", "4c"):
+    if phase not in ("4a", "4b", "4b_refine"):
         raise ValueError(f"Unsupported Stage-4 evaluation phase={phase!r}")
 
     vq_ckpt = select_ckpt(2, prefer_best=True)
@@ -2313,9 +2453,9 @@ def _load_stage4_eval_prior(
 @torch.no_grad()
 def load_stage4_prior(model, device, *, activity_phase: str):
     activity_phase = str(activity_phase).lower()
-    if activity_phase not in ("4b", "4c"):
+    if activity_phase not in ("4b", "4b_refine"):
         raise ValueError(
-            "Complete hierarchical generation requires activity_phase='4b' or '4c'."
+            "Complete hierarchical generation requires activity_phase='4b' or '4b_refine'."
         )
     return _load_stage4_eval_prior(
         model,
@@ -2755,7 +2895,7 @@ def evaluate_stage4_prior(
     test_loader,
     device,
     *,
-    activity_phase="4c",
+    activity_phase="4b",
     out_dir="../viz_out_vqvae/vqvae_stage4/stage4_prior_gen",
     max_batches=20,
     samples_per_context=4,
@@ -3013,7 +3153,7 @@ def evaluate_stage4_prior_sampled_contexts(
     ref_loader,
     device,
     *,
-    activity_phase="4c",
+    activity_phase="4b",
     out_dir="../viz_out_vqvae/vqvae_stage4/stage4_prior_sampled_ctx",
     context_bank_path="ckpts/context_prior.pkl",
     mode="random_full",
@@ -3433,7 +3573,7 @@ def evaluate_count_nulls(model, test_loader, device, null_baselines):
     print("COUNT NULLS: activity count head vs trivial predictors")
     print("=" * 80)
 
-    prior = load_stage4_prior(model, device, activity_phase="4c")
+    prior = load_stage4_prior(model, device, activity_phase="4b")
     activity_prior = prior.activity_prior
     activity_prior.eval()
     model.eval()
@@ -3561,7 +3701,7 @@ def evaluate_generation_baselines(model, test_loader, device, null_baselines,
     print("GENERATION BASELINES: model vs independent-rate surrogate")
     print("=" * 80)
 
-    prior = load_stage4_prior(model, device, activity_phase="4c")
+    prior = load_stage4_prior(model, device, activity_phase="4b")
     model.eval()
     prior.eval()
 
@@ -3711,7 +3851,7 @@ def evaluate_motif_nulls(model, train_loader, test_loader, device, *, rebuild: b
                        relative to substituting the blank token as a scale
                        reference
     """
-    prior = load_stage4_prior(model, device, activity_phase="4c")
+    prior = load_stage4_prior(model, device, activity_phase="4b")
     motif_prior = prior.motif_prior
     motif_prior.eval()
     model.eval()
@@ -4236,7 +4376,7 @@ def run_stage_evaluation(
     if stage == 4:
         eval_phases = _normalize_substage_phases(
             STAGE4_EVAL_PHASES,
-            ("4a", "4b", "4c"),
+            ("4a", "4b", "4b_refine"),
             name="STAGE4_EVAL_PHASES",
         )
         if not eval_phases:
@@ -4257,7 +4397,7 @@ def run_stage_evaluation(
                 else:
                     raise
 
-        for phase in ("4b", "4c"):
+        for phase in ("4b", "4b_refine"):
             if phase not in eval_phases:
                 continue
 
