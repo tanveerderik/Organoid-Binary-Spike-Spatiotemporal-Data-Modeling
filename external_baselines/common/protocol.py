@@ -25,6 +25,15 @@ from typing import Any, Dict, Iterator, Optional, Sequence
 import torch
 
 
+def _move(v, device):
+    """Geometry may arrive as a tensor, a tuple of tensors, or plain ints."""
+    if torch.is_tensor(v):
+        return v.to(device)
+    if isinstance(v, (list, tuple)):
+        return type(v)(_move(e, device) for e in v)
+    return v
+
+
 @dataclass(frozen=True)
 class ConditioningBatch:
     """Everything a baseline is allowed to know when generating.
@@ -39,6 +48,15 @@ class ConditioningBatch:
     shape: tuple[int, int, int]       # (T, H, W) of the volume to produce
     assay_name: Sequence[str] = ()    # provenance only, never a model input
 
+    # Array GEOMETRY, not clip content: where this recording's electrodes sit in
+    # the full pooled frame (`roi_hw`) and the symmetric padding applied to reach
+    # a patch multiple (`pad_hw`). Both are fixed per assay and known before any
+    # spikes are recorded, which is the same standing DG/GLM already have through
+    # their train-fitted per-assay site maps. The pipeline's decoder needs them to
+    # place its spatial-support bias; baselines that don't, ignore them.
+    roi_hw: Any = None
+    pad_hw: Any = None
+
     @property
     def batch_size(self) -> int:
         return int(self.global_ctx.shape[0])
@@ -50,6 +68,8 @@ class ConditioningBatch:
             assay_idx=self.assay_idx.to(device),
             shape=self.shape,
             assay_name=self.assay_name,
+            roi_hw=_move(self.roi_hw, device),
+            pad_hw=_move(self.pad_hw, device),
         )
 
 

@@ -1,0 +1,47 @@
+{
+  "n_samples": 128,
+  "stats": {
+    "rate": 0.00015157669258769602,
+    "persist1": 0.05800122767686844,
+    "persist2": 0.06547718495130539,
+    "persist3": 0.07320199906826019,
+    "persist4": 0.08266736567020416,
+    "persist5": 0.07572373002767563,
+    "persist6": 0.07835239917039871,
+    "persist7": 0.07373704016208649,
+    "spatial_coact": 0.0015978907841649023,
+    "avalanche_mean": 52.92389006342495,
+    "avalanche_p90": 198.8,
+    "isi_mean": 9.241368727942305,
+    "isi_p90": 23.0,
+    "burst_rate": 0.17024739583333334,
+    "burst_mean_duration": 6.962466407290625
+  },
+  "vs_real": {
+    "rel_avalanche_mean": 0.29205438645647475,
+    "rel_avalanche_p90": 0.3044619422572176,
+    "rel_burst_mean_duration": 0.7271654712459802,
+    "rel_burst_rate": 0.11276595744680863,
+    "rel_isi_mean": 0.17407220842807963,
+    "rel_isi_p90": 0.35294117647058826,
+    "rel_persist1": 0.5280998235915443,
+    "rel_persist2": 0.08432322267186097,
+    "rel_persist3": 0.024770709589302164,
+    "rel_persist4": 0.05782631759388885,
+    "rel_persist5": 0.11098859668463355,
+    "rel_persist6": 0.15119268300639357,
+    "rel_persist7": 0.14717438924619855,
+    "rel_rate": 0.007886790026740451,
+    "rel_spatial_coact": 0.007949506651220312,
+    "ks_avalanche": 0.09800664451827243,
+    "ks_isi": 0.0807255964551894,
+    "stat_error": 0.20557821209112878,
+    "stat_error_with_ks": 0.19190620131414082
+  },
+  "samples_per_assay": {
+    "sub-U_ses-20231119T113000_obj-13gb78s_ecephys": 36,
+    "sub-U_ses-20231119T113000_obj-15bpqpa_ecephys": 36,
+    "sub-U_ses-20231119T113000_obj-195c1dk_ecephys": 36,
+    "sub-U_ses-20231119T113000_obj-1cs0t8m_ecephys": 20
+  }
+}

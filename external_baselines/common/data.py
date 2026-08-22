@@ -122,6 +122,8 @@ def split_batch(batch: Dict[str, Any]) -> tuple[ConditioningBatch, torch.Tensor]
         assay_idx=batch["assay_idx"].long(),
         shape=(T, H, W),
         assay_name=tuple(batch.get("assay_name", ["?"] * B)),
+        roi_hw=batch.get("roi_hw", None),
+        pad_hw=batch.get("pad_hw", None),
     )
     return cond, real
 

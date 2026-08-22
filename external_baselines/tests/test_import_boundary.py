@@ -6,7 +6,7 @@ Rules, in order of how much damage a violation does:
   1. NO main-pipeline module may import `external_baselines`. The shipped results must
      not be able to change because a baseline changed. This is the one that
      actually protects the paper.
-  2. Only `external_baselines/common/data.py` may import `main`. Every other baseline
+  2. Only the two files in MAIN_IMPORT_ALLOWED may import `main`. Every other baseline
      module reaches the pipeline through the shared harness, so a refactor of
      `main.py` breaks one import site instead of five.
   3. Every file under external_baselines/ must parse. A bulk rename here once produced
@@ -29,8 +29,13 @@ BASELINES = ROOT / "external_baselines"
 PIPELINE_DIRS = ("model", "training", "inference", "utils", "analysis", "visualization")
 PIPELINE_FILES = ("main.py", "dataset.py")
 
-# The single sanctioned bridge.
-MAIN_IMPORT_ALLOWED = {BASELINES / "common" / "data.py"}
+# The sanctioned bridges. Two, and the split is deliberate: `data.py` bridges
+# the SPLIT and the loaders, `pipeline.py` bridges CONSTRUCTION of the shipped
+# model for `pipeline_reference`. Anything else routes through them.
+MAIN_IMPORT_ALLOWED = {
+    BASELINES / "common" / "data.py",
+    BASELINES / "common" / "pipeline.py",
+}
 
 
 def _imported_names(tree: ast.AST) -> set[str]:

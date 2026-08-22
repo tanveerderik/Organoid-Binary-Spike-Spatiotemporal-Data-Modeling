@@ -1,0 +1,81 @@
+{
+  "baseline": "maskgit_flat",
+  "citation": "Chang, Zhang, Jiang, Liu & Freeman, MaskGIT, CVPR 2022; Yu et al., MAGVIT, CVPR 2023",
+  "family": "voxel+token",
+  "conditioning": "gct and lct as MaskGIT prefix conditioning tokens",
+  "notes": "Single flat codebook of 1024 on the same 8x8x16 grid and the same (6,15,14) patch as the pipeline, so token budget and alphabet size are matched. No ladder, no activity prior, no soft field, no adaptation stage. Voxel readout is Bernoulli sampling of the decoder probability with a scalar shift fixing the expected count, not rank thresholding.",
+  "extra": {
+    "n_codes": 1024,
+    "dim": 64,
+    "width": 128,
+    "d_model": 256,
+    "layers": 6,
+    "tok_epochs": 12,
+    "prior_epochs": 30,
+    "tok_lr": 0.0002,
+    "prior_lr": 0.0003,
+    "commit_weight": 0.25,
+    "steps": 12,
+    "temperature": 1.0
+  },
+  "protocol": {
+    "split": "test",
+    "batches": 8,
+    "samples_per_clip": 4,
+    "seed": 20260821,
+    "regimes": [
+      "random",
+      "global_only",
+      "global_partial_local",
+      "global_full_local"
+    ]
+  },
+  "regime_definitions": {
+    "bank": "ckpts/context_prior.pkl",
+    "bank_size": 930,
+    "partial_local_pinned": [
+      "log_mean_firing_density",
+      "active_site_ratio"
+    ],
+    "regimes": {
+      "random": "gct and lct both drawn unconditionally from the train bank",
+      "global_only": "gct pinned; lct retrieved conditioned on gct",
+      "global_partial_local": "gct pinned; ['log_mean_firing_density', 'active_site_ratio'] pinned exactly; rest retrieved",
+      "global_full_local": "gct and lct both pinned to the held-out clip"
+    }
+  },
+  "rate_calibrated_batches": 128,
+  "volume_shape": [
+    48,
+    120,
+    224
+  ],
+  "protocol_verification": {
+    "checked": true,
+    "reference": "reports/generation_regimes_4c_soft",
+    "regimes": {
+      "random": {
+        "reference_n": 128,
+        "baseline_n": 128,
+        "matched": 128
+      },
+      "global_only": {
+        "reference_n": 128,
+        "baseline_n": 128,
+        "matched": 128
+      },
+      "global_partial_local": {
+        "reference_n": 128,
+        "baseline_n": 128,
+        "matched": 128
+      },
+      "global_full_local": {
+        "reference_n": 128,
+        "baseline_n": 128,
+        "matched": 128
+      }
+    },
+    "ok": true,
+    "problems": []
+  }
+}

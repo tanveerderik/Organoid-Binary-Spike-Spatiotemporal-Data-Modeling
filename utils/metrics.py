@@ -23,6 +23,42 @@ def f1_from_bool(y_true: np.ndarray, y_pred: np.ndarray, eps: float = 1e-8) -> f
     return (2.0 * precision * recall) / (precision + recall + eps)
 
 
+def step_average_precision(tp, fp, fn):
+    """Step-wise AP -- sum_i (R_i - R_{i-1}) * P_i -- reported ALONGSIDE AUPRC.
+
+    `PRCurveAccumulator._summarize` integrates with `torch.trapezoid`, which
+    draws a straight line between adjacent operating points. That is valid in
+    ROC space and not in PR space (Davis & Goadrich, ICML 2006): the reachable
+    PR curve between two points bends below the chord, so trapezoid is an upper
+    bound, and an isolated high-precision point at near-zero recall can inflate
+    it without limit.
+
+    On this decoder the two agree to +-0.002, because the probabilities are
+    spread across the threshold grid and no single step moves recall much. The
+    gap is a property of the MODEL being scored, not of the data, so it is
+    reported per run rather than assumed small -- a saturating decoder can open
+    it to +0.22, which is what a saturating external baseline did.
+
+    Deliberately additive. AUPRC and every F1-selected threshold keep their
+    existing definition, so no shipped number and no checkpoint selection moves.
+    """
+    prec = (tp / (tp + fp).clamp(min=1.0)).flip(0)     # thresholds high -> low
+    rec = (tp / (tp + fn).clamp(min=1.0)).flip(0)      # recall ascending
+    d = torch.diff(rec, prepend=rec.new_zeros(1))
+    return float((d.clamp(min=0) * prec).sum())
+
+
+def max_recall_step(tp, fn):
+    """Largest single-step recall jump on the threshold grid.
+
+    The diagnostic for whether the grid resolves this model at all. Large means
+    the operating points are far apart and any interpolated AUPRC is guesswork
+    between them.
+    """
+    rec = tp / (tp + fn).clamp(min=1.0)
+    return float(torch.diff(rec).abs().max())
+
+
 class PRCurveAccumulator:
     """
     One PR curve for the complete evaluation population.

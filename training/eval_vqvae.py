@@ -9,7 +9,8 @@ import torch
 from contextlib import nullcontext
 
 
-from ..utils.metrics import PRCurveAccumulator
+from ..utils.metrics import (
+    PRCurveAccumulator, step_average_precision, max_recall_step)
 from ..utils.losses import tolerant_spike_loss
 
 
@@ -369,6 +370,14 @@ def evaluate_vqvae(
         "val_loss_BCE": total_bce_c / max(1, len(loader)),
         "val_loss_BCE_full": total_bce_full_c / max(1, len(loader)),
         "val_loss_vq": sum_vq_c / max(1, len(loader)),
+        # See utils.metrics.step_average_precision: AUPRC below is the
+        # trapezoid integration this repo has always reported, kept unchanged.
+        # These two say whether that integration is trustworthy for this model.
+        "AP_step": step_average_precision(exact_c.tp, exact_c.fp, exact_c.fn),
+        "AP_step_tol": step_average_precision(
+            tolerant_c.tp, tolerant_c.fp, tolerant_c.fn),
+        "max_recall_step": max_recall_step(exact_c.tp, exact_c.fn),
+        "max_recall_step_tol": max_recall_step(tolerant_c.tp, tolerant_c.fn),
         "AUPRC": auprc_c,
         "BestF1": bestf1_c,
         "BestF1_threshold": bestthr_c,
