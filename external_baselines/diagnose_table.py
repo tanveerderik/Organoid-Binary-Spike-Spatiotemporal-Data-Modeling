@@ -35,6 +35,35 @@ LCT = ["log_mean_firing_density", "var_x", "var_y", "var_t", "cov_xy",
        "cov_xt", "cov_yt", "active_site_ratio", "temporal_trend"]
 
 
+
+def _mark(vals, fmt, better, ref=None):
+    """Format a list of numbers, bolding the best.
+
+    `better` is "high", "low", or "near" -- "near" means closest to `ref`, which
+    is what "best" means for a co-firing probability: matching the real value,
+    not maximising or minimising it. Ties are all bolded, and a row where "best"
+    is meaningless (codebook size, perplexity) passes better=None.
+    """
+    out, keys = [], []
+    for v in vals:
+        ok = isinstance(v, (int, float)) and v == v
+        out.append(fmt.format(v) if ok else "--")
+        if not ok or better is None:
+            keys.append(None)
+        elif better == "high":
+            keys.append(-float(v))
+        elif better == "low":
+            keys.append(float(v))
+        else:
+            keys.append(abs(float(v) - ref))
+    live = [k for k in keys if k is not None]
+    if live:
+        best = min(live)
+        out = [f"**{t}**" if k is not None and k == best else t
+               for t, k in zip(out, keys)]
+    return out
+
+
 def main() -> int:
     J, have = {}, []
     for k, lab in MODELS:
@@ -50,12 +79,14 @@ def main() -> int:
     real = np.array(J[have[0][0]]["context_and_space"]["adjacency_real"], float)
     labels = J[have[0][0]]["context_and_space"]["adjacency_labels"]
 
-    def ladder(title, note, fn, fmt="{:.4f}"):
+    def ladder(title, note, fn, better, fmt="{:.4f}"):
+        """Bold the best MODEL in each rung, i.e. down each column."""
         print(f"\n### {title}\n\n{note}\n")
         print("| model | " + " | ".join(s for _, s in rungs) + " |")
         print("|---|" + "---|" * len(rungs))
-        for k, lab in have:
-            print(f"| {lab} | " + " | ".join(fmt.format(fn(k, r)) for r, _ in rungs) + " |")
+        cols = [_mark([fn(k, r) for k, _ in have], fmt, better) for r, _ in rungs]
+        for i, (k, lab) in enumerate(have):
+            print(f"| {lab} | " + " | ".join(c[i] for c in cols) + " |")
 
     print("# Interpretable diagnostics\n")
     print("8 test batches (32 clips), seed 20260821, identical clips for every "
@@ -73,19 +104,21 @@ def main() -> int:
     R = {k: (J[k].get("reconstruction") or {}) for k, _ in have}
     print("| | " + " | ".join(lab for _, lab in have) + " |")
     print("|---|" + "---|" * len(have))
-    for lab, key, f in (("AP step-wise, exact", "ap_step_exact", "{:.4f}"),
-                        ("AP step-wise, tolerant", "ap_step_tol111", "{:.4f}"),
-                        ("best F1, exact", "best_f1_exact", "{:.4f}"),
-                        ("best F1, tolerant", "best_f1_tol111", "{:.4f}"),
-                        ("trapezoid inflation", None, "{:+.4f}"),
-                        ("codebook used", "codes_used", "{:.0f}"),
-                        ("codebook perplexity", "codebook_perplexity", "{:.1f}")):
-        vals = []
-        for k, _ in have:
-            v = (R[k].get("auprc_exact", float("nan")) - R[k].get("ap_step_exact", float("nan"))
-                 if key is None else R[k].get(key, float("nan")))
-            vals.append(f.format(v) if v == v else "--")
-        print(f"| {lab} | " + " | ".join(vals) + " |")
+    for lab, key, f, better in (
+            ("AP step-wise, exact", "ap_step_exact", "{:.4f}", "high"),
+            ("AP step-wise, tolerant", "ap_step_tol111", "{:.4f}", "high"),
+            ("best F1, exact", "best_f1_exact", "{:.4f}", "high"),
+            ("best F1, tolerant", "best_f1_tol111", "{:.4f}", "high"),
+            # Not a score: how far each model's trapezoid AUPRC sits above its
+            # own step-wise AP. Nearest zero is the trustworthy one.
+            ("trapezoid inflation", None, "{:+.4f}", "low"),
+            # Descriptive, not better-or-worse -- a smaller codebook that
+            # reconstructs as well is not losing.
+            ("codebook used", "codes_used", "{:.0f}", None),
+            ("codebook perplexity", "codebook_perplexity", "{:.1f}", None)):
+        vals = [(R[k].get("auprc_exact", float("nan")) - R[k].get("ap_step_exact", float("nan"))
+                 if key is None else R[k].get(key, float("nan"))) for k, _ in have]
+        print(f"| {lab} | " + " | ".join(_mark(vals, f, better)) + " |")
     print("\nDG and the GLM are point processes with no tokenizer.\n")
 
     print("## Generation\n")
@@ -95,14 +128,14 @@ def main() -> int:
         "the TRUE clip's lct, each feature divided by its spread across test "
         "clips. **Lower is better.** Per-clip, so a paired Wilcoxon applies. "
         "The `random` column is the null.",
-        lambda k, r: np.mean(reg(k, r)["lct_z_mae_per_clip"]))
+        lambda k, r: np.mean(reg(k, r)["lct_z_mae_per_clip"]), "low")
     ladder(
         "B. Adherence  (does it do what it is told)",
         "Mean over the 9 features of r(realised, **requested**) -- against the "
         "lct handed to the model, not the true one. Higher is better. This is a "
         "property of the model, not of how much context it got, so a model that "
         "obeys should be flat across the ladder.",
-        lambda k, r: reg(k, r)["lct_r_mean_vs_used"])
+        lambda k, r: reg(k, r)["lct_r_mean_vs_used"], "high")
     ladder(
         "C. Spatial placement, lookup-proof",
         "Map correlation against the clip's own electrodes MINUS the same "
@@ -110,7 +143,7 @@ def main() -> int:
         "`assay_idx` bypasses the ladder, so raw map r is mostly a per-assay "
         "lookup for DG and the GLM; this difference is the part a fixed site "
         "map cannot fake. Higher is better.",
-        lambda k, r: reg(k, r)["within_assay_gap"])
+        lambda k, r: reg(k, r)["within_assay_gap"], "high")
 
     def sre(k, r):
         a = np.array(reg(k, r)["adjacency"], float)
@@ -124,16 +157,17 @@ def main() -> int:
         "on purpose -- a log-ratio explodes when a model emits exactly zero "
         "co-firing at some offset, which ours does at d=3. **Lower is better**, "
         "and this one does not depend on conditioning.",
-        sre)
+        sre, "low")
 
     print("\n### Adjacency profile at full context  P(spike at neighbour | spike)\n")
+    print("Best = closest to REAL, not largest or smallest.\n")
     print("| offset | REAL | " + " | ".join(lab for _, lab in have) + " |")
     print("|---|---|" + "---|" * len(have))
     for i, lab in enumerate(labels):
-        cells = []
-        for k, _ in have:
-            v = reg(k, "global_full_local")["adjacency"][i]
-            cells.append(f"{v:.5f} ({v/real[i]:.2f}x)" if real[i] else f"{v:.5f}")
+        vals = [reg(k, "global_full_local")["adjacency"][i] for k, _ in have]
+        marked = _mark(vals, "{:.5f}", "near", ref=real[i])
+        cells = [m if not real[i] else f"{m} ({v/real[i]:.2f}x)"
+                 for m, v in zip(marked, vals)]
         print(f"| {lab} | {real[i]:.5f} | " + " | ".join(cells) + " |")
 
     print("\n### Per-feature lct, ours\n")
