@@ -22,3 +22,8 @@ reports/generation_regimes_*/*/stats/
 # Seed-variance ablation weights: fully summarised by
 # reports/stage4c_seed_deployment.json, not worth 25MB in history.
 ckpts/motif_prior_adapt_SEED*.pt
+
+# external baselines: fitted weights and generated sample trees
+ckpts/external_baselines/*.pt
+reports/external_baselines/*/*/videos/
+reports/external_baselines/*/*/stats/
