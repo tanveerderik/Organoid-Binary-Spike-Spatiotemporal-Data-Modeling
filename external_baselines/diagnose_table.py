@@ -36,6 +36,21 @@ LCT = ["log_mean_firing_density", "var_x", "var_y", "var_t", "cov_xy",
 
 
 
+ARROW = {"high": "\u2191", "low": "\u2193", "near": "\u2248REAL", None: ""}
+
+
+def _arrow(better):
+    """Direction marker for a metric label.
+
+    Three directions, not two. `near` exists because a co-firing probability
+    has no good direction: matching the real value is the goal, and both
+    over- and under-producing are failures. Labelling that row with an arrow
+    would tell the reader the opposite of the truth.
+    """
+    a = ARROW[better]
+    return f" {a}" if a else ""
+
+
 def _mark(vals, fmt, better, ref=None):
     """Format a list of numbers, bolding the best.
 
@@ -81,8 +96,8 @@ def main() -> int:
 
     def ladder(title, note, fn, better, fmt="{:.4f}"):
         """Bold the best MODEL in each rung, i.e. down each column."""
-        print(f"\n### {title}\n\n{note}\n")
-        print("| model | " + " | ".join(s for _, s in rungs) + " |")
+        print(f"\n### {title}{_arrow(better)}\n\n{note}\n")
+        print(f"| model{_arrow(better)} | " + " | ".join(s for _, s in rungs) + " |")
         print("|---|" + "---|" * len(rungs))
         cols = [_mark([fn(k, r) for k, _ in have], fmt, better) for r, _ in rungs]
         for i, (k, lab) in enumerate(have):
@@ -94,6 +109,11 @@ def main() -> int:
           "not a rung: it hands the model the true lct with a MISMATCHED gct, so "
           "it is not 'less information' than `random` but contradictory "
           "information.\n")
+    print("Bold marks the best model for each metric. "
+          "\u2191 higher is better, \u2193 lower is better, "
+          "\u2248REAL means the target is the real value itself, so both "
+          "over- and under-shooting are failures. Rows with no arrow are "
+          "descriptive and have no better direction.\n")
 
     # ---- reconstruction ------------------------------------------------
     print("## Reconstruction\n")
@@ -118,7 +138,7 @@ def main() -> int:
             ("codebook perplexity", "codebook_perplexity", "{:.1f}", None)):
         vals = [(R[k].get("auprc_exact", float("nan")) - R[k].get("ap_step_exact", float("nan"))
                  if key is None else R[k].get(key, float("nan"))) for k, _ in have]
-        print(f"| {lab} | " + " | ".join(_mark(vals, f, better)) + " |")
+        print(f"| {lab}{_arrow(better)} | " + " | ".join(_mark(vals, f, better)) + " |")
     print("\nDG and the GLM are point processes with no tokenizer.\n")
 
     print("## Generation\n")
@@ -161,7 +181,7 @@ def main() -> int:
 
     print("\n### Adjacency profile at full context  P(spike at neighbour | spike)\n")
     print("Best = closest to REAL, not largest or smallest.\n")
-    print("| offset | REAL | " + " | ".join(lab for _, lab in have) + " |")
+    print(f"| offset{_arrow('near')} | REAL | " + " | ".join(lab for _, lab in have) + " |")
     print("|---|---|" + "---|" * len(have))
     for i, lab in enumerate(labels):
         vals = [reg(k, "global_full_local")["adjacency"][i] for k, _ in have]
@@ -171,7 +191,7 @@ def main() -> int:
         print(f"| {lab} | {real[i]:.5f} | " + " | ".join(cells) + " |")
 
     print("\n### Per-feature lct, ours\n")
-    print("| feature | " + " | ".join(s for _, s in rungs) + " |")
+    print(f"| feature{_arrow('high')} | " + " | ".join(s for _, s in rungs) + " |")
     print("|---|" + "---|" * len(rungs))
     for f in LCT:
         print(f"| {f} | " + " | ".join(
