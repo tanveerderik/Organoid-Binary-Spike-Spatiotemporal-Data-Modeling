@@ -55,6 +55,25 @@ Scoring writes the **same tree** as the pipeline's own `generation_regimes_*`
 sample sets, so `analysis/compare_regimes.py` can run its paired cross-set test
 and BH-FDR against a baseline with no new statistics code.
 
+## One protocol, verified
+
+The deliverable is a comparative table, so every row is produced identically.
+`common/evaluate.py::REFERENCE_PROTOCOL` mirrors the defaults the pipeline's own
+`reports/generation_regimes_*` sets were generated under -- test split, 8
+batches, 4 samples per clip, seed 20260821, the same context bank, the same
+pinned partial-local features -- and the sampling loop replicates
+`generate_regimes.py`'s `batch -> regime -> rep` ordering, because sample indices
+are what the cross-set paired test joins on.
+
+This is checked rather than assumed. `verify_against_reference()` compares the
+produced manifest against a real model manifest clip by clip and raises on
+mismatch; `compare_table.py` refuses to build a table from unaligned sets. The
+check earned its place immediately: the first DG run used 128 distinct clips
+while the model's sets used 32 clips x 4 draws. Same n, different clips.
+
+Baselines also run the full conditioning ladder (`common/ladder.py`), so every
+method is asked the same monotone sequence of context questions.
+
 ## The rate-calibration row
 
 The shipped decode path binarises with an F1-selected threshold (`best_thr_tol`,
@@ -68,6 +87,15 @@ model is re-binarised at a per-clip threshold hitting the **train** assay mean
 rate. That uses no held-out information and is available to all. Report both
 rows; the raw one is honest about the deployed system, the calibrated one is
 honest about the model.
+
+**The invariant held fixed is the rate, not the mechanism.** Rank-thresholding
+suits a model whose score is a noisy field (the DG, the MaskGIT decoder) but
+destroys a point process: top-k over the GLM's log-intensity is dominated by its
+static per-electrode baseline and returns time-columns rather than spike trains
+(stat_error 2.98 and ks_isi 0.93, against 0.87 and 0.37 for its own samples).
+The GLM therefore returns `None` from `sample_intensity` and matches its rate
+where a point process should -- a free-running DC offset fitted on train data
+inside `fit()`. Each baseline's mechanism is recorded in its `run_config.json`.
 
 ## Data regime, and why it dictates the baselines
 
