@@ -97,6 +97,30 @@ The GLM therefore returns `None` from `sample_intensity` and matches its rate
 where a point process should -- a free-running DC offset fitted on train data
 inside `fit()`. Each baseline's mechanism is recorded in its `run_config.json`.
 
+## Readout: what each model does to produce a binary volume
+
+Every method must emit spikes, and how it gets there is not a free choice --
+using the wrong operation makes a correctly-fitted model look broken. Both
+mistakes below were made here first and caught by measurement.
+
+| baseline | model output | readout | why |
+|---|---|---|---|
+| DG | latent Gaussian field `U`, per-voxel threshold `theta` | `U > theta` | the DG construction itself |
+| GLM | conditional intensity per bin | Bernoulli, sequential | it *is* a point process |
+| MaskGIT-flat | per-voxel decoder probability | Bernoulli + scalar shift | decoder trained with BCE |
+
+The rule: **threshold a noisy score, sample a probability.** Rank-thresholding a
+smooth probability field picks contiguous voxels inside the hottest regions, and
+because each MaskGIT token expands to a 6x15x14 block that yields blobs instead
+of isolated spike events -- measured at 11x the real spatial co-activation.
+Rank-thresholding a point-process intensity is worse still, since the static
+per-electrode baseline dominates and the result is time-columns.
+
+Every baseline matches its rate **in expectation** and none is handed the
+realised count of the clip it is scored against. Forcing an exact count by top-k
+produces an artificially small `rel_rate` that is a property of the readout, not
+the model.
+
 ## Data regime, and why it dictates the baselines
 
 Measured on the test split: **~200 spikes per 48x120x224 clip, voxel rate

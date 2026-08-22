@@ -469,14 +469,33 @@ class DichotomizedGaussian(SpikeVolumeBaseline):
         theta = torch.from_numpy(
             norm.isf(p_site.clamp(1e-9, 0.5).cpu().numpy())
         ).float().to(device)
+        # Score is U - theta, so the DG spike condition is simply score > 0 and
+        # the same quantity doubles as the rank-ordering for the calibrated row.
         return field - theta.unsqueeze(1)
 
     @torch.no_grad()
     def sample(self, cond: ConditioningBatch, *, generator=None) -> torch.Tensor:
-        from ..common.evaluate import binarise_at_rate
+        """Spike where the latent field exceeds the per-voxel threshold.
+
+        This is the Dichotomized Gaussian as defined: U > theta, with the spike
+        count falling out at random rather than being imposed.
+
+        An earlier version forced the exact predicted count by top-k. That is
+        not the construction, and it was also inconsistent with the other two
+        baselines, which now both draw stochastically from their model's own
+        distribution -- Bernoulli for the GLM and for the MaskGIT decoder. It
+        showed up as an artificially tiny rel_rate of 0.0075, which was a
+        property of the readout rather than of the model. All three baselines
+        now match their rate in EXPECTATION and none of them are handed the
+        realised count.
+
+        The rank-thresholded variant is still produced, as the separate
+        `__rate_cal` row, where it is labelled as a calibration rather than
+        presented as the model.
+        """
         score = self._draw_score(cond, generator)
         self._last_intensity = score
-        return binarise_at_rate(score, self._target_rate(cond).to(score.device))
+        return (score > 0).float()
 
     # ------------------------------------------------------------------
     def save(self, path: Path) -> None:
