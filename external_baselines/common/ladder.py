@@ -38,7 +38,12 @@ from MAGVIT_project.utils.constants import ACTIVITY_CTX_NAMES
 
 from .protocol import ConditioningBatch
 
-REGIMES = ("random", "global_only", "global_partial_local", "global_full_local")
+# Ordered by how much is pinned to the held-out clip. `local_only` is off the
+# main ladder -- it is the CONTROL that separates assay-level from clip-level
+# information, not another rung between the others -- so it is listed last and
+# `analysis/generate_regimes.py` does not produce it.
+REGIMES = ("random", "global_only", "global_partial_local", "global_full_local",
+           "local_only")
 
 # The two an experimenter could actually state up front: how active the culture
 # is, and on what fraction of sites. The variances, covariances and trend
@@ -50,6 +55,7 @@ CTX_FLAGS = {
     "global_only": {"global": True, "local": False},
     "global_partial_local": {"global": True, "local": "partial"},
     "global_full_local": {"global": True, "local": True},
+    "local_only": {"global": False, "local": True},
 }
 
 
@@ -99,6 +105,13 @@ class ContextLadder:
             if regime == "random":
                 s = self.bank.sample_unconditional(batch_size=1)
                 g_out[i], l_out[i] = s["global_ctx"][0], s["local_ctx"][0]
+            elif regime == "local_only":
+                # The mirror of global_only, and the rung the ladder was
+                # missing: we know what the culture DID but not which
+                # preparation it was. gct is drawn unconditionally, so any
+                # assay-level structure in the sample has to come from lct.
+                s = self.bank.sample_unconditional(batch_size=1)
+                g_out[i], l_out[i] = s["global_ctx"][0], l_np[i]
             elif regime == "global_only":
                 s = self.bank.sample_given_global(g_np[i], batch_size=1)
                 g_out[i], l_out[i] = g_np[i], s["local_ctx"][0]
@@ -118,4 +131,10 @@ class ContextLadder:
             assay_idx=cond.assay_idx,
             shape=cond.shape,
             assay_name=cond.assay_name,
+            # Array geometry must survive every rung. Dropping it here silently
+            # decoded three of the four rungs without the electrode layout while
+            # `global_full_local` (which returns `cond` untouched) kept it, so
+            # the rungs were not comparable for any model that reads it.
+            roi_hw=cond.roi_hw,
+            pad_hw=cond.pad_hw,
         )

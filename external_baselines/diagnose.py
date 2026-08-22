@@ -260,8 +260,15 @@ def _map_controls(gms, tms, assays, *, max_pairs=4000, seed=0):
 
 def context_and_space(baseline, batches, device, ladder, gen, regimes):
     """Sections 3-5 -- lct adherence, spatial map, adjacency."""
-    res = {r: {"lct_err": [], "lct_pairs": [], "map_r": [], "map_cos": [],
-               "site_iou": [], "gm": [], "tm": [], "assay": []} for r in regimes}
+    # Two different questions, and under partial context they diverge:
+    #   lct_pairs   got vs the vector the model was GIVEN  -> ADHERENCE
+    #   lct_true    got vs the held-out clip's own lct     -> ACCURACY
+    # Under `global_full_local` these are the same vector, so the distinction
+    # only becomes visible on the partial rungs -- which is exactly where the
+    # practical question lives ("I know the prep and roughly how active it is").
+    res = {r: {"lct_err": [], "lct_pairs": [], "lct_true": [], "map_r": [],
+               "map_cos": [], "site_iou": [], "gm": [], "tm": [], "assay": []}
+           for r in regimes}
     adj = {r: [] for r in regimes}
     adj_real = []
     disp = (1, 2, 3)
@@ -283,6 +290,11 @@ def context_and_space(baseline, batches, device, ladder, gen, regimes):
 
     for cond, real in bdata.iter_split("test", batches=batches):
         cond_d = cond.to(device)
+        # The clip's OWN lct, recomputed the same way the generated one is, so
+        # the two are commensurable. Not a leak: it is a metric target, never
+        # reaches a model.
+        true_lct = np.stack([compute_activity_ctx(real[i].numpy())
+                             for i in range(real.shape[0])])
         for i in range(real.shape[0]):
             adj_real.append(adjacency(real[i]))
         for r in regimes:
@@ -293,6 +305,7 @@ def context_and_space(baseline, batches, device, ladder, gen, regimes):
                 got = compute_activity_ctx(v[i].numpy())
                 res[r]["lct_err"].append(np.abs(got - lct_used[i]))
                 res[r]["lct_pairs"].append((got, lct_used[i]))
+                res[r]["lct_true"].append((got, true_lct[i]))
                 gm = v[i].sum(0).numpy().ravel()
                 tm = real[i].sum(0).numpy().ravel()
                 if gm.std() > 0 and tm.std() > 0:
@@ -314,13 +327,40 @@ def context_and_space(baseline, batches, device, ladder, gen, regimes):
     for r in regimes:
         pairs = res[r]["lct_pairs"]
         got = np.array([p[0] for p in pairs]); want = np.array([p[1] for p in pairs])
+        tp = res[r]["lct_true"]
+        got_t = np.array([q[0] for q in tp]); want_t = np.array([q[1] for q in tp])
+
+        def _rr(g, w):
+            ok = np.isfinite(g) & np.isfinite(w)
+            if ok.sum() <= 3 or g[ok].std() == 0 or w[ok].std() == 0:
+                return np.nan, np.nan
+            return (float(np.corrcoef(g[ok], w[ok])[0, 1]),
+                    float(np.mean(np.abs(g[ok] - w[ok]))))
+
         per_feat = {}
         for j, nm in enumerate(ACTIVITY_CTX_NAMES):
-            g, w = got[:, j], want[:, j]
-            ok = np.isfinite(g) & np.isfinite(w)
-            rr = float(np.corrcoef(g[ok], w[ok])[0, 1]) if ok.sum() > 3 and g[ok].std() > 0 and w[ok].std() > 0 else np.nan
-            per_feat[nm] = {"r": rr, "mae": float(np.mean(np.abs(g[ok] - w[ok])))}
+            rr, mae = _rr(got[:, j], want[:, j])
+            rt, maet = _rr(got_t[:, j], want_t[:, j])
+            per_feat[nm] = {"r": rr, "mae": mae, "r_vs_true": rt, "mae_vs_true": maet}
+        # Per-clip scalar, so the comparison admits a PAIRED test. The mean-r
+        # summaries above are pooled over clips and cannot be tested that way.
+        # Each feature is divided by its spread across the real test clips, so
+        # the nine features contribute comparably instead of the metric being
+        # whichever one has the largest units.
+        sd = np.nanstd(want_t, axis=0)
+        sd[~np.isfinite(sd) | (sd <= 0)] = 1.0
+        per_clip = np.nanmean(np.abs(got_t - want_t) / sd, axis=1)
+
         out["regimes"][r] = {
+            "lct_z_mae_per_clip": [float(v) for v in per_clip],
+            "lct_z_mae": float(np.nanmean(per_clip)),
+            # Single-number summaries: the mean over the 9 features of the
+            # correlation between requested and realised (adherence) and
+            # between realised and the true clip (accuracy).
+            "lct_r_mean_vs_used": float(np.nanmean(
+                [per_feat[n]["r"] for n in ACTIVITY_CTX_NAMES])),
+            "lct_r_mean_vs_true": float(np.nanmean(
+                [per_feat[n]["r_vs_true"] for n in ACTIVITY_CTX_NAMES])),
             **_map_controls(res[r]["gm"], res[r]["tm"], res[r]["assay"]),
             "lct_per_feature": per_feat,
             "lct_mae_mean": float(np.nanmean(np.array(res[r]["lct_err"]))),
@@ -342,7 +382,8 @@ def main() -> int:
     ap.add_argument("--batches", type=int, default=8)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--seed", type=int, default=20260821)
-    ap.add_argument("--regimes", default="random,global_full_local")
+    ap.add_argument("--regimes",
+                    default="random,global_only,global_partial_local,global_full_local")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -408,8 +449,17 @@ def main() -> int:
         row = "   " + f"{nm:26s}"
         for r in regimes:
             e = cs["regimes"][r]["lct_per_feature"][nm]
-            row += f"{('r=%+.2f mae=%.3f' % (e['r'], e['mae'])):>18s}"
+            row += f"{('%+.2f / %+.2f' % (e['r'], e['r_vs_true'])):>18s}"
         print(row)
+    print("   " + f"{'MEAN over 9 features':26s}" +
+          "".join(f"{('%+.2f / %+.2f' % (cs['regimes'][r]['lct_r_mean_vs_used'], cs['regimes'][r]['lct_r_mean_vs_true'])):>18s}"
+                  for r in regimes))
+    print("   each cell is  r(vs the lct GIVEN) / r(vs the TRUE clip's lct).")
+    print("   They coincide under global_full_local and separate on the partial rungs:")
+    print("   the first is obedience, the second is whether obedience was enough.")
+    print("   " + f"{'per-clip z-MAE vs true':26s}" +
+          "".join(f"{cs['regimes'][r]['lct_z_mae']:18.4f}" for r in regimes)
+          + "   <- lower is better, paired-testable")
 
     print("\n" + "=" * 74)
     print("4. SPATIAL MAP ADHERENCE   (per-electrode counts vs the true clip)")

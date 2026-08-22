@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
-"""Merge the per-model diagnose_*.json into one side-by-side table.
+"""Merge the per-model diagnose_*.json into one side-by-side report.
 
-`compare_table.py` answers "which model scores better on the generation
-statistics". This answers "does the model work, and how", which is the question
-a reader asks first and the one a summary statistic cannot settle. Every row is
-either against chance, against the `random`-context control, or against the real
-value, so no number needs the reader to already know the scale.
+`compare_table.py` answers "which model scores better on the pooled generation
+statistics". That question turned out to be nearly unanswerable -- the pooled
+statistics cannot see conditioning at all, so a model that ignores its context
+and emits the dataset average scores well on them.
+
+This answers the two questions that ARE answerable, and keeps them apart
+because no model wins both:
+
+    CONDITIONAL   given this much context, does the sample match THIS clip?
+    MARGINAL      does the sample look like real data at all?
+
+Four families, no composite. Each is one number with a stated null, and the
+conditional ones are per-clip so they admit a paired test.
 
     python external_baselines/diagnose_table.py > reports/external_baselines/diagnostics.md
 """
@@ -15,124 +23,130 @@ import json
 import sys
 from pathlib import Path
 
+import numpy as np
+
 DIR = Path("reports/external_baselines")
 MODELS = [("pipeline", "Ours (4C+soft)"), ("maskgit_flat", "MaskGIT-flat"),
           ("dg", "Dich. Gaussian"), ("glm", "Coupled GLM")]
+RUNGS = [("random", "random"), ("local_only", "LOCAL only"),
+         ("global_only", "GLOBAL only"), ("global_partial_local", "glob+partial"),
+         ("global_full_local", "glob+full")]
 LCT = ["log_mean_firing_density", "var_x", "var_y", "var_t", "cov_xy",
        "cov_xt", "cov_yt", "active_site_ratio", "temporal_trend"]
 
 
-def load():
-    out = {}
-    for key, label in MODELS:
-        p = DIR / f"diagnose_{key}.json"
-        if p.exists():
-            out[key] = json.loads(p.read_text())
-    return out
-
-
-def row(label, vals, fmt="{:.4f}", note=""):
-    cells = " | ".join(fmt.format(v) if isinstance(v, (int, float)) and v == v
-                       else "--" for v in vals)
-    return f"| {label} | {cells} |" + (f" {note}" if note else "")
-
-
 def main() -> int:
-    D = load()
-    have = [(k, lab) for k, lab in MODELS if k in D]
-    head = "| | " + " | ".join(lab for _, lab in have) + " |"
-    rule = "|---|" + "---|" * len(have)
+    J, have = {}, []
+    for k, lab in MODELS:
+        p = DIR / f"diagnose_{k}.json"
+        if p.exists():
+            J[k] = json.loads(p.read_text()); have.append((k, lab))
+    rungs = [(r, s) for r, s in RUNGS
+             if r in J[have[0][0]]["context_and_space"]["regimes"]]
+
+    def reg(k, r):
+        return J[k]["context_and_space"]["regimes"][r]
+
+    real = np.array(J[have[0][0]]["context_and_space"]["adjacency_real"], float)
+    labels = J[have[0][0]]["context_and_space"]["adjacency_labels"]
+
+    def ladder(title, note, fn, fmt="{:.4f}"):
+        print(f"\n### {title}\n\n{note}\n")
+        print("| model | " + " | ".join(s for _, s in rungs) + " |")
+        print("|---|" + "---|" * len(rungs))
+        for k, lab in have:
+            print(f"| {lab} | " + " | ".join(fmt.format(fn(k, r)) for r, _ in rungs) + " |")
 
     print("# Interpretable diagnostics\n")
     print("8 test batches (32 clips), seed 20260821, identical clips for every "
-          "model. Generated volumes come from each model's own shipped readout.\n")
+          "model, each model's own shipped readout. `local_only` is a control, "
+          "not a rung: it hands the model the true lct with a MISMATCHED gct, so "
+          "it is not 'less information' than `random` but contradictory "
+          "information.\n")
 
-    print("## 1. Tokenizer reconstruction  (encode -> quantize -> decode)\n")
-    print("Step-wise average precision, NOT the trapezoid AUPRC in "
-          "`utils/metrics.py`. Trapezoid linearly interpolates the PR curve, "
+    # ---- reconstruction ------------------------------------------------
+    print("## Reconstruction\n")
+    print("Step-wise average precision, not the trapezoid AUPRC in "
+          "`utils/metrics.py` -- trapezoid interpolates the PR curve linearly, "
           "which is invalid (Davis & Goadrich 2006) and inflated the saturating "
-          "MaskGIT tokenizer by +0.22 off a single voxel. The `interp. "
-          "inflation` row shows how much each model was affected.\n")
-    print(head); print(rule)
-    R = {k: (D[k].get("reconstruction") or {}) for k, _ in have}
-    for lab, key in (("AP step-wise, exact", "ap_step_exact"),
-                     ("AP step-wise, tolerant (1,1,1)", "ap_step_tol111"),
-                     ("best F1, exact", "best_f1_exact"),
-                     ("best F1, tolerant", "best_f1_tol111")):
-        print(row(lab, [R[k].get(key, float("nan")) for k, _ in have]))
-    print(row("chance (base rate)",
-              [R[k].get("base_rate", float("nan")) for k, _ in have], "{:.2e}"))
-    print(row("x chance (exact)",
-              [R[k].get("ap_step_exact", float("nan")) /
-               max(R[k].get("base_rate", 1) or 1, 1e-12) for k, _ in have],
-              "{:,.0f}x"))
-    print(row("interp. inflation (exact)",
-              [R[k].get("auprc_exact", float("nan")) -
-               R[k].get("ap_step_exact", float("nan")) for k, _ in have], "{:+.4f}"))
-    print(row("codebook used",
-              [R[k].get("codes_used", float("nan")) for k, _ in have], "{:.0f}"))
-    print(row("codebook perplexity",
-              [R[k].get("codebook_perplexity", float("nan")) for k, _ in have], "{:.1f}"))
-    print("\nDG and the GLM have no tokenizer; they are point-process models "
-          "and this section does not apply to them.\n")
-
-    print("## 2. Is the generated field informative?  (the all-blank check)\n")
-    print(head); print(rule)
-    G = {k: D[k]["degeneracy"] for k, _ in have}
-    for lab, key in (("all-blank samples", "all_blank_fraction"),
-                     ("AUPRC vs its OWN clip", "auprc_vs_own_clip"),
-                     ("AUPRC vs a DIFFERENT clip", "auprc_vs_other_clip"),
-                     ("**clip-specific margin**", "clip_specific_margin"),
-                     ("field std (flat would be ~0)", "field_std")):
-        print(row(lab, [G[k].get(key, float("nan")) for k, _ in have]))
-
-    print("\n## 3. Local context adherence  (9 lct features recomputed "
-          "from the sample, r vs the vector the model was GIVEN)\n")
-    print("| feature | " + " | ".join(f"{lab} rnd -> full" for _, lab in have) + " |")
+          "MaskGIT tokenizer by +0.22 off a single voxel.\n")
+    R = {k: (J[k].get("reconstruction") or {}) for k, _ in have}
+    print("| | " + " | ".join(lab for _, lab in have) + " |")
     print("|---|" + "---|" * len(have))
-    for f in LCT:
-        cells = []
+    for lab, key, f in (("AP step-wise, exact", "ap_step_exact", "{:.4f}"),
+                        ("AP step-wise, tolerant", "ap_step_tol111", "{:.4f}"),
+                        ("best F1, exact", "best_f1_exact", "{:.4f}"),
+                        ("best F1, tolerant", "best_f1_tol111", "{:.4f}"),
+                        ("trapezoid inflation", None, "{:+.4f}"),
+                        ("codebook used", "codes_used", "{:.0f}"),
+                        ("codebook perplexity", "codebook_perplexity", "{:.1f}")):
+        vals = []
         for k, _ in have:
-            reg = D[k]["context_and_space"]["regimes"]
-            a = reg["random"]["lct_per_feature"][f]["r"]
-            b = reg["global_full_local"]["lct_per_feature"][f]["r"]
-            cells.append(f"{a:+.2f} -> {b:+.2f}")
-        print(f"| {f} | " + " | ".join(cells) + " |")
-    print("\n`log_mean_firing_density` is CIRCULAR for DG and MaskGIT-flat -- "
-          "their firing rate is regressed directly from lct, so a high r there "
-          "measures the regression, not the model.\n")
+            v = (R[k].get("auprc_exact", float("nan")) - R[k].get("ap_step_exact", float("nan"))
+                 if key is None else R[k].get(key, float("nan")))
+            vals.append(f.format(v) if v == v else "--")
+        print(f"| {lab} | " + " | ".join(vals) + " |")
+    print("\nDG and the GLM are point processes with no tokenizer.\n")
 
-    print("## 4. Spatial map  (per-electrode counts vs the true clip)\n")
-    print(head); print(rule)
-    for lab, key in (("pearson r, random ctx", "map_pearson_r"),
-                     ("pearson r, full ctx", "map_pearson_r"),
-                     ("vs other clip, SAME assay (full)", "map_r_other_clip_same_assay"),
-                     ("vs a different assay (full)", "map_r_other_assay"),
-                     ("**within-assay gap**", "within_assay_gap"),
-                     ("assay-identity component", "assay_identity_component"),
-                     ("active-site IoU, full ctx", "active_site_iou")):
-        regime = "random" if "random" in lab else "global_full_local"
-        print(row(lab, [D[k]["context_and_space"]["regimes"][regime].get(key, float("nan"))
-                        for k, _ in have]))
-    print("\n`assay_idx` reaches every model unchanged in EVERY regime -- the "
-          "ladder randomises gct/lct, not assay identity. DG and the GLM key "
-          "their train-fitted site maps on it, so their `random` rung is not a "
-          "control and their pearson r is mostly a per-assay lookup. The "
-          "**within-assay gap** -- own clip minus a different clip from the "
-          "same assay -- is the only row a fixed site map cannot fake.\n")
+    print("## Generation\n")
+    ladder(
+        "A. Conditional accuracy  (the headline)",
+        "Per-clip z-scored MAE between the lct recomputed from the sample and "
+        "the TRUE clip's lct, each feature divided by its spread across test "
+        "clips. **Lower is better.** Per-clip, so a paired Wilcoxon applies. "
+        "The `random` column is the null.",
+        lambda k, r: np.mean(reg(k, r)["lct_z_mae_per_clip"]))
+    ladder(
+        "B. Adherence  (does it do what it is told)",
+        "Mean over the 9 features of r(realised, **requested**) -- against the "
+        "lct handed to the model, not the true one. Higher is better. This is a "
+        "property of the model, not of how much context it got, so a model that "
+        "obeys should be flat across the ladder.",
+        lambda k, r: reg(k, r)["lct_r_mean_vs_used"])
+    ladder(
+        "C. Spatial placement, lookup-proof",
+        "Map correlation against the clip's own electrodes MINUS the same "
+        "generated map scored against a different clip of the SAME assay. "
+        "`assay_idx` bypasses the ladder, so raw map r is mostly a per-assay "
+        "lookup for DG and the GLM; this difference is the part a fixed site "
+        "map cannot fake. Higher is better.",
+        lambda k, r: reg(k, r)["within_assay_gap"])
 
-    print("## 5. Adjacency  P(spike at neighbour | spike), full context\n")
-    print("| | REAL | " + " | ".join(lab for _, lab in have) + " |")
+    def sre(k, r):
+        a = np.array(reg(k, r)["adjacency"], float)
+        return float(np.nanmean(np.abs(a - real) / (a + real)))
+
+    ladder(
+        "D. Marginal realism",
+        "Mean symmetric relative error `|gen-real|/(gen+real)` of the "
+        "co-firing profile over 3 spatial displacements and 7 temporal lags. "
+        "Bounded in [0,1]: 0 matches real exactly, 1 is a total miss. Bounded "
+        "on purpose -- a log-ratio explodes when a model emits exactly zero "
+        "co-firing at some offset, which ours does at d=3. **Lower is better**, "
+        "and this one does not depend on conditioning.",
+        sre)
+
+    print("\n### Adjacency profile at full context  P(spike at neighbour | spike)\n")
+    print("| offset | REAL | " + " | ".join(lab for _, lab in have) + " |")
     print("|---|---|" + "---|" * len(have))
-    labels = D[have[0][0]]["context_and_space"]["adjacency_labels"]
-    real = D[have[0][0]]["context_and_space"]["adjacency_real"]
     for i, lab in enumerate(labels):
         cells = []
         for k, _ in have:
-            v = D[k]["context_and_space"]["regimes"]["global_full_local"]["adjacency"][i]
-            ratio = v / real[i] if real[i] else float("nan")
-            cells.append(f"{v:.5f} ({ratio:.1f}x)")
+            v = reg(k, "global_full_local")["adjacency"][i]
+            cells.append(f"{v:.5f} ({v/real[i]:.2f}x)" if real[i] else f"{v:.5f}")
         print(f"| {lab} | {real[i]:.5f} | " + " | ".join(cells) + " |")
+
+    print("\n### Per-feature lct, ours\n")
+    print("| feature | " + " | ".join(s for _, s in rungs) + " |")
+    print("|---|" + "---|" * len(rungs))
+    for f in LCT:
+        print(f"| {f} | " + " | ".join(
+            f"{reg('pipeline', r)['lct_per_feature'][f]['r']:+.2f}"
+            for r, _ in rungs) + " |")
+    print("\nr against the REQUESTED lct. The spatial-shape features (var_x, "
+          "var_y, cov_xy) collapse under `LOCAL only` while rate and trend "
+          "survive: the electrode layout arrives through gct, so a mismatched "
+          "gct makes a requested spatial variance physically unrealisable.\n")
     return 0
 
 
