@@ -32,8 +32,20 @@ import torch.nn.functional as F
 
 
 def cosine_schedule(r: torch.Tensor) -> torch.Tensor:
-    """MaskGIT's mask-ratio schedule: gamma(r) = cos(pi/2 * (1-r))."""
-    return torch.cos(math.pi / 2.0 * (1.0 - r))
+    """MaskGIT's mask-ratio schedule, in the paper's orientation.
+
+        gamma(r) = cos(pi/2 * r)
+
+    `r` is progress in [0,1] and the return value is the fraction of tokens
+    STILL MASKED at that point: gamma(0)=1 (everything masked), gamma(1)=0
+    (nothing masked), monotone decreasing in between.
+
+    This file previously defined the complement, cos(pi/2*(1-r)). Both call
+    sites compensated, so behaviour was correct, but the function did not match
+    the convention in the paper -- which is the first thing anyone checking this
+    implementation against MaskGIT will compare.
+    """
+    return torch.cos(math.pi / 2.0 * r)
 
 
 class Block(nn.Module):
@@ -81,6 +93,8 @@ class MaskGITPrior(nn.Module):
     def loss(self, ids, gct, lct, generator=None):
         """Masked-token cross-entropy under the cosine schedule."""
         B, N = ids.shape
+        # r ~ U(0,1) so gamma(r) sweeps the full range of mask ratios; at least
+        # one token is always masked or the batch contributes no loss term.
         r = torch.rand(B, 1, device=ids.device, generator=generator)
         n_mask = (cosine_schedule(r) * N).clamp(min=1).long()          # (B,1)
         noise = torch.rand(B, N, device=ids.device, generator=generator)
@@ -124,8 +138,9 @@ class MaskGITPrior(nn.Module):
             # already-known tokens must never be reconsidered
             conf = conf.masked_fill(~unknown, float("inf"))
 
+            # Tokens still masked after this step, straight from the schedule.
             r = torch.tensor((t + 1) / steps, device=dev)
-            keep_masked = int(((1.0 - cosine_schedule(r)) * self.n_tokens).item())
+            keep_masked = int((cosine_schedule(r) * self.n_tokens).item())
             if t == steps - 1 or keep_masked <= 0:
                 unknown = torch.zeros_like(unknown)
                 break

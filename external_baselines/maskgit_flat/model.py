@@ -80,7 +80,9 @@ class MaskGITFlat(SpikeVolumeBaseline):
             notes=("Single flat codebook of 1024 on the same 8x8x16 grid and the "
                    "same (6,15,14) patch as the pipeline, so token budget and "
                    "alphabet size are matched. No ladder, no activity prior, no "
-                   "soft field, no adaptation stage."),
+                   "soft field, no adaptation stage. Voxel readout is Bernoulli "
+                   "sampling of the decoder probability with a scalar shift "
+                   "fixing the expected count, not rank thresholding."),
             extra=self.cfg,
         )
 
@@ -213,12 +215,45 @@ class MaskGITFlat(SpikeVolumeBaseline):
         grid = ids.reshape(ids.shape[0], *GRID)
         return self.tokenizer.decode_ids(grid)[:, 0]          # (B,T,H,W)
 
+    @staticmethod
+    def _bernoulli_at_rate(logits: torch.Tensor, target: torch.Tensor,
+                           generator=None) -> torch.Tensor:
+        """Sample Bernoulli(sigmoid(logits + b)) with b set so E[rate] = target.
+
+        NOT top-k. The tokenizer's decoder is trained with binary cross-entropy,
+        so its output is a per-voxel probability and the faithful readout is to
+        draw from it. Rank-thresholding a smooth probability field instead
+        selects whichever contiguous voxels sit inside the hottest patches, and
+        since each token expands to a 6x15x14 block the result is blobs rather
+        than isolated spike events -- measured at spatial_coact 11x the real
+        value and persist1 6.9x, from a tokenizer that reconstructs at BCE
+        0.071. That was an artefact of the readout, not of the architecture.
+
+        The scalar shift b is the maximum-entropy way to hit a target count
+        without distorting the relative ordering the model produced, and it is
+        found per clip by bisection on a monotone function.
+        """
+        B = logits.shape[0]
+        flat = logits.reshape(B, -1)
+        lo = torch.full((B, 1), -20.0, device=flat.device)
+        hi = torch.full((B, 1), 20.0, device=flat.device)
+        tgt = target.to(flat.device).view(B, 1)
+        for _ in range(40):
+            mid = 0.5 * (lo + hi)
+            rate = torch.sigmoid(flat + mid).mean(dim=1, keepdim=True)
+            too_low = rate < tgt
+            lo = torch.where(too_low, mid, lo)
+            hi = torch.where(too_low, hi, mid)
+        p = torch.sigmoid(flat + 0.5 * (lo + hi))
+        u = torch.rand(p.shape, generator=generator).to(p.device)
+        return (u < p).float().reshape(logits.shape)
+
     @torch.no_grad()
     def sample(self, cond: ConditioningBatch, *, generator=None) -> torch.Tensor:
-        from ..common.evaluate import binarise_at_rate
         logits = self._draw_logits(cond, generator)
         self._last_intensity = logits
-        return binarise_at_rate(logits, self._target_rate(cond).to(logits.device))
+        return self._bernoulli_at_rate(
+            logits, self._target_rate(cond), generator)
 
     @torch.no_grad()
     def sample_intensity(self, cond: ConditioningBatch, *, generator=None):

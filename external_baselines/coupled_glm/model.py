@@ -108,12 +108,18 @@ class CoupledGLM(SpikeVolumeBaseline):
         lr: float = 3e-2,
         epochs: int = 8,
         max_rate: float = 5e-3,
+        calib_bins: int = 32,
+        calib_rounds: int = 4,
         device: str = "cuda",
     ):
         self.n_lags, self.radius = int(n_lags), int(radius)
         self.smooth_sites = float(smooth_sites)
         self.lr, self.epochs = float(lr), int(epochs)
         self.max_rate = float(max_rate)
+        self.calib_bins, self.calib_rounds = int(calib_bins), int(calib_rounds)
+        self.calib_corr: Optional[torch.Tensor] = None
+        self.calib_binid: Optional[torch.Tensor] = None
+        self._calib_map: Optional[torch.Tensor] = None
         self.device = device
 
         self.net: Optional[_GLMNet] = None
@@ -139,6 +145,11 @@ class CoupledGLM(SpikeVolumeBaseline):
         )
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _corr_map(corr: torch.Tensor, binid: torch.Tensor) -> torch.Tensor:
+        """Per-electrode additive correction, looked up by baseline-quantile bin."""
+        return corr[binid]
+
     def _site_logits(self, batch, device):
         rows = []
         for a in batch["assay_idx"].tolist():
@@ -214,32 +225,61 @@ class CoupledGLM(SpikeVolumeBaseline):
             hist.append(tot / max(nb, 1))
             print(f"  glm epoch {ep+1}/{self.epochs}  bce={hist[-1]:.6e}")
 
-        # -- free-running DC calibration ---------------------------------
+        # -- free-running calibration ------------------------------------
         # Maximum likelihood fits the filters teacher-forced, on real history.
         # Sampled free-running the model meets its own output, and because the
         # coupling weights are net positive the loop is self-suppressing: fewer
-        # spikes -> less drive -> fewer still. Measured at 3.7e-5 against a
-        # 1.55e-4 target, a 4x deficit that would make this a strawman rather
-        # than a baseline.
-        #
-        # Refitting under free-running rollout would be scheduled sampling,
+        # spikes -> less drive -> fewer still, measured at 3.7e-5 against a
+        # 1.55e-4 target. Refitting under rollout would be scheduled sampling,
         # i.e. importing the pipeline's own Stage 4C contribution into the
-        # baseline, which is not a fair comparison in either direction. The
-        # standard point-process remedy is used instead: keep the ML filters and
-        # solve for the scalar DC offset that makes the SIMULATED rate match the
-        # TRAIN rate. Train data only, one parameter, and it is what the GLM
-        # literature does when a fitted model is used as a simulator.
+        # baseline, so the standard point-process remedy is used instead: keep
+        # the ML filters and correct the baseline so the SIMULATED marginals
+        # match the TRAIN marginals. Train data only.
+        #
+        # A single scalar DC offset is NOT adequate here, and the first version
+        # of this code used one. At these rates sigmoid(l) ~ exp(l), so a shared
+        # offset multiplies every electrode's rate by the same factor -- but the
+        # array holds far more cold electrodes than hot ones, so almost all of
+        # the added spikes land on cold sites and the activity spreads out
+        # spatially. It fixed the rate and broke everything downstream:
+        # avalanches 2.6x too large and ks_isi 0.54, the worst of any baseline,
+        # from a model whose refractory filter is correct.
+        #
+        # The correction is therefore a function of the electrode's own
+        # baseline, fitted in quantile bins of it. Per-electrode would be
+        # preferable but is unestimable: ~1536 simulated bins per electrode at
+        # 1e-4 gives ~0.15 spikes each. 32 bins pool ~840 electrodes and are
+        # comfortably estimable while preserving the shape of the site map.
         self.net.eval()
-        target = float(np.mean([
+        target_rate = float(np.mean([
             b["nz"].shape[0] / max(b["B"] * T * H * W, 1) for b in cached]))
         cal = cached[: min(8, len(cached))]
         g = torch.Generator().manual_seed(0)
-        lo, hi = -4.0, 12.0
-        for _ in range(16):
-            mid = 0.5 * (lo + hi)
+
+        base_ref = self.global_site.to(device)                    # (H,W)
+        edges = torch.quantile(
+            base_ref.flatten().float(),
+            torch.linspace(0, 1, self.calib_bins + 1, device=device)).clone()
+        edges[0] -= 1.0
+        edges[-1] += 1.0
+        binid = torch.bucketize(base_ref, edges[1:-1])            # (H,W) in [0,bins-1]
+
+        # target occupancy per bin, from the TRAIN site maps
+        tgt_bin = torch.zeros(self.calib_bins, device=device)
+        cnt_bin = torch.zeros(self.calib_bins, device=device)
+        for a, cnt in site_sum.items():
+            pr = (cnt.to(device) / max(float(site_n[a]), 1.0))
+            tgt_bin.index_add_(0, binid.flatten(), pr.flatten())
+            cnt_bin.index_add_(0, binid.flatten(), torch.ones_like(pr.flatten()))
+        tgt_bin = tgt_bin / cnt_bin.clamp_min(1.0)
+
+        corr = torch.zeros(self.calib_bins, device=device)
+        for it in range(self.calib_rounds):
             with torch.no_grad():
-                old = float(self.net.bias)
-                self.net.bias.fill_(old + mid)
+                self._calib_map = self._corr_map(corr, binid)
+                acc = torch.zeros(T if False else 1, device=device)
+                got_bin = torch.zeros(self.calib_bins, device=device)
+                gcnt = torch.zeros(self.calib_bins, device=device)
                 rates = []
                 for b in cal:
                     cb = ConditioningBatch(
@@ -248,30 +288,36 @@ class CoupledGLM(SpikeVolumeBaseline):
                         assay_idx=b["assay_idx"], shape=(T, H, W))
                     v, _ = self._generate(cb, g)
                     rates.append(float(v.mean()))
-                self.net.bias.fill_(old)
-            got = float(np.mean(rates))
-            if got < target:
-                lo = mid
-            else:
-                hi = mid
-        offset = 0.5 * (lo + hi)
+                    site = v.mean(dim=(0, 1))                     # (H,W)
+                    got_bin.index_add_(0, binid.flatten(), site.flatten())
+                    gcnt.index_add_(0, binid.flatten(),
+                                    torch.ones_like(site.flatten()))
+                got_bin = got_bin / gcnt.clamp_min(1.0)
+            step = torch.log((tgt_bin + 1e-9) / (got_bin + 1e-9)).clamp(-3.0, 3.0)
+            corr = corr + step
+            print(f"  calib round {it+1}/{self.calib_rounds}: "
+                  f"rate {float(np.mean(rates)):.3e} -> target {target_rate:.3e}",
+                  flush=True)
+
         with torch.no_grad():
-            self.net.bias.add_(offset)
-            got = float(np.mean([
-                float(self._generate(ConditioningBatch(
-                    global_ctx=bb["global_ctx"].to(device),
-                    local_ctx=bb["local_ctx"].to(device),
-                    assay_idx=bb["assay_idx"], shape=(T, H, W)), g)[0].mean())
-                for bb in cal]))
-        print(f"  free-running DC offset {offset:+.4f}  "
-              f"target {target:.3e}  achieved {got:.3e}", flush=True)
-        # A bisection that saturates its bracket is reporting a broken
-        # objective, not a large offset. Fail rather than ship the number.
-        if offset > 11.0 or offset < -3.0:
+            self._calib_map = self._corr_map(corr, binid)
+            rates = []
+            for b in cal:
+                cb = ConditioningBatch(
+                    global_ctx=b["global_ctx"].to(device),
+                    local_ctx=b["local_ctx"].to(device),
+                    assay_idx=b["assay_idx"], shape=(T, H, W))
+                rates.append(float(self._generate(cb, g)[0].mean()))
+        got = float(np.mean(rates))
+        print(f"  free-running calibration: target {target_rate:.3e}  "
+              f"achieved {got:.3e}", flush=True)
+        if not (0.5 * target_rate < got < 2.0 * target_rate):
             raise RuntimeError(
-                f"DC calibration saturated its bracket at {offset:+.3f} "
-                f"(achieved {got:.3e} vs target {target:.3e}); the offset is "
-                f"not reaching the sampled rate.")
+                f"free-running calibration failed: achieved {got:.3e} vs "
+                f"target {target_rate:.3e}. The sampled rate is not tracking "
+                f"the correction.")
+        self.calib_corr = corr.detach().cpu()
+        self.calib_binid = binid.detach().cpu()
         self.net.train()
 
         # conv3d index j=0 is the OLDEST lag (t-n_lags) and j=n_lags-1 the most
@@ -289,9 +335,11 @@ class CoupledGLM(SpikeVolumeBaseline):
             "coupling_mean_by_lag": k.mean(dim=(1, 2)).tolist(),
             "kernel_absmax": float(k.abs().max()),
             "refractory": float(k[0, self.radius, self.radius]),
-            "free_running_dc_offset": float(offset),
-            "train_rate_target": float(target),
+            "train_rate_target": float(target_rate),
             "free_running_rate_achieved": float(got),
+            "calibration": "per-baseline-quantile correction, "
+                           f"{self.calib_bins} bins x {self.calib_rounds} rounds",
+            "calib_correction_by_bin": corr.detach().cpu().tolist(),
         }
 
     # ------------------------------------------------------------------
@@ -303,7 +351,13 @@ class CoupledGLM(SpikeVolumeBaseline):
         self.net = self.net.to(device)
 
         rows = [self.site_logit.get(int(a), self.global_site) for a in cond.assay_idx.tolist()]
-        base = torch.stack(rows).to(device).unsqueeze(1)
+        base = torch.stack(rows).to(device)
+        if self._calib_map is None and self.calib_corr is not None:
+            self._calib_map = self._corr_map(self.calib_corr.to(device),
+                                             self.calib_binid.to(device))
+        if self._calib_map is not None:
+            base = base + self._calib_map.to(device).unsqueeze(0)
+        base = base.unsqueeze(1)
         off = self.net.ctx_offset(cond.global_ctx, cond.local_ctx).view(B, 1, 1, 1)
         max_logit = math.log(self.max_rate / (1 - self.max_rate))
 
@@ -350,6 +404,8 @@ class CoupledGLM(SpikeVolumeBaseline):
             "site_logit": {int(k): v.cpu() for k, v in self.site_logit.items()},
             "global_site": self.global_site.cpu(),
             "shape": self.shape, "n_lags": self.n_lags, "radius": self.radius,
+            "calib_corr": None if self.calib_corr is None else self.calib_corr,
+            "calib_binid": None if self.calib_binid is None else self.calib_binid,
             "ctx_dim": self.net.ctx[0].in_features,
             "fit_report": self.fit_report,
         }, path)
@@ -365,6 +421,9 @@ class CoupledGLM(SpikeVolumeBaseline):
         self.site_logit = {int(k): v for k, v in d["site_logit"].items()}
         self.global_site = d["global_site"]
         self.shape = d["shape"]
+        self.calib_corr = d.get("calib_corr")
+        self.calib_binid = d.get("calib_binid")
+        self._calib_map = None
         self.fit_report = d.get("fit_report", {})
         self.device = device
 
