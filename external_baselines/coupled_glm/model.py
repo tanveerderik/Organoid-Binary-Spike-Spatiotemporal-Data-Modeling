@@ -107,7 +107,14 @@ class CoupledGLM(SpikeVolumeBaseline):
         smooth_sites: float = 20.0,
         lr: float = 3e-2,
         epochs: int = 8,
-        max_rate: float = 5e-3,
+        # Runaway guard only. The previous value of 5e-3 was ~20x too tight:
+        # per-assay site maps peak at p ~ 0.07-0.13, and although only 0.45% of
+        # electrodes sit above 5e-3 they carry 77% of the expected spikes, so
+        # the cap retained 23.3% of them -- a 4.29x rate deficit that exactly
+        # accounted for the observed 4.2x. It was diagnosed twice as exposure
+        # bias and once as drive collapse before being measured; the coupling
+        # drive is ~0.006 and could never have produced a 4x effect.
+        max_rate: float = 0.5,
         calib_bins: int = 32,
         calib_rounds: int = 4,
         device: str = "cuda",
@@ -192,7 +199,14 @@ class CoupledGLM(SpikeVolumeBaseline):
             pm = float(cnt.sum()) / max(n * cnt.numel(), 1.0)
             p = ((cnt + self.smooth_sites * pm) / (n + self.smooth_sites)).clamp(1e-9, 1 - 1e-6)
             self.site_logit[a] = torch.log(p / (1 - p))
-        self.global_site = torch.stack(list(self.site_logit.values())).mean(0)
+        # Arithmetic mean of PROBABILITIES, then back to log-odds. Averaging
+        # log-odds directly is a geometric-style mean and lands 40.9x below the
+        # true marginal on maps this sparse. Only the fallback for an unseen
+        # assay depends on it, but a fallback that is 40x too cold is worse than
+        # no fallback at all.
+        _pm = torch.stack([torch.sigmoid(v) for v in self.site_logit.values()]
+                          ).mean(0).clamp(1e-9, 1 - 1e-6)
+        self.global_site = torch.log(_pm / (1 - _pm))
 
         # -- maximum likelihood on the coupling kernel ------------------
         T, H, W = self.shape

@@ -157,6 +157,28 @@ def bh_fdr(pvals: List[float]) -> List[float]:
     return q
 
 
+def clean_stat_error(rows: List[Dict], keep: List[str]) -> np.ndarray:
+    """Per-clip mean relative error over the NON-degenerate rel_ terms only.
+
+    `compare_statistics` builds `stat_error` as the mean over every rel_ term it
+    computed, degenerate ones included. At this sparsity `spatial_coact` is
+    identically zero on 99% of clips, so its rel_ term is |gen|/1e-8 whenever the
+    model emits any adjacent pair at all -- which pushed one baseline's median
+    per-clip stat_error to 5.4e4 while its pooled stat_error was 0.81.
+
+    That is a property of the metric, not of the model, and it silently favours
+    whichever models happen to emit zeros in the same places the real clips do.
+    Recomputing over the surviving terms makes the headline comparable across
+    methods; the raw value is still reported alongside it.
+    """
+    out = []
+    for r in rows:
+        vt = r.get("vs_truth", {})
+        vals = [vt[k] for k in keep if k in vt and np.isfinite(vt[k])]
+        out.append(float(np.mean(vals)) if vals else np.nan)
+    return np.array(out, dtype=float)
+
+
 def series(rows: List[Dict], metric: str) -> np.ndarray:
     return np.array([r.get("vs_truth", {}).get(metric, np.nan) for r in rows],
                     dtype=float)
@@ -251,6 +273,15 @@ def main() -> int:
         for m in dropped:
             print(f"   {m:22s} degenerate on {deg[m]:.1%} of clips")
     metrics = [m for m in metrics if m not in dropped]
+    keep_rel = [m for m in metrics if m.startswith("rel_")]
+
+    def _series(rows, m):
+        return clean_stat_error(rows, keep_rel) if m == "stat_error_clean" \
+            else series(rows, m)
+
+    # Headline replaces the contaminated aggregate; the raw one stays visible.
+    if "stat_error" in metrics:
+        metrics = ["stat_error_clean"] + metrics
     out: Dict = {"reference": ref, "regime": args.regime, "sets": list(sets),
                  "aligned": not problems, "degeneracy": deg,
                  "excluded_degenerate": dropped}
@@ -260,8 +291,8 @@ def main() -> int:
     print(f"{'':22s} {'random':>9s} {'full':>9s} {'gain':>9s} {'better':>10s} {'q':>9s}")
     gain_rows, praw = [], []
     for name, s in sets.items():
-        a = series(s["rows"].get("random", []), "stat_error")
-        b = series(s["rows"].get("global_full_local", []), "stat_error")
+        a = _series(s["rows"].get("random", []), "stat_error_clean")
+        b = _series(s["rows"].get("global_full_local", []), "stat_error_clean")
         n = min(a.size, b.size)
         if n == 0:
             continue
@@ -289,9 +320,9 @@ def main() -> int:
     allp, keys = [], []
     for m in metrics:
         cells, row = [], {}
-        base = series(sets[ref]["rows"].get(args.regime, []), m)
+        base = _series(sets[ref]["rows"].get(args.regime, []), m)
         for name, s in sets.items():
-            v = series(s["rows"].get(args.regime, []), m)
+            v = _series(s["rows"].get(args.regime, []), m)
             med = float(np.nanmedian(v)) if v.size else float("nan")
             row[name] = {"median": med}
             cells.append(f"{med:14.4f}")
