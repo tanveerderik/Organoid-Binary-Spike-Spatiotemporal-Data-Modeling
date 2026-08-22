@@ -220,6 +220,33 @@ for ph in PHASES:
 # ----------------------------------------------------------------------------
 from math import comb
 
+# Every sign test computed anywhere in this script registers itself here so the
+# final section can apply a multiple-comparison correction. Without it the
+# tables invite the reader to do the correction themselves and discover that
+# some of the starred rows do not survive: each conditioning ladder is ~19
+# metrics x 3 regimes = 57 simultaneous tests against the same null.
+_PVALS = []   # (family, regime, metric, p, better, worse, median_diff)
+
+
+def register(family, regime, metric, p, better, worse, med):
+    _PVALS.append((family, regime, metric, p, better, worse, med))
+
+
+def bh_fdr(pvals):
+    """Benjamini-Hochberg step-up q-values. Returns them in input order."""
+    n = len(pvals)
+    if n == 0:
+        return []
+    order = sorted(range(n), key=lambda i: pvals[i])
+    q = [0.0] * n
+    prev = 1.0
+    for rank, i in enumerate(reversed(order), start=1):
+        k = n - rank + 1                       # 1-based rank of this p-value
+        prev = min(prev, pvals[i] * n / k)
+        q[i] = prev
+    return q
+
+
 def sign_p(better, worse):
     """Two-sided exact binomial test against p=0.5."""
     n = better + worse
@@ -261,6 +288,8 @@ def robust_truth(phase):
             better = sum(1 for x in d if x < 0)
             worse = sum(1 for x in d if x > 0)
             pv = sign_p(better, worse)
+            register(f"conditioning[{phase}]", reg, k, pv, better, worse,
+                     statistics.median(d))
             star = "***" if pv < 1e-3 else "**" if pv < 1e-2 else "*" if pv < 0.05 else ""
             print(f"    {k:<26}{statistics.median(d):>+12.4f}{better:>8}{worse:>7}"
                   f"{pv:>10.2e} {star}")
@@ -347,6 +376,44 @@ for _other in [p_ for p_ in PHASES if p_ != BASE]:
             better = sum(1 for x in d if x < 0)
             worse = sum(1 for x in d if x > 0)
             pv = sign_p(better, worse)
+            register(f"crossset[{_other} vs {BASE}]", reg, k, pv, better, worse,
+                     statistics.median(d))
             star = "***" if pv < 1e-3 else "**" if pv < 1e-2 else "*" if pv < 0.05 else ""
             print(f"    {k:<26}{statistics.median(d):>+12.4f}{better:>8}{worse:>7}"
                   f"{pv:>10.2e} {star}")
+
+
+# ----------------------------------------------------------------------------
+# Multiple-comparison correction.
+#
+# Benjamini-Hochberg within each family, where a family is one test type on one
+# set: a conditioning ladder is ~19 metrics x 3 regimes tested against the same
+# random null, and a cross-set comparison is the same metrics x regimes against
+# the same baseline. Correcting across families would be over-conservative --
+# they answer different questions and are reported separately.
+#
+# Report q, not p. A row that survives q<0.05 is one you can defend; a row that
+# only had p<0.05 is one a reviewer will delete for you.
+# ----------------------------------------------------------------------------
+if _PVALS:
+    fams = {}
+    for row in _PVALS:
+        fams.setdefault(row[0], []).append(row)
+
+    print("\n\n" + "=" * 78)
+    print("MULTIPLE-COMPARISON CORRECTION (Benjamini-Hochberg, within family)")
+    print("=" * 78)
+    for fam, rows in fams.items():
+        qs = bh_fdr([r[3] for r in rows])
+        keep = [(r, q) for r, q in zip(rows, qs) if q < 0.05]
+        keep.sort(key=lambda rq: rq[1])
+        lost = [(r, q) for r, q in zip(rows, qs) if r[3] < 0.05 <= q]
+        print(f"\n{fam}   {len(rows)} tests, {len(keep)} survive q<0.05")
+        if keep:
+            print(f"    {'regime':<24}{'metric':<26}{'med':>10}{'p':>10}{'q':>10}")
+            for (f_, reg, met, pv, b, w, med), q in keep:
+                print(f"    {reg:<24}{met:<26}{med:>+10.4f}{pv:>10.2e}{q:>10.2e}")
+        if lost:
+            print(f"  -- had p<0.05 but did NOT survive correction "
+                  f"({len(lost)}): "
+                  + ", ".join(f"{reg}/{met}" for (f_, reg, met, *_), q in lost))

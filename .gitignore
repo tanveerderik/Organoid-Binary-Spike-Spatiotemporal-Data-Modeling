@@ -18,3 +18,7 @@ reports_oldsplit_backup/
 # and the exact arguments), so only those are tracked.
 reports/generation_regimes_*/*/videos/
 reports/generation_regimes_*/*/stats/
+
+# Seed-variance ablation weights: fully summarised by
+# reports/stage4c_seed_deployment.json, not worth 25MB in history.
+ckpts/motif_prior_adapt_SEED*.pt

@@ -1,0 +1,45 @@
+{
+  "args": {
+    "batches": 24,
+    "split": "test",
+    "seed": 20260821,
+    "protocol": "free",
+    "motif_ckpt": "ckpts/motif_prior_adapt_SEED303.pt",
+    "out": "reports/motif_robustness_free_4C_SEED303_TEST.json"
+  },
+  "activity_recall": 0.7212745185328338,
+  "arms": {
+    "oracle": {
+      "mrr": 0.22765789926052094,
+      "median_rank": 8.0,
+      "mean_rank": 38.191436767578125,
+      "top1": 0.0890580415725708,
+      "top10": 0.5594671964645386,
+      "n": 10510
+    },
+    "model": {
+      "mrr": 0.1608428806066513,
+      "median_rank": 18.0,
+      "mean_rank": 74.12102508544922,
+      "top1": 0.060323502868413925,
+      "top10": 0.3905803859233856,
+      "n": 10510
+    },
+    "model_soft": {
+      "mrr": 0.21905240416526794,
+      "median_rank": 9.0,
+      "mean_rank": 42.70647048950195,
+      "top1": 0.08648905903100967,
+      "top10": 0.5352045893669128,
+      "n": 10510
+    },
+    "marginal": {
+      "mrr": 0.045091938227415085,
+      "median_rank": 163.0,
+      "mean_rank": 211.35728454589844,
+      "top1": 0.012940057553350925,
+      "top10": 0.09828734397888184,
+      "n": 10510
+    }
+  }
+}

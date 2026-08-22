@@ -1,0 +1,37 @@
+{
+  "101": {
+    "best_epoch": 56,
+    "best_mrr": 0.21254306797516148,
+    "oracle_at_best": 0.2254991140272111,
+    "epochs_run": 96,
+    "ckpt": "ckpts/motif_prior_adapt_SEED101.pt"
+  },
+  "202": {
+    "best_epoch": 35,
+    "best_mrr": 0.21224668490454815,
+    "oracle_at_best": 0.22536510898006964,
+    "epochs_run": 75,
+    "ckpt": "ckpts/motif_prior_adapt_SEED202.pt"
+  },
+  "303": {
+    "best_epoch": 80,
+    "best_mrr": 0.21376799666843546,
+    "oracle_at_best": 0.22438649183368697,
+    "epochs_run": 120,
+    "ckpt": "ckpts/motif_prior_adapt_SEED303.pt"
+  },
+  "shipped": {
+    "best_epoch": 24,
+    "best_mrr": 0.2135937269848891,
+    "oracle_at_best": 0.22605775867294148,
+    "epochs_run": 64,
+    "ckpt": "ckpts/motif_prior_adapt_best.pt"
+  },
+  "_summary": {
+    "n": 4,
+    "mean_best_val_mrr": 0.21303786913325856,
+    "sd_best_val_mrr": 0.0007556156074480182,
+    "min": 0.21224668490454815,
+    "max": 0.21376799666843546
+  }
+}
