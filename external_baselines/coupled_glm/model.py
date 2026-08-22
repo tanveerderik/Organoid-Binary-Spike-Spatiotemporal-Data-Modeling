@@ -72,7 +72,15 @@ class _GLMNet(nn.Module):
         self.kernel = nn.Parameter(torch.zeros(1, 1, n_lags, k, k))
         self.ctx = nn.Sequential(
             nn.Linear(ctx_dim, 64), nn.ReLU(), nn.Linear(64, 1))
+        # Global DC term. It MUST appear in both the training and the generation
+        # logit, or the free-running rate calibration in fit() silently adjusts
+        # a parameter that nothing reads -- which it did, running the bisection
+        # to its +6.0 ceiling while the sampled rate never moved.
         self.bias = nn.Parameter(torch.zeros(1))
+
+    def logit(self, y_hist, base, ctx_off):
+        """The single place log-odds are assembled, so no path can omit a term."""
+        return self.drive(y_hist) + base + ctx_off + self.bias
 
     def drive(self, y_hist: torch.Tensor) -> torch.Tensor:
         """y_hist (B,1,n_lags+T,H,W) -> coupling drive (B,T,H,W).
@@ -98,7 +106,7 @@ class CoupledGLM(SpikeVolumeBaseline):
         radius: int = 3,
         smooth_sites: float = 20.0,
         lr: float = 3e-2,
-        epochs: int = 3,
+        epochs: int = 8,
         max_rate: float = 5e-3,
         device: str = "cuda",
     ):
@@ -140,23 +148,34 @@ class CoupledGLM(SpikeVolumeBaseline):
 
     def fit(self, clips: Iterator[Dict[str, Any]], *, device: str = "cuda") -> None:
         self.device = device
-        cached = list(clips)
-        if not cached:
-            raise RuntimeError("CoupledGLM.fit saw no clips")
 
-        # -- per-electrode baseline from train marginals ----------------
+        # Cache SPIKE COORDINATES, not volumes. Multiple ML epochs need multiple
+        # passes, but a dense float32 cache of 120 batches is ~2.5 GB, while at
+        # ~200 spikes per 1.29M-voxel clip the nonzero indices are a few hundred
+        # int16 triples. Same data, exactly, three orders of magnitude smaller.
+        cached = []
         site_sum: Dict[int, torch.Tensor] = {}
         site_n: Dict[int, int] = {}
-        for batch in cached:
+        for batch in clips:
             x = batch["x"]
             if x.dim() == 5:
                 x = x.squeeze(1)
-            v = (x > 0.5).float()
+            v = (x > 0.5)
             self.shape = tuple(v.shape[1:])
+            cached.append({
+                "nz": v.nonzero().to(torch.int16),        # (S,4) b,t,h,w
+                "B": int(v.shape[0]),
+                "global_ctx": batch["global_ctx"].clone(),
+                "local_ctx": batch["local_ctx"].clone(),
+                "assay_idx": batch["assay_idx"].clone(),
+            })
+            vf = v.float()
             for i in range(v.shape[0]):
                 a = int(batch["assay_idx"][i])
-                site_sum[a] = site_sum.get(a, torch.zeros(v.shape[2:])) + v[i].sum(0)
+                site_sum[a] = site_sum.get(a, torch.zeros(v.shape[2:])) + vf[i].sum(0)
                 site_n[a] = site_n.get(a, 0) + v.shape[1]
+        if not cached:
+            raise RuntimeError("CoupledGLM.fit saw no clips")
         for a, cnt in site_sum.items():
             n = float(site_n[a])
             pm = float(cnt.sum()) / max(n * cnt.numel(), 1.0)
@@ -165,6 +184,7 @@ class CoupledGLM(SpikeVolumeBaseline):
         self.global_site = torch.stack(list(self.site_logit.values())).mean(0)
 
         # -- maximum likelihood on the coupling kernel ------------------
+        T, H, W = self.shape
         ctx_dim = cached[0]["global_ctx"].shape[1] + cached[0]["local_ctx"].shape[1]
         self.net = _GLMNet(self.n_lags, self.radius, ctx_dim).to(device)
         opt = torch.optim.Adam(self.net.parameters(), lr=self.lr)
@@ -173,18 +193,18 @@ class CoupledGLM(SpikeVolumeBaseline):
         for ep in range(self.epochs):
             tot, nb = 0.0, 0
             for batch in cached:
-                x = batch["x"]
-                if x.dim() == 5:
-                    x = x.squeeze(1)
-                v = (x > 0.5).float().to(device)
-                B, T, H, W = v.shape
+                B = batch["B"]
+                v = torch.zeros(B, T, H, W, device=device)
+                nz = batch["nz"].to(device).long()
+                if nz.numel():
+                    v[nz[:, 0], nz[:, 1], nz[:, 2], nz[:, 3]] = 1.0
                 base = self._site_logits(batch, device).unsqueeze(1)     # (B,1,H,W)
                 off = self.net.ctx_offset(batch["global_ctx"].to(device),
                                           batch["local_ctx"].to(device)).view(B, 1, 1, 1)
 
                 pad = torch.zeros(B, 1, self.n_lags, H, W, device=device)
                 y_hist = torch.cat([pad, v.unsqueeze(1)], dim=2)[:, :, :-1]
-                logits = self.net.drive(y_hist) + base + off
+                logits = self.net.logit(y_hist, base, off)
                 loss = F.binary_cross_entropy_with_logits(logits, v)
 
                 opt.zero_grad(); loss.backward()
@@ -194,14 +214,84 @@ class CoupledGLM(SpikeVolumeBaseline):
             hist.append(tot / max(nb, 1))
             print(f"  glm epoch {ep+1}/{self.epochs}  bce={hist[-1]:.6e}")
 
-        k = self.net.kernel.detach().cpu()[0, 0]
+        # -- free-running DC calibration ---------------------------------
+        # Maximum likelihood fits the filters teacher-forced, on real history.
+        # Sampled free-running the model meets its own output, and because the
+        # coupling weights are net positive the loop is self-suppressing: fewer
+        # spikes -> less drive -> fewer still. Measured at 3.7e-5 against a
+        # 1.55e-4 target, a 4x deficit that would make this a strawman rather
+        # than a baseline.
+        #
+        # Refitting under free-running rollout would be scheduled sampling,
+        # i.e. importing the pipeline's own Stage 4C contribution into the
+        # baseline, which is not a fair comparison in either direction. The
+        # standard point-process remedy is used instead: keep the ML filters and
+        # solve for the scalar DC offset that makes the SIMULATED rate match the
+        # TRAIN rate. Train data only, one parameter, and it is what the GLM
+        # literature does when a fitted model is used as a simulator.
+        self.net.eval()
+        target = float(np.mean([
+            b["nz"].shape[0] / max(b["B"] * T * H * W, 1) for b in cached]))
+        cal = cached[: min(8, len(cached))]
+        g = torch.Generator().manual_seed(0)
+        lo, hi = -4.0, 12.0
+        for _ in range(16):
+            mid = 0.5 * (lo + hi)
+            with torch.no_grad():
+                old = float(self.net.bias)
+                self.net.bias.fill_(old + mid)
+                rates = []
+                for b in cal:
+                    cb = ConditioningBatch(
+                        global_ctx=b["global_ctx"].to(device),
+                        local_ctx=b["local_ctx"].to(device),
+                        assay_idx=b["assay_idx"], shape=(T, H, W))
+                    v, _ = self._generate(cb, g)
+                    rates.append(float(v.mean()))
+                self.net.bias.fill_(old)
+            got = float(np.mean(rates))
+            if got < target:
+                lo = mid
+            else:
+                hi = mid
+        offset = 0.5 * (lo + hi)
+        with torch.no_grad():
+            self.net.bias.add_(offset)
+            got = float(np.mean([
+                float(self._generate(ConditioningBatch(
+                    global_ctx=bb["global_ctx"].to(device),
+                    local_ctx=bb["local_ctx"].to(device),
+                    assay_idx=bb["assay_idx"], shape=(T, H, W)), g)[0].mean())
+                for bb in cal]))
+        print(f"  free-running DC offset {offset:+.4f}  "
+              f"target {target:.3e}  achieved {got:.3e}", flush=True)
+        # A bisection that saturates its bracket is reporting a broken
+        # objective, not a large offset. Fail rather than ship the number.
+        if offset > 11.0 or offset < -3.0:
+            raise RuntimeError(
+                f"DC calibration saturated its bracket at {offset:+.3f} "
+                f"(achieved {got:.3e} vs target {target:.3e}); the offset is "
+                f"not reaching the sampled rate.")
+        self.net.train()
+
+        # conv3d index j=0 is the OLDEST lag (t-n_lags) and j=n_lags-1 the most
+        # recent (t-1). Reverse both reports into lag order -- index 0 = lag 1 --
+        # so "the lag-1 coefficient" means what it says. A refractory filter is
+        # a negative value at index 0, and reading the raw kernel order would
+        # put it at the far end and invite exactly the wrong conclusion.
+        k = self.net.kernel.detach().cpu()[0, 0].flip(0)
         self.fit_report = {
             "bce_per_epoch": hist,
-            "n_clips": sum(b["x"].shape[0] for b in cached),
+            "n_clips": sum(b["B"] for b in cached),
             "n_lags": self.n_lags, "radius": self.radius,
-            "history_filter": k[:, self.radius, self.radius].tolist(),
-            "kernel_absmax": float(k.abs().max()),
+            "lag_order": "index 0 = lag 1 (most recent)",
+            "history_filter_by_lag": k[:, self.radius, self.radius].tolist(),
             "coupling_mean_by_lag": k.mean(dim=(1, 2)).tolist(),
+            "kernel_absmax": float(k.abs().max()),
+            "refractory": float(k[0, self.radius, self.radius]),
+            "free_running_dc_offset": float(offset),
+            "train_rate_target": float(target),
+            "free_running_rate_achieved": float(got),
         }
 
     # ------------------------------------------------------------------
@@ -221,8 +311,7 @@ class CoupledGLM(SpikeVolumeBaseline):
         inten = torch.zeros(B, T, H, W, device=device)
         for t in range(T):
             win = y[:, :, t:t + self.n_lags]
-            logit = self.net.drive(win)[:, 0] + base[:, 0] + off[:, 0]
-            logit = logit.clamp(max=max_logit)
+            logit = self.net.logit(win, base, off)[:, 0].clamp(max=max_logit)
             inten[:, t] = logit
             p = torch.sigmoid(logit)
             u = torch.rand(p.shape, generator=generator, device="cpu").to(device)
@@ -231,23 +320,27 @@ class CoupledGLM(SpikeVolumeBaseline):
 
     @torch.no_grad()
     def sample(self, cond: ConditioningBatch, *, generator=None) -> torch.Tensor:
-        v, inten = self._generate(cond, generator)
-        self._last_intensity = inten
-        return v
+        return self._generate(cond, generator)[0]
 
     @torch.no_grad()
     def sample_intensity(self, cond: ConditioningBatch, *, generator=None):
-        """Log-odds field from the free-running rollout.
+        """Deliberately None: this model must not get a rank-thresholded row.
 
-        Returned from the same trajectory `sample()` produced when available, so
-        the calibrated row re-thresholds the *same* realisation rather than an
-        independent one -- otherwise the two rows would differ by sampling noise
-        as well as by threshold.
+        Top-k over a point-process log-intensity is dominated by the static
+        per-electrode baseline, so it selects the hottest electrodes at every
+        time bin and returns time-columns rather than a spike train -- measured
+        at stat_error 2.98 and ks_isi 0.93, against 0.87 and 0.37 for the
+        model's own samples. That is an artefact of the calibration operation,
+        not a property of the GLM, and publishing it would understate the
+        baseline.
+
+        Rate matching is instead done where it belongs for a point process: the
+        free-running DC offset fitted in `fit()`, so the native samples already
+        sit at the train rate. The invariant the comparison holds fixed is the
+        rate itself, not the mechanism used to reach it; each baseline's
+        mechanism is recorded in its run_config.
         """
-        if self._last_intensity is not None:
-            out, self._last_intensity = self._last_intensity, None
-            return out
-        return self._generate(cond, generator)[1]
+        return None
 
     # ------------------------------------------------------------------
     def save(self, path: Path) -> None:

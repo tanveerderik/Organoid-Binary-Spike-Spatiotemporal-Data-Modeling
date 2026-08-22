@@ -1,0 +1,262 @@
+"""MaskGIT-flat: single-level 3D VQ tokenizer + vanilla MaskGIT prior.
+
+The architectural baseline. It answers the reviewer who asks whether the
+hierarchical alphabet and the where/what factorisation are doing any work, or
+whether an ordinary masked video transformer on the same data would have got
+there. Trained here from scratch on the current split -- the repository does
+hold older single-level checkpoints from an internal ablation arm, but they
+predate the current temporal split and reusing them would risk contamination.
+
+Two fitting stages, in order:
+
+  1. tokenizer -- Bernoulli reconstruction + VQ commitment.
+  2. prior -- masked-token cross-entropy on the frozen tokenizer's codes.
+
+Generation is free: every token starts masked, the prior fills them in by
+parallel iterative decoding conditioned on gct/lct, the tokenizer decodes to
+per-voxel logits, and those are binarised at the same rate-calibrated threshold
+every other baseline gets.
+
+Unlike the two statistical baselines this one lives in a token space, so it can
+implement `tokenize()` and enter the token-family metrics as well -- though its
+codebook is its own, so token-level numbers are comparable to the pipeline's
+only in distribution, not code for code.
+"""
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+from typing import Any, Dict, Iterator, Optional
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from ..common.protocol import BaselineMeta, ConditioningBatch, SpikeVolumeBaseline
+from ..registry import register
+from .prior import MaskGITPrior
+from .tokenizer import GRID, FlatVQTokenizer
+
+
+class MaskGITFlat(SpikeVolumeBaseline):
+
+    def __init__(
+        self,
+        *,
+        n_codes: int = 1024,
+        dim: int = 64,
+        width: int = 128,
+        d_model: int = 256,
+        layers: int = 6,
+        tok_epochs: int = 12,
+        prior_epochs: int = 30,
+        tok_lr: float = 2e-4,
+        prior_lr: float = 3e-4,
+        commit_weight: float = 0.25,
+        steps: int = 12,
+        temperature: float = 1.0,
+        device: str = "cuda",
+    ):
+        self.cfg = dict(n_codes=n_codes, dim=dim, width=width, d_model=d_model,
+                        layers=layers, tok_epochs=tok_epochs,
+                        prior_epochs=prior_epochs, tok_lr=tok_lr,
+                        prior_lr=prior_lr, commit_weight=commit_weight,
+                        steps=steps, temperature=temperature)
+        self.device = device
+        self.tokenizer: Optional[FlatVQTokenizer] = None
+        self.prior: Optional[MaskGITPrior] = None
+        self.rate_coef: Optional[np.ndarray] = None
+        self.fit_report: Dict[str, Any] = {}
+        self._last_intensity: Optional[torch.Tensor] = None
+
+        self.meta = BaselineMeta(
+            name="maskgit_flat",
+            citation=("Chang, Zhang, Jiang, Liu & Freeman, MaskGIT, CVPR 2022; "
+                      "Yu et al., MAGVIT, CVPR 2023"),
+            family="voxel+token",
+            conditioning="gct and lct as MaskGIT prefix conditioning tokens",
+            notes=("Single flat codebook of 1024 on the same 8x8x16 grid and the "
+                   "same (6,15,14) patch as the pipeline, so token budget and "
+                   "alphabet size are matched. No ladder, no activity prior, no "
+                   "soft field, no adaptation stage."),
+            extra=self.cfg,
+        )
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _vol(batch) -> torch.Tensor:
+        x = batch["x"]
+        return x if x.dim() == 5 else x.unsqueeze(1)
+
+    def fit(self, clips: Iterator[Dict[str, Any]], *, device: str = "cuda") -> None:
+        self.device = device
+        c = self.cfg
+
+        # Sparse cache: ~200 spikes in 1.29M voxels, so indices are three orders
+        # of magnitude smaller than the dense volumes and exactly equivalent.
+        cached, lct_rows, rate_rows = [], [], []
+        shape = None
+        for batch in clips:
+            v = (self._vol(batch) > 0.5)
+            shape = tuple(v.shape[2:])
+            cached.append({
+                "nz": v.nonzero().to(torch.int16),
+                "B": int(v.shape[0]),
+                "gct": batch["global_ctx"].clone(),
+                "lct": batch["local_ctx"].clone(),
+            })
+            for i in range(v.shape[0]):
+                lct_rows.append(batch["local_ctx"][i].cpu().numpy())
+                rate_rows.append(max(float(v[i].float().mean()), 1e-8))
+        if not cached:
+            raise RuntimeError("MaskGITFlat.fit saw no clips")
+        T, H, W = shape
+
+        def dense(b):
+            v = torch.zeros(b["B"], 1, T, H, W, device=device)
+            nz = b["nz"].to(device).long()
+            if nz.numel():
+                v[nz[:, 0], nz[:, 1], nz[:, 2], nz[:, 3], nz[:, 4]] = 1.0
+            return v
+
+        # -- stage 1: tokenizer -----------------------------------------
+        self.tokenizer = FlatVQTokenizer(c["n_codes"], c["dim"], c["width"]).to(device)
+        opt = torch.optim.Adam(self.tokenizer.parameters(), lr=c["tok_lr"])
+        # Bernoulli, not MSE: the volume is 99.98% zeros and a squared error is
+        # minimised by predicting zero everywhere. pos_weight lifts the spike
+        # class enough that the codebook has something to encode.
+        pw = torch.tensor([1.0 / max(float(np.mean(rate_rows)), 1e-8)], device=device)
+        tok_hist = []
+        for ep in range(c["tok_epochs"]):
+            tot = n = 0.0
+            for b in cached:
+                x = dense(b)
+                logits, idx, commit = self.tokenizer(x)
+                rec = F.binary_cross_entropy_with_logits(logits, x, pos_weight=pw)
+                loss = rec + c["commit_weight"] * commit
+                opt.zero_grad(); loss.backward()
+                nn.utils.clip_grad_norm_(self.tokenizer.parameters(), 5.0)
+                opt.step()
+                tot += float(rec); n += 1
+            tok_hist.append(tot / max(n, 1))
+            used = int((self.tokenizer.vq.cluster_size > 1e-2).sum())
+            print(f"  tokenizer epoch {ep+1}/{c['tok_epochs']}  bce={tok_hist[-1]:.5f}  "
+                  f"codes_used={used}/{c['n_codes']}", flush=True)
+
+        # -- stage 2: prior on frozen codes ------------------------------
+        self.tokenizer.eval()
+        for p in self.tokenizer.parameters():
+            p.requires_grad_(False)
+        with torch.no_grad():
+            for b in cached:
+                b["ids"] = self.tokenizer.tokens(dense(b)).cpu()
+
+        n_tok = int(np.prod(GRID))
+        self.prior = MaskGITPrior(
+            c["n_codes"], n_tok, c["d_model"], c["layers"],
+            gct_dim=cached[0]["gct"].shape[1], lct_dim=cached[0]["lct"].shape[1],
+        ).to(device)
+        popt = torch.optim.Adam(self.prior.parameters(), lr=c["prior_lr"])
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(popt, c["prior_epochs"])
+        pri_hist = []
+        for ep in range(c["prior_epochs"]):
+            tot = n = 0.0
+            for b in cached:
+                loss, _ = self.prior.loss(
+                    b["ids"].to(device), b["gct"].to(device), b["lct"].to(device))
+                popt.zero_grad(); loss.backward()
+                nn.utils.clip_grad_norm_(self.prior.parameters(), 5.0)
+                popt.step()
+                tot += float(loss); n += 1
+            sched.step()
+            pri_hist.append(tot / max(n, 1))
+            if (ep + 1) % 5 == 0 or ep == 0:
+                print(f"  prior epoch {ep+1}/{c['prior_epochs']}  "
+                      f"ce={pri_hist[-1]:.5f}", flush=True)
+
+        # -- lct -> log rate, the same calibration every baseline uses ---
+        A = np.concatenate([np.asarray(lct_rows, np.float64),
+                            np.ones((len(lct_rows), 1))], axis=1)
+        y = np.log(np.asarray(rate_rows, np.float64))
+        self.rate_coef, *_ = np.linalg.lstsq(A, y, rcond=None)
+
+        ids_all = torch.cat([b["ids"] for b in cached])
+        self.fit_report = {
+            "tokenizer_bce_per_epoch": tok_hist,
+            "prior_ce_per_epoch": pri_hist,
+            "n_clips": int(sum(b["B"] for b in cached)),
+            "codes_used": int(len(torch.unique(ids_all))),
+            "n_codes": c["n_codes"],
+            "token_entropy_nats": float(
+                -(lambda p: (p[p > 0] * p[p > 0].log()).sum())(
+                    torch.bincount(ids_all.reshape(-1),
+                                   minlength=c["n_codes"]).float()
+                    / ids_all.numel())),
+            "config": c,
+        }
+
+    # ------------------------------------------------------------------
+    def _target_rate(self, cond) -> torch.Tensor:
+        lct = cond.local_ctx.detach().cpu().numpy().astype(np.float64)
+        A = np.concatenate([lct, np.ones((lct.shape[0], 1))], axis=1)
+        return torch.tensor(np.clip(np.exp(A @ self.rate_coef), 1e-7, 1e-2),
+                            dtype=torch.float32)
+
+    @torch.no_grad()
+    def _draw_logits(self, cond: ConditioningBatch, generator=None) -> torch.Tensor:
+        ids = self.prior.generate(
+            cond.global_ctx, cond.local_ctx,
+            steps=self.cfg["steps"], temperature=self.cfg["temperature"],
+            generator=generator, device=cond.global_ctx.device)
+        grid = ids.reshape(ids.shape[0], *GRID)
+        return self.tokenizer.decode_ids(grid)[:, 0]          # (B,T,H,W)
+
+    @torch.no_grad()
+    def sample(self, cond: ConditioningBatch, *, generator=None) -> torch.Tensor:
+        from ..common.evaluate import binarise_at_rate
+        logits = self._draw_logits(cond, generator)
+        self._last_intensity = logits
+        return binarise_at_rate(logits, self._target_rate(cond).to(logits.device))
+
+    @torch.no_grad()
+    def sample_intensity(self, cond: ConditioningBatch, *, generator=None):
+        if self._last_intensity is not None:
+            out, self._last_intensity = self._last_intensity, None
+            return out
+        return self._draw_logits(cond, generator)
+
+    @torch.no_grad()
+    def tokenize(self, vols: torch.Tensor) -> Optional[torch.Tensor]:
+        x = vols if vols.dim() == 5 else vols.unsqueeze(1)
+        return self.tokenizer.tokens(x.to(self.device))
+
+    # ------------------------------------------------------------------
+    def save(self, path: Path) -> None:
+        path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"tokenizer": self.tokenizer.state_dict(),
+                    "prior": self.prior.state_dict(),
+                    "rate_coef": self.rate_coef, "cfg": self.cfg,
+                    "fit_report": self.fit_report}, path)
+        path.with_suffix(".fit.json").write_text(
+            json.dumps(self.fit_report, indent=2, default=float))
+
+    def load(self, path: Path, *, device: str = "cuda") -> None:
+        d = torch.load(Path(path), map_location="cpu")
+        c = self.cfg = d["cfg"]
+        self.tokenizer = FlatVQTokenizer(c["n_codes"], c["dim"], c["width"])
+        self.tokenizer.load_state_dict(d["tokenizer"])
+        self.prior = MaskGITPrior(c["n_codes"], int(np.prod(GRID)),
+                                  c["d_model"], c["layers"])
+        self.prior.load_state_dict(d["prior"])
+        self.tokenizer = self.tokenizer.to(device).eval()
+        self.prior = self.prior.to(device).eval()
+        self.rate_coef = d["rate_coef"]
+        self.fit_report = d.get("fit_report", {})
+        self.device = device
+
+
+@register("maskgit_flat")
+def _build(**kw) -> MaskGITFlat:
+    return MaskGITFlat(**kw)

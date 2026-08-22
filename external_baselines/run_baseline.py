@@ -54,6 +54,10 @@ def main() -> int:
     ap.add_argument("--tag", default="", help="suffix for the output directory")
     ap.add_argument("--no-rate-cal", action="store_true")
     ap.add_argument("--videos", action="store_true")
+    ap.add_argument("--config", default=None,
+                    help='JSON of constructor kwargs, e.g. \'{"tok_epochs":12}\'. '
+                         "Recorded in the fit report so a run is reproducible "
+                         "from its artifacts alone.")
     args = ap.parse_args()
 
     if args.list:
@@ -72,7 +76,10 @@ def main() -> int:
     ckpt = CKPT_DIR / f"{name}{tag}.pt"
     out = OUT_DIR / f"{name}{tag}"
 
-    baseline = registry.build(name)
+    kw = json.loads(args.config) if args.config else {}
+    baseline = registry.build(name, **kw)
+    if kw:
+        print(f"config   : {kw}")
     print(f"baseline : {baseline.meta.name}")
     print(f"citation : {baseline.meta.citation}")
     print(f"family   : {baseline.meta.family}")
