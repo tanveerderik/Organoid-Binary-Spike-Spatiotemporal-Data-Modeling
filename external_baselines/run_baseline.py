@@ -21,7 +21,8 @@ sys.path.insert(0, "/media/derik/Seagate Desktop Drive/organoid_data")
 
 from MAGVIT_project.external_baselines import registry
 from MAGVIT_project.external_baselines.common import data as bdata
-from MAGVIT_project.external_baselines.common.evaluate import evaluate_baseline
+from MAGVIT_project.external_baselines.common.evaluate import (
+    REFERENCE_PROTOCOL, evaluate_baseline)
 
 CKPT_DIR = Path("ckpts/external_baselines")
 OUT_DIR = Path("reports/external_baselines")
@@ -36,11 +37,20 @@ def main() -> int:
     ap.add_argument("--score", action="store_true")
     ap.add_argument("--fit-batches", type=int, default=120,
                     help="TRAIN batches used for fitting")
-    ap.add_argument("--batches", type=int, default=40,
-                    help="held-out batches used for scoring")
-    ap.add_argument("--split", default="test", choices=("val", "test"))
+    # Scoring knobs default to REFERENCE_PROTOCOL -- the protocol the existing
+    # generation_regimes_* sets were produced under. Overriding any of them
+    # produces a run that fails clip-alignment verification, which is intended:
+    # the comparative table is only meaningful if every row used one protocol.
+    ap.add_argument("--batches", type=int, default=None,
+                    help=f"held-out batches (default {REFERENCE_PROTOCOL['batches']})")
+    ap.add_argument("--samples-per-clip", type=int, default=None,
+                    help=f"draws per clip per regime "
+                         f"(default {REFERENCE_PROTOCOL['samples_per_clip']})")
+    ap.add_argument("--split", default=None, choices=("val", "test"))
+    ap.add_argument("--no-verify", action="store_true",
+                    help="skip clip-alignment check against the reference set")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    ap.add_argument("--seed", type=int, default=20260821)
+    ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--tag", default="", help="suffix for the output directory")
     ap.add_argument("--no-rate-cal", action="store_true")
     ap.add_argument("--videos", action="store_true")
@@ -82,11 +92,13 @@ def main() -> int:
         print(f"loaded {ckpt}")
 
     if args.score:
-        print(f"\nscoring on {args.batches} {args.split.upper()} batches ...")
+        print(f"\nscoring under the reference protocol ...")
         summary = evaluate_baseline(
             baseline, split=args.split, batches=args.batches,
+            samples_per_clip=args.samples_per_clip,
             out_root=out, device=args.device, seed=args.seed,
             save_video=args.videos, rate_calibrate=not args.no_rate_cal,
+            verify=not args.no_verify,
         )
         print(f"\nwrote {out}")
         for regime, e in summary.items():

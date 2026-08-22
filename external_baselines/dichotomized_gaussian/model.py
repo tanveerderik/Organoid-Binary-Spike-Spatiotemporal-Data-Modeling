@@ -187,6 +187,7 @@ class DichotomizedGaussian(SpikeVolumeBaseline):
         self.shape: Optional[tuple] = None
         self.fit_report: Dict[str, Any] = {}
         self._spectrum: Optional[torch.Tensor] = None
+        self._last_intensity: Optional[torch.Tensor] = None
 
         self.meta = BaselineMeta(
             name="dichotomized_gaussian",
@@ -432,6 +433,19 @@ class DichotomizedGaussian(SpikeVolumeBaseline):
 
     @torch.no_grad()
     def sample_intensity(self, cond: ConditioningBatch, *, generator=None):
+        """Score from the realisation `sample()` just produced, if there is one.
+
+        The calibrated row must re-threshold the SAME draw, not an independent
+        one, or the two rows differ by sampling noise as well as by threshold --
+        and the same rule is applied to every baseline.
+        """
+        if self._last_intensity is not None:
+            out, self._last_intensity = self._last_intensity, None
+            return out
+        return self._draw_score(cond, generator)
+
+    @torch.no_grad()
+    def _draw_score(self, cond: ConditioningBatch, generator=None):
         """DG score: latent field minus the per-voxel threshold.
 
         This is the actual Dichotomized Gaussian construction for inhomogeneous
@@ -460,7 +474,8 @@ class DichotomizedGaussian(SpikeVolumeBaseline):
     @torch.no_grad()
     def sample(self, cond: ConditioningBatch, *, generator=None) -> torch.Tensor:
         from ..common.evaluate import binarise_at_rate
-        score = self.sample_intensity(cond, generator=generator)
+        score = self._draw_score(cond, generator)
+        self._last_intensity = score
         return binarise_at_rate(score, self._target_rate(cond).to(score.device))
 
     # ------------------------------------------------------------------
