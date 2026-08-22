@@ -384,6 +384,15 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=20260821)
     ap.add_argument("--regimes",
                     default="random,global_only,global_partial_local,global_full_local")
+    ap.add_argument("--ablate", default=None, choices=("assay_map",),
+                    help="assay_map: delete the fitted per-assay site maps so "
+                         "every clip falls back to the pooled `global_site`. "
+                         "This is exactly what DG and the coupled GLM already "
+                         "do for an assay they never saw (`site_p.get(a, "
+                         "global_site)`), so it simulates a held-out assay with "
+                         "no refit. Favourable to them: global_site is the mean "
+                         "over all 31 fitted assays INCLUDING the test one, a "
+                         "1/31 leak we are not removing.")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -394,6 +403,19 @@ def main() -> int:
         None if args.baseline == "pipeline"
         else Path(f"ckpts/external_baselines/{args.baseline}.pt"))
     b.load(ckpt, device=args.device)
+    if args.ablate == "assay_map":
+        n = 0
+        for attr in ("site_p", "site_logit"):
+            d = getattr(b, attr, None)
+            if isinstance(d, dict):
+                n += len(d); d.clear()
+        if n == 0:
+            raise SystemExit(f"{args.baseline} has no per-assay site map to ablate")
+        # The per-assay BASE RATE is deliberately kept: lct carries
+        # log_mean_firing_density, so a rate is available for an unseen assay.
+        # Only the memorised spatial map is withheld.
+        print(f"[ablate] dropped {n} per-assay site maps -> pooled global_site\n")
+
     gen = torch.Generator().manual_seed(args.seed)
     ladder = ContextLadder(BANK, seed=args.seed)
     regimes = [r.strip() for r in args.regimes.split(",") if r.strip()]
