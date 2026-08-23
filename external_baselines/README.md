@@ -134,16 +134,75 @@ translation-invariant kernels pooled over displacements -- which is both
 estimable here and standard practice. This is a property of the data, and it is
 stated in the paper rather than buried.
 
-## The three baselines
+## The five baselines
+
+Two groups, and the difference decides how a column may be read.
+
+**Video models** -- the peer group. Same conditioning, same holes, same readout,
+nothing stored per assay, so they belong in the same scalability class we do.
 
 | dir | method | citation | family | attacks |
 |---|---|---|---|---|
 | `maskgit_flat/` | single-level 3D VQ + vanilla MaskGIT | Chang et al. CVPR 2022; Yu et al. CVPR 2023 | voxel+token | "your hierarchy and factorisation are unnecessary" |
+| `unet3d/` | conditional 3D U-Net inpainter; FiLM context + learned spatial embedding | Cicek et al. MICCAI 2016 (cf. V-Net, Milletari et al. 3DV 2016); Perez et al. AAAI 2018 | voxel | "the tasks are inpainting -- why not just supervise a conv net?" |
+| `cvae3d/` | same backbone plus a conditional latent grid | Sohn et al. NIPS 2015 | voxel | "does the code need to be quantized?" |
+
+**Per-assay lookup tables** -- reference ceilings, not peers. Each stores a full
+(H,W) site map per preparation (26,880 floats), against 26 and 5,194 fitted
+values respectively, so their footprint grows linearly with the number of
+assays and the report renders them as `_ref_` rows.
+
+| dir | method | citation | family | attacks |
+|---|---|---|---|---|
 | `dichotomized_gaussian/` | stationary DG field, FFT-sampled | Macke et al., Neural Comput. 2009 | voxel | "you don't beat classical spike statistics" |
 | `coupled_glm/` | conv Poisson GLM, history + local coupling | Pillow et al., Nature 2008 | voxel | "where is the standard point-process model?" |
 
+`unet3d` and `cvae3d` are a matched pair: identical backbone, conditioning, hole
+distribution, optimiser and readout, differing only in whether a latent variable
+is present. So the gap between their columns isolates stochasticity from
+everything else. Read them together -- `unet3d` predicts the conditional mean
+and is therefore *expected* to win the ranking metrics (AP, F1) and to have
+nothing to say on the distributional ones, because a point estimate has no
+spread. Neither is a fair peer alone.
+
+Neither has a tokenizer, so neither appears in the reconstruction section: there
+is no autoencoding path to measure. That is a capability fact, and the report
+labels it rather than leaving a blank.
+
+**Both need the spatial embedding, and the first run proves it.** FiLM is
+per-channel and spatially uniform, and under free generation the input is
+constant, so without a position basis a global assay code has no way to say
+"this preparation fires at THESE electrodes". Correlation between the generated
+site map and the real one was 0.0389 without it, against 0.1414 for MaskGIT-flat
+(which gets the same ability from per-token positional embeddings) and 0.3553
+for the pipeline. Adding a learned (H,W) embedding, shared across every
+preparation and broadcast over time, took the U-Net's validation completion loss
+from 0.6593 to 0.2310. The handicapped checkpoints are kept as `*_nopos.pt` with
+their reports, because "no positional basis" is a measured ablation worth one
+line rather than a bug to be quietly deleted.
+
+That embedding IS a 120x224 spatial map, which is the thing the lookup arms are
+criticised for. The distinction is one map for ALL 31 preparations versus one
+PER preparation, so per-assay storage stays zero -- and the parameter census
+gives it its own line rather than letting it hide inside the network total.
+
+**The CVAE's latent collapses, and that is the correct answer.** At generation
+time z is drawn from the conditional prior, which cannot see the hole, so any
+information the posterior packs into z is unusable at test time and `KL(q||p)`
+correctly drives it to zero. Both conv arms therefore take their stochasticity
+from the Bernoulli readout, exactly as MaskGIT-flat does, and the matched pair
+answers "does a continuous latent help here?" with a measured no. The fit report
+carries `latent_collapsed` so no column is read as evidence about sampling.
+
 Cited but deliberately not run, with reasons, so the omissions are arguments
 rather than gaps:
+
+* **Video diffusion** (Ho et al. 2022; Blattmann et al. 2023) -- the one
+  genuinely expected omission, and it is a compute argument rather than a
+  principled one: iterative denoising over a 1.29M-voxel binary volume at 480
+  training clips on one 16 GB card is a project, not a baseline. `cvae3d`
+  covers the continuous-latent generative slot in the meantime. State this in
+  the paper; do not let a reviewer find it first.
 
 * **LFADS** (Pandarinath et al. 2018) -- trialised, ~100 neurons; wrong regime.
 * **Pairwise maxent / Ising** (Schneidman et al. 2006) -- intractable at 26,880

@@ -37,7 +37,7 @@ import torch.nn.functional as F
 from ..common.protocol import BaselineMeta, ConditioningBatch, SpikeVolumeBaseline
 from ..registry import register
 from .prior import MaskGITPrior
-from .tokenizer import GRID, FlatVQTokenizer
+from .tokenizer import GRID, FlatVQTokenizer, PATCH
 
 
 class MaskGITFlat(SpikeVolumeBaseline):
@@ -70,6 +70,10 @@ class MaskGITFlat(SpikeVolumeBaseline):
         self.rate_coef: Optional[np.ndarray] = None
         self.fit_report: Dict[str, Any] = {}
         self._last_intensity: Optional[torch.Tensor] = None
+        # -log(pos_weight); set in fit(), restored in load(). 0.0 means an
+        # uncorrected legacy checkpoint. See _draw_logits for why this cannot
+        # move a sampled output.
+        self.logit_offset: float = 0.0
 
         self.meta = BaselineMeta(
             name="maskgit_flat",
@@ -130,6 +134,7 @@ class MaskGITFlat(SpikeVolumeBaseline):
         # minimised by predicting zero everywhere. pos_weight lifts the spike
         # class enough that the codebook has something to encode.
         pw = torch.tensor([1.0 / max(float(np.mean(rate_rows)), 1e-8)], device=device)
+        self.logit_offset = -float(np.log(float(pw)))
         tok_hist = []
         for ep in range(c["tok_epochs"]):
             tot = n = 0.0
@@ -206,6 +211,36 @@ class MaskGITFlat(SpikeVolumeBaseline):
         return torch.tensor(np.clip(np.exp(A @ self.rate_coef), 1e-7, 1e-2),
                             dtype=torch.float32)
 
+    def _decode_field(self, grid: torch.Tensor) -> torch.Tensor:
+        """Decode token ids to a per-voxel logit field, in HONEST units.
+
+        Every field this class hands out -- free generation, completion and the
+        oracle -- comes from this one decoder head, so the calibration
+        correction belongs here. It was first applied in `_draw_logits` alone,
+        which was wrong in a way that produced a silent no-op: `task_eval._field`
+        prefers `complete()` whenever a baseline implements it, and this one
+        does, so the corrected path was never executed and the re-scored report
+        came back byte-identical.
+
+        Cost-sensitive correction (Elkan, IJCAI 2001). The head is trained with
+        pos_weight=w, whose minimiser is
+
+            sigma(z) = w*r / (w*r + 1 - r),
+
+        so the raw logit overstates the log-odds by log w ~ 9.0 nats. Left
+        uncorrected, sigma(z) is not a probability, and `own_hard` in
+        task_eval.py sums exactly that to get the arm's own expected spike
+        count -- reporting a units error as if it were a modelling failure.
+
+        This CANNOT change a sampled output. `_bernoulli_at_rate` bisects for a
+        per-clip scalar shift b that hits the target rate, and a constant added
+        to every logit is absorbed exactly into b. AP, F1, top-k and every
+        binarised metric are invariant by construction; only `own_*` may move.
+        That invariance is the test -- and, as above, it is also why a no-op
+        cannot be distinguished from a correct fix by the binarised columns.
+        """
+        return self.tokenizer.decode_ids(grid)[:, 0] + self.logit_offset
+
     @torch.no_grad()
     def _draw_logits(self, cond: ConditioningBatch, generator=None) -> torch.Tensor:
         ids = self.prior.generate(
@@ -213,7 +248,7 @@ class MaskGITFlat(SpikeVolumeBaseline):
             steps=self.cfg["steps"], temperature=self.cfg["temperature"],
             generator=generator, device=cond.global_ctx.device)
         grid = ids.reshape(ids.shape[0], *GRID)
-        return self.tokenizer.decode_ids(grid)[:, 0]          # (B,T,H,W)
+        return self._decode_field(grid)
 
     @staticmethod
     def _bernoulli_at_rate(logits: torch.Tensor, target: torch.Tensor,
@@ -263,6 +298,56 @@ class MaskGITFlat(SpikeVolumeBaseline):
         return self._draw_logits(cond, generator)
 
     @torch.no_grad()
+    def complete(self, cond: ConditioningBatch, real: torch.Tensor,
+                 roi: torch.Tensor, *, generator=None):
+        """Token-level inpainting: pin the visible tokens, decode the ROI.
+
+        This is MaskGIT's native strength and the reason it is the baseline
+        that matters on the task axis -- unlike DG it can actually read the
+        visible remainder.
+
+        The hole is zeroed BEFORE tokenising. The patch embed is a
+        PATCH-strided Conv3d and so is token-local, but the residual blocks
+        that follow are 3x3x3 and mix neighbouring tokens, so a "visible"
+        token's id can otherwise carry hidden voxels.
+        """
+        dev = self.device
+        x = real.to(dev).float()
+        if x.dim() == 4:
+            x = x.unsqueeze(1)
+        m = roi.to(dev).float()
+        if m.dim() == 4:
+            m = m.unsqueeze(1)
+
+        ids = self.tokenizer.tokens(x * (1.0 - m))
+        B = ids.shape[0]
+        ids = ids.reshape(B, -1)
+
+        roi_tok = F.max_pool3d(m[:, :1], kernel_size=PATCH, stride=PATCH)
+        roi_tok = roi_tok.reshape(B, -1) > 0.5
+        if roi_tok.shape[1] != ids.shape[1]:
+            raise RuntimeError(
+                f"token ROI {tuple(roi_tok.shape)} does not match ids "
+                f"{tuple(ids.shape)}; ROI must be patch-aligned")
+
+        out = self.prior.complete(
+            ids, roi_tok, cond.global_ctx.to(dev), cond.local_ctx.to(dev),
+            steps=self.cfg["steps"], temperature=self.cfg["temperature"],
+            generator=generator)
+        return self._decode_field(out.reshape(B, *GRID))
+
+    @torch.no_grad()
+    def oracle_field(self, real: torch.Tensor):
+        """Decode the TRUE tokens of the full clip -- this tokenizer's ceiling."""
+        dev = self.device
+        x = real.to(dev).float()
+        if x.dim() == 4:
+            x = x.unsqueeze(1)
+        ids = self.tokenizer.tokens(x)
+        B = ids.shape[0]
+        return self._decode_field(ids.reshape(B, *GRID))
+
+    @torch.no_grad()
     def tokenize(self, vols: torch.Tensor) -> Optional[torch.Tensor]:
         x = vols if vols.dim() == 5 else vols.unsqueeze(1)
         return self.tokenizer.tokens(x.to(self.device))
@@ -273,6 +358,7 @@ class MaskGITFlat(SpikeVolumeBaseline):
         torch.save({"tokenizer": self.tokenizer.state_dict(),
                     "prior": self.prior.state_dict(),
                     "rate_coef": self.rate_coef, "cfg": self.cfg,
+                    "logit_offset": self.logit_offset,
                     "fit_report": self.fit_report}, path)
         path.with_suffix(".fit.json").write_text(
             json.dumps(self.fit_report, indent=2, default=float))
@@ -289,6 +375,11 @@ class MaskGITFlat(SpikeVolumeBaseline):
         self.prior = self.prior.to(device).eval()
         self.rate_coef = d["rate_coef"]
         self.fit_report = d.get("fit_report", {})
+        # Legacy checkpoints predate the correction and store no offset. They
+        # load with 0.0 rather than a guessed value, so an uncorrected file
+        # keeps its published (wrong-units) behaviour instead of silently
+        # changing meaning; the corrected checkpoint carries the number.
+        self.logit_offset = float(d.get("logit_offset", 0.0))
         self.device = device
 
 

@@ -25,6 +25,8 @@ def _load_all() -> None:
     from . import dichotomized_gaussian  # noqa: F401
     from . import coupled_glm            # noqa: F401
     from . import maskgit_flat           # noqa: F401
+    from . import unet3d                 # noqa: F401
+    from . import cvae3d                 # noqa: F401
     # Not an external baseline -- the shipped model, wrapped so the diagnostics
     # measure it with the same code. Registered here so `--baseline pipeline`
     # cannot drift onto a different clip set or a different metric path.

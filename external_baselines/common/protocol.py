@@ -146,6 +146,32 @@ class SpikeVolumeBaseline(abc.ABC):
         """
         return None
 
+    @torch.no_grad()
+    def complete(
+        self,
+        cond: ConditioningBatch,
+        real: torch.Tensor,
+        roi: torch.Tensor,
+        *,
+        generator: Optional[torch.Generator] = None,
+    ) -> Optional[torch.Tensor]:
+        """Continuous per-voxel score INSIDE `roi`, given everything outside it.
+
+        `real` is (B,1,T,H,W) and `roi` is a float 0/1 mask of the same shape;
+        a model may read `real` only where `roi` is 0. That is not an honour
+        system -- `external_baselines/tests/test_task_completion.py` re-runs
+        each `complete` with the held-out region replaced by noise and requires
+        a bitwise-identical result.
+
+        Returning None means the model has NO completion mechanism, which is a
+        reportable capability fact and not a failure: the harness falls back to
+        free generation and labels the column, rather than inventing a
+        conditioning path the method does not have. The Dichotomized Gaussian
+        is the honest case -- its clip-level output is a static per-site
+        probability, so it cannot use the visible remainder at all.
+        """
+        return None
+
     def tokenize(self, vols: torch.Tensor) -> Optional[torch.Tensor]:
         """Token ids for the token-family metrics (MRR/CE), or None.
 

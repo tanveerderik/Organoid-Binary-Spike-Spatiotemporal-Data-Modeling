@@ -62,6 +62,15 @@ class TransformerVQVAE(nn.Module):
         gap_bins = None,
 
         # ---- decoder attention masking ----
+        # ---- ABLATION ONLY: dense patch embed, no blank routing ----
+        # Default False reproduces the shipped model bit-for-bit. When True,
+        # every token is declared active, so blank patches are projected,
+        # encoded and QUANTIZED like any other -- i.e. the EMA codebook sees
+        # the ~92% blank mass it was designed to be shielded from, and the
+        # learned `blank_token` is never used. This is the arm that tests
+        # whether the sparse encoder is load-bearing.
+        dense_ablation: bool = False,
+
         enc_attn_mask_kind: str = "temporal_band_bi",  # "none" | "temporal_causal" | "temporal_band" | "temporal_band_bi"
         enc_attn_window: int = 5,                      # window length in patch-time tokens
         dec_attn_mask_kind: str = "temporal_band_bi",  # "none" | "temporal_causal" | "temporal_band" | "temporal_band_bi"
@@ -70,6 +79,7 @@ class TransformerVQVAE(nn.Module):
         
     ):
         super().__init__()
+        self.dense_ablation = bool(dense_ablation)
         self.patch_size = patch_size
         self.in_chans = in_chans
         self.out_chans = out_chans
@@ -1036,6 +1046,12 @@ class TransformerVQVAE(nn.Module):
         tokens, grid, _, _ = self.patch_embed(x_stem)
         
         blank_mask = self.compute_blank_mask(x_orig, grid)
+        if self.dense_ablation:
+            # Declare every token active. Downstream this is the ONLY change:
+            # the sparse encoder, the code projection and the residual VQ all
+            # key off `active_mask`, so forcing it True routes blank patches
+            # through the codebook instead of to `self.blank_token`.
+            blank_mask = torch.zeros_like(blank_mask)
         active_mask = ~blank_mask
         
         if tuple(grid) != tuple(self.token_grid):

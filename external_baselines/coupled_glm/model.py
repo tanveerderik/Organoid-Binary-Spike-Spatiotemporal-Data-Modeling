@@ -387,6 +387,59 @@ class CoupledGLM(SpikeVolumeBaseline):
         return y[:, 0, self.n_lags:], inten
 
     @torch.no_grad()
+    def complete(self, cond: ConditioningBatch, real: torch.Tensor,
+                 roi: torch.Tensor, *, generator=None):
+        """Roll forward with the VISIBLE voxels clamped to truth.
+
+        The same loop as `_generate`, with one change: after drawing frame t,
+        every voxel outside the ROI is overwritten with the real value before
+        it enters the history buffer. The filters are causal 3-D convolutions,
+        so this is exactly the conditional the model defines -- no
+        approximation, and no held-out voxel is ever read, only written.
+
+        This makes the GLM a genuine completion baseline on all three tasks,
+        including `spatial`: a hidden voxel's neighbourhood at lag >= 1 spans
+        sites outside the box, so the visible remainder does reach it. What it
+        cannot use is the FUTURE, which is a property of the model class and
+        the reason its `noncausal` column is not directly comparable to a
+        bidirectional method's.
+        """
+        device = cond.global_ctx.device
+        T, H, W = cond.shape
+        B = cond.batch_size
+        self.net = self.net.to(device)
+
+        y_true = real.to(device).float()
+        y_true = y_true[:, 0] if y_true.dim() == 5 else y_true
+        m = roi.to(device).float()
+        m = m[:, 0] if m.dim() == 5 else m
+        vis = 1.0 - m                                        # (B,T,H,W)
+
+        rows = [self.site_logit.get(int(a), self.global_site)
+                for a in cond.assay_idx.tolist()]
+        base = torch.stack(rows).to(device)
+        if self._calib_map is None and self.calib_corr is not None:
+            self._calib_map = self._corr_map(self.calib_corr.to(device),
+                                             self.calib_binid.to(device))
+        if self._calib_map is not None:
+            base = base + self._calib_map.to(device).unsqueeze(0)
+        base = base.unsqueeze(1)
+        off = self.net.ctx_offset(cond.global_ctx, cond.local_ctx).view(B, 1, 1, 1)
+        max_logit = math.log(self.max_rate / (1 - self.max_rate))
+
+        y = torch.zeros(B, 1, self.n_lags + T, H, W, device=device)
+        inten = torch.zeros(B, T, H, W, device=device)
+        for t in range(T):
+            win = y[:, :, t:t + self.n_lags]
+            logit = self.net.logit(win, base, off)[:, 0].clamp(max=max_logit)
+            inten[:, t] = logit
+            p = torch.sigmoid(logit)
+            u = torch.rand(p.shape, generator=generator, device="cpu").to(device)
+            samp = (u < p).float()
+            y[:, 0, self.n_lags + t] = vis[:, t] * y_true[:, t] + m[:, t] * samp
+        return inten
+
+    @torch.no_grad()
     def sample(self, cond: ConditioningBatch, *, generator=None) -> torch.Tensor:
         return self._generate(cond, generator)[0]
 

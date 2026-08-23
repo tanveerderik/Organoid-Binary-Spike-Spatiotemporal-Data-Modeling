@@ -154,3 +154,55 @@ class MaskGITPrior(nn.Module):
             ids = torch.where(unknown, torch.full_like(ids, self.mask_id), ids)
 
         return ids
+
+    @torch.no_grad()
+    def complete(self, ids_known, roi, gct, lct, *, steps: int = 12,
+                 temperature: float = 1.0, generator=None):
+        """MaskGIT decoding with the visible tokens PINNED.
+
+        Deliberately a separate method rather than a flag on `generate`: the
+        free-generation path produced every number already in the diagnostics
+        table, and it must not move because completion was added.
+
+        `roi` is (B,N) bool -- True where the token must be predicted. Known
+        slots are never re-masked and never resampled. The cosine schedule is
+        applied to each row's OWN unknown count, not to n_tokens, or a row
+        whose hole is 30% of the grid would be declared finished after the
+        first step.
+        """
+        dev = ids_known.device
+        ids = ids_known.clone()
+        ids[roi] = self.mask_id
+        unknown = roi.clone()
+        n_unk0 = unknown.sum(1, keepdim=True).float()
+
+        for t in range(steps):
+            if not bool(unknown.any()):
+                break
+            logits = self(ids, gct, lct) / max(temperature, 1e-6)
+            probs = logits.softmax(-1)
+            samp = torch.multinomial(
+                probs.reshape(-1, self.n_codes).cpu(), 1,
+                generator=generator).reshape(ids.shape).to(dev)
+            conf = probs.gather(-1, samp.unsqueeze(-1)).squeeze(-1)
+
+            ids = torch.where(unknown, samp, ids)
+            conf = conf.masked_fill(~unknown, float("inf"))
+
+            r = torch.tensor((t + 1) / steps, device=dev)
+            keep = (cosine_schedule(r) * n_unk0).long()      # (B,1) per row
+            if t == steps - 1:
+                unknown = torch.zeros_like(unknown)
+                break
+
+            ann = temperature * (1.0 - (t + 1) / steps)
+            u = torch.rand(conf.shape, generator=generator).to(dev)
+            g = -torch.log(-torch.log(u + 1e-9) + 1e-9)
+            score = conf + ann * g
+            srt = score.sort(dim=1).values
+            idx = (keep - 1).clamp(min=0, max=score.shape[1] - 1)
+            cut = srt.gather(1, idx)
+            unknown = (score <= cut) & (keep > 0)
+            ids = torch.where(unknown, torch.full_like(ids, self.mask_id), ids)
+
+        return ids

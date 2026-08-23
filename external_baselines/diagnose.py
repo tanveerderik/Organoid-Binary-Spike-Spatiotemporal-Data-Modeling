@@ -31,7 +31,8 @@ chance, the `random`-context control, or the real-vs-real value.
                         Per-electrode map correlation, cosine and active-site
                         IoU against the true clip, against the same controls.
 
-    5. ADJACENCY        P(spike at neighbour | spike) by spatial displacement
+    5. ADJACENCY        short-gap rate P(spike at t+g | spike at t) by
+                        canonical gap bin (utils/constants.DEFAULT_GAP_BINS)
                         and temporal lag, generated versus real.
 
     python external_baselines/diagnose.py --baseline maskgit_flat
@@ -54,6 +55,9 @@ from MAGVIT_project.external_baselines.common.ladder import ContextLadder
 from MAGVIT_project.utils.metrics import PRCurveAccumulator
 from MAGVIT_project.utils.recon import compute_activity_ctx
 from MAGVIT_project.utils.constants import ACTIVITY_CTX_NAMES
+from MAGVIT_project.utils.constants import (
+    ACTIVITY_CTX_NAMES, DEFAULT_GAP_BINS, gap_bin_labels)
+from MAGVIT_project.training.stage4_activity import _hard_gap_rates
 
 BANK = "ckpts/context_prior.pkl"
 
@@ -271,22 +275,19 @@ def context_and_space(baseline, batches, device, ladder, gen, regimes):
            for r in regimes}
     adj = {r: [] for r in regimes}
     adj_real = []
-    disp = (1, 2, 3)
-    lags = (1, 2, 3, 4, 5, 6, 7)
 
+    # Canonical short-gap adjacency: the bins in utils/constants.py and the
+    # rate that `_hard_gap_rates` computes, which is what training and
+    # inference/metrics_gen already report. The previous ad-hoc
+    # `space_d{1,2,3}` / `time_lag{1..7}` profile agreed with no other number
+    # in the project. Spatial structure is reported as spatial consistency in
+    # the per-task battery, on the same canonical footing.
     def adjacency(v):                       # v (T,H,W) float
-        out = []
-        s = float(v.sum())
-        if s == 0:
-            return [np.nan] * (len(disp) + len(lags))
-        for d in disp:
-            acc = 0.0
-            for dh, dw in ((d, 0), (-d, 0), (0, d), (0, -d)):
-                acc += float((torch.roll(v, shifts=(dh, dw), dims=(1, 2)) * v).sum())
-            out.append(acc / (4 * s))
-        for k in lags:
-            out.append(float((v[k:] * v[:-k]).sum()) / s)
-        return out
+        if float(v.sum()) == 0:
+            return [np.nan] * len(DEFAULT_GAP_BINS)
+        r = _hard_gap_rates(v.unsqueeze(0).unsqueeze(0).float(),
+                            DEFAULT_GAP_BINS)
+        return r[0].tolist()
 
     for cond, real in bdata.iter_split("test", batches=batches):
         cond_d = cond.to(device)
@@ -321,7 +322,8 @@ def context_and_space(baseline, batches, device, ladder, gen, regimes):
                 res[r]["site_iou"].append(float((ga & ta).sum() / u) if u else np.nan)
                 adj[r].append(adjacency(v[i]))
 
-    out = {"adjacency_labels": [f"space_d{d}" for d in disp] + [f"time_lag{k}" for k in lags],
+    out = {"adjacency_labels": list(gap_bin_labels()),
+           "adjacency_gap_bins": [list(b) for b in DEFAULT_GAP_BINS],
            "adjacency_real": np.nanmean(np.array(adj_real, float), axis=0).tolist(),
            "regimes": {}}
     for r in regimes:
@@ -382,8 +384,14 @@ def main() -> int:
     ap.add_argument("--batches", type=int, default=8)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--seed", type=int, default=20260821)
+    # MUST match the rungs the shipped rows were produced on. The default used
+    # to omit `local_only`, so every arm scored after the first four silently
+    # got a four-rung ladder and the report raised KeyError on the fifth -- the
+    # good failure. A quieter version of the same bug would have rendered a
+    # ladder with a hole in it.
     ap.add_argument("--regimes",
-                    default="random,global_only,global_partial_local,global_full_local")
+                    default="random,local_only,global_only,"
+                            "global_partial_local,global_full_local")
     ap.add_argument("--ablate", default=None, choices=("assay_map",),
                     help="assay_map: delete the fitted per-assay site maps so "
                          "every clip falls back to the pooled `global_site`. "
@@ -500,7 +508,7 @@ def main() -> int:
           " site map cannot fake.")
 
     print("\n" + "=" * 74)
-    print("5. ADJACENCY   P(spike at neighbour | spike)")
+    print("5. ADJACENCY   short-gap rate P(spike at t+g | spike at t), canonical gap bins")
     print("   " + f"{'':16s}{'REAL':>12s}" + "".join(f"{r[:14]:>16s}" for r in regimes))
     for i, lab in enumerate(cs["adjacency_labels"]):
         print("   " + f"{lab:16s}{cs['adjacency_real'][i]:12.5f}" +
