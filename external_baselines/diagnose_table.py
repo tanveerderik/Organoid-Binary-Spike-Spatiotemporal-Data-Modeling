@@ -30,7 +30,7 @@ import numpy as np
 
 DIR = Path("reports/external_baselines")
 MODELS = [("pipeline", "Ours (4C+soft)"), ("maskgit_flat", "MaskGIT-flat"),
-          ("unet3d", "3D U-Net (det.)"), ("cvae3d", "3D CVAE"),
+          ("unet3d", "3D U-Net (det.)\u2020"), ("cvae3d", "3D CVAE"),
           ("dg", "Dich. Gaussian"), ("glm", "Coupled GLM")]
 RUNGS = [("random", "random"), ("local_only", "LOCAL only"),
          ("global_only", "GLOBAL only"), ("global_partial_local", "glob+partial"),
@@ -60,6 +60,28 @@ MODEL_CLASS = {"pipeline": "learned", "maskgit_flat": "learned",
 # the completion objective -- not a peer generator. `cvae3d` is the same
 # backbone WITH a latent, so the pair isolates stochasticity.
 DETERMINISTIC = {"unet3d"}
+
+# A dagger rather than an asterisk: model labels appear inside table cells that
+# already carry `**bold**`, and an odd number of stray asterisks on a line is
+# exactly the input that makes a Markdown renderer start emphasis in the middle
+# of a number. The dagger has no Markdown meaning at all.
+UNET_MARK = "\u2020"
+
+MARK_NOTE = (
+    UNET_MARK + " **3D U-Net (det.) is not a representation learner, and its "
+    "reconstruction numbers are not comparable to a tokenizer's.** It is a "
+    "U-Net: `forward` concatenates the full-resolution stem output back in on "
+    "the way up, so an uncompressed path runs from input to output and the "
+    "decoder reads AROUND the compressed layer. Per clip it carries 54.8M "
+    "floats across its skips against an input of 1.29M binary voxels -- the "
+    "full-resolution skip alone holds 32x more floats than the volume has "
+    "voxels. It produces **no codebook, no discrete index, and no reusable "
+    "latent**: nothing is shared across clips, nothing is indexable, and there "
+    "is no bottleneck a prior could be trained over. Our alphabet is 1024 "
+    "tokens over V=961, i.e. 1.24 KB per clip. The skips are what win it the "
+    "ranking columns and are precisely what disqualify it as a tokenizer; the "
+    "two cannot be had together, because a tokenizer's value comes from "
+    "forcing everything through the code.")
 
 DET_NOTE = ("**3D U-Net (det.) is marked `det.` because it has no sampling "
             "distribution.** It is trained to predict the conditional mean of "
@@ -1529,6 +1551,7 @@ def report(J, have, rungs, reg, real, labels, parts) -> None:
               "its context -- which is what the `_ref_` lookups do once their "
               "per-assay map is withheld (see **Scalability**).\n")
         print(DET_NOTE + "\n")
+        print(MARK_NOTE + "\n")
         print(REF_NOTE + "\n")
 
     if "gen_ladders" in parts:
@@ -1622,9 +1645,55 @@ def _ablations() -> None:
     lad = ROOT_REPORTS / "ablation_ladder_decode_depth.json"
     spa = ROOT_REPORTS / "ablation_sparse_encoder.json"
     con = ROOT_REPORTS / "ablation_sparse_encoder_content.json"
-    if not (lad.is_file() or spa.is_file()):
+    pat = ROOT_REPORTS / "ablation_patch_size.json"
+    if not (lad.is_file() or spa.is_file() or pat.is_file()):
         return
-    print("\n## Ablations: why this tokenizer\n")
+    print("\n## Design choices: why this tokenizer\n")
+
+    if pat.is_file():
+        P_ = json.loads(pat.read_text())
+        rows = [r for r in P_["rows"] if "skipped" not in r]
+        print("### Patch size -- why (6,15,14)\n")
+        print("Model-free: one pass over "
+              f"{P_['n_clips']} val clips at voxel rate "
+              f"{P_['voxel_rate']:.3e}, nothing trained. The binding quantity "
+              "is the BLANK FRACTION of the token population. At this rate a "
+              "patch is empty unless it happens to catch a spike, so shrinking "
+              "it grows the token grid far faster than it grows the number of "
+              "tokens containing anything.\n")
+        print("| patch | voxels | tokens | blank " + _arrow("low")
+              + " | active tokens/clip | spikes per active token |")
+        print("|---|---|---|---|---|---|")
+        for r in rows:
+            ps = tuple(r["patch"])
+            lab = f"**{ps}**" if r["is_shipped"] else f"{ps}"
+            tail = " _<- shipped_" if r["is_shipped"] else ""
+            print(f"| {lab}{tail} | {r['voxels_per_patch']} | {r['n_tokens']} "
+                  f"| {100*r['blank_frac']:.1f}% | {r['active_tokens']:.0f} "
+                  f"| {r['spikes_per_active']:.2f} |")
+        sh = next(r for r in rows if r["is_shipped"])
+        sm = min(rows, key=lambda r: r["voxels_per_patch"])
+        print(f"\n**Active tokens barely move while the grid explodes.** From "
+              f"{tuple(sh['patch'])} to {tuple(sm['patch'])} the token count "
+              f"rises {sm['n_tokens']/sh['n_tokens']:.0f}x "
+              f"({sh['n_tokens']} -> {sm['n_tokens']}) while tokens carrying "
+              f"any spike go only {sh['active_tokens']:.0f} -> "
+              f"{sm['active_tokens']:.0f}. The same signal is spread over "
+              f"{sm['n_tokens']/sh['n_tokens']:.0f}x more positions, each "
+              f"almost always empty, and the content of a non-blank token "
+              f"falls from {sh['spikes_per_active']:.2f} to "
+              f"{sm['spikes_per_active']:.2f} spikes -- an alphabet entry has "
+              "less and less to distinguish.\n")
+        print("That is the trade: finer patches decode more sharply and give "
+              "BETTER reconstruction, while the prior is handed a target "
+              "distribution that is almost entirely blank, where predicting "
+              "blank is close to optimal. Reconstruction and generation move "
+              "in opposite directions, so the patch is chosen for the prior, "
+              "not for the decoder. It also fixes the token budget at 1024, "
+              "which is what makes the clip fit in memory, and keeps enough "
+              "spikes per token for the variance and covariance context "
+              "features to be legible. Blank fraction is the same quantity "
+              "that binds in **Sparse encoder** below.\n")
 
     if lad.is_file():
         L = json.loads(lad.read_text())
@@ -1774,7 +1843,7 @@ def main() -> int:
                 "Supporting detail for `diagnostics.md`: full paired-test "
                 "listings, the conditioning ladders behind the collapsed "
                 "generation table, and measurement provenance. Same runs, "
-                "same numbers.\n\n" + budgets + "\n"
+                "same numbers.\n\n" + budgets + "\n" + MARK_NOTE + "\n\n"
                 + _cap(task_section, APPENDIX)
                 + _cap(report, J, have, rungs, reg, real, labels, APPENDIX))
 
