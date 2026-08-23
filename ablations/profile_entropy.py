@@ -25,7 +25,12 @@ _tr, val, _te, _m = M.make_loaders(assay_dict=ad, assay_indices=list(ad.keys()),
 b0 = next(iter(val))
 model = build(tuple(b0["x"].shape[-3:]), tuple(map(int,b0["full_hw"][0])), dev,
               dense=False, seed=0)
-sd = torch.load("ckpts/vqvae_stage2a_best.pt", map_location="cpu")
+import argparse
+_ap = argparse.ArgumentParser()
+_ap.add_argument("--ckpt", default="ckpts/vqvae_stage2a_best.pt")
+_ap.add_argument("--tag", default="")
+_a = _ap.parse_args()
+sd = torch.load(_a.ckpt, map_location="cpu")
 model.load_state_dict(sd.get("model", sd.get("state_dict", sd)), strict=False)
 model.eval()
 
@@ -67,7 +72,7 @@ for nm, m, r_, c in (("temporal", cat(MT), cat(RT), ct),
                      ("spatial",  cat(MS), cat(RS), cs)):
     print(f"{nm:<12}{m.mean():>9.3f}{r_.mean():>9.3f}{c:>14.3f}{100*m.mean()/c:>16.1f}%")
 out = {"n_content_tokens": int(len(cat(MT))), "batches": 8,
-       "ckpt": "ckpts/vqvae_stage2a_best.pt",
+       "ckpt": _a.ckpt,
        "patch": [int(pT), int(pH), int(pW)],
        "temporal": {"model": float(cat(MT).mean()), "real": float(cat(RT).mean()),
                     "flat_ceiling": float(ct)},
@@ -78,7 +83,7 @@ out = {"n_content_tokens": int(len(cat(MT))), "batches": 8,
            "temporal_ceiling": 1.792, "spatial_model": 3.19,
            "spatial_ceiling": 5.35,
            "source": "code comment, utils/losses.py:118-127"}}
-f = R / "reports" / "analysis_profile_entropy.json"
+f = R / "reports" / (f"analysis_profile_entropy{'_' + _a.tag if _a.tag else ''}.json")
 f.write_text(json.dumps(out, indent=1))
 print(f"\nprior measurement (peak_radius_t=0): temporal model 1.699, real 0.312, ceiling 1.792")
 print(f"wrote {f}")

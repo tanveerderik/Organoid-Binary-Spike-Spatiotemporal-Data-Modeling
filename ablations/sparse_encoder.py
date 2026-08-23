@@ -202,9 +202,12 @@ def main() -> int:
     ap.add_argument("--epochs", type=int, default=80)
     ap.add_argument("--seed", type=int, default=20260823)
     ap.add_argument("--arms", default="sparse,dense",
-                    help="sparse | dense | tokent (sparse + token entropy)")
+                    help="comma-separated. `sparse` | `dense` | any name "
+                         "containing `tokent`. An arm may carry its own lambda "
+                         "as `name:lambda`, e.g. `tokent_lo:0.0086`, so a "
+                         "dose-response can run in one invocation.")
     ap.add_argument("--tok-entropy", type=float, default=0.05,
-                    help="lambda for the `tokent` arm")
+                    help="default lambda for tokent arms with no `:lambda`")
     a = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -224,12 +227,14 @@ def main() -> int:
 
     CK.mkdir(parents=True, exist_ok=True)
     reps = {}
-    for name in [s.strip() for s in a.arms.split(",") if s.strip()]:
+    for spec in [s.strip() for s in a.arms.split(",") if s.strip()]:
+        name, _, lam = spec.partition(":")
+        lam = float(lam) if lam else a.tok_entropy
         reps[name] = run_arm(
             name, dense=(name == "dense"), epochs=a.epochs, seed=a.seed,
             loaders=(train_loader, val_loader), img_size=img_size,
             full_hw=full_hw, device=device, blank_thr=blank_thr,
-            tok_entropy=(a.tok_entropy if name == "tokent" else 0.0))
+            tok_entropy=(lam if "tokent" in name else 0.0))
         # MERGE, never overwrite. This path is fixed, so a short smoke run used
         # to clobber a completed one: a 4-epoch --arms tokent run destroyed the
         # 80-epoch sparse and dense results, and the checkpoints carry weights
