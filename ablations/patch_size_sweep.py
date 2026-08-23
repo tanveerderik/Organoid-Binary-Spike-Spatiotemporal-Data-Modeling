@@ -20,6 +20,20 @@ Reported per candidate patch size:
   active_tokens     mean tokens per clip that contain at least one spike
   spikes_per_active mean spikes inside a non-blank patch -- how much there is
                     for an alphabet entry to actually distinguish
+  spikes_sd         spread of that, i.e. how heterogeneous non-blank patches are
+  capture_k32       fraction of active-patch variance a 32-entry alphabet can
+                    describe, from k-means at K=32 on the raw patches. This is
+                    the LEARNABILITY side of the trade: the parent codebook has
+                    32 entries, so if 32 centroids cannot describe the patch
+                    distribution then no amount of training fixes it. Note the
+                    quantizer is EMA -- the codebook is a moving average of its
+                    assignments, with no gradient and no sparsity penalty on the
+                    code vectors. The only usage term is
+                    `loss_usage = max_entropy - entropy` at weight 1e-3
+                    (model/base.py:424), which pushes usage TOWARD UNIFORM. That
+                    is an anti-collapse term, the opposite of a sparsity prior,
+                    and it does nothing to help a small codebook cover a
+                    high-diversity patch distribution.
 
 Same measurement underlies the sparse-encoder ablation, which is the other
 place blank fraction binds. No model is loaded.
@@ -33,6 +47,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from sklearn.cluster import KMeans
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT.parent))
@@ -42,7 +57,13 @@ OUT = ROOT / "reports" / "ablation_patch_size.json"
 
 # Every candidate must divide 48x120x224 exactly; non-dividing sizes are
 # reported as skipped rather than silently dropped.
-CANDIDATES = [(12, 15, 14), (6, 15, 14), (3, 15, 14), (6, 15, 7),
+# Both directions from the shipped size. FEWER tokens is not the safe end: the
+# patch gets larger and more heterogeneous, so a fixed 32-entry parent codebook
+# has to cover far more distinct content, which is what `capture_k32` measures.
+CANDIDATES = [(24, 15, 14), (12, 30, 14), (6, 30, 28),      # 256 tokens
+              (12, 15, 14), (6, 30, 14), (24, 15, 7),       # 512 tokens
+              (6, 15, 14),                                  # 1024, shipped
+              (3, 15, 14), (6, 15, 7),                      # 2048
               (3, 15, 7), (6, 10, 7), (3, 10, 7), (2, 8, 7)]
 
 
@@ -77,12 +98,26 @@ def main() -> int:
                 .reshape(B, t * h * w, pT * pH * pW))
         cnt = pat.sum(-1)
         blank = cnt == 0
+        act = pat[~blank].float()
+        cap = float("nan")
+        if act.shape[0] >= 64:
+            # Subsample for cost; the statistic is a variance ratio and is
+            # stable well below the full set.
+            g = torch.Generator().manual_seed(0)
+            idx = torch.randperm(act.shape[0], generator=g)[:4000]
+            A = act[idx].numpy()
+            km = KMeans(n_clusters=32, n_init=4, random_state=0).fit(A)
+            ss_tot = float(((A - A.mean(0)) ** 2).sum())
+            ss_res = float(km.inertia_)
+            cap = 1.0 - ss_res / max(ss_tot, 1e-12)
         rows.append({
             "patch": list(ps), "voxels_per_patch": int(pT * pH * pW),
             "n_tokens": int(t * h * w),
             "blank_frac": float(blank.float().mean()),
             "active_tokens": float((~blank).float().sum(1).mean()),
             "spikes_per_active": float(cnt[~blank].float().mean()),
+            "spikes_sd": float(cnt[~blank].float().std()),
+            "capture_k32": cap,
             "is_shipped": ps == shipped})
     out = {"n_clips": int(B), "shape": [T, H, W],
            "voxel_rate": float(X.float().mean()),
@@ -91,14 +126,15 @@ def main() -> int:
 
     print(f"{B} val clips, {T}x{H}x{W}, rate {out['voxel_rate']:.3e}\n")
     hdr = (f"{'patch':<13}{'vox':>6}{'tokens':>8}{'blank%':>9}"
-           f"{'active tok':>12}{'spikes/active':>15}")
+           f"{'active tok':>12}{'spk/act':>9}{'spk sd':>8}{'capture@32':>12}")
     print(hdr); print("-" * len(hdr))
     for r in rows:
         if "skipped" in r:
             print(f"{str(tuple(r['patch'])):<13}  {r['skipped']}"); continue
         print(f"{str(tuple(r['patch'])):<13}{r['voxels_per_patch']:>6}"
               f"{r['n_tokens']:>8}{100*r['blank_frac']:>8.1f}%"
-              f"{r['active_tokens']:>12.0f}{r['spikes_per_active']:>15.2f}"
+              f"{r['active_tokens']:>12.0f}{r['spikes_per_active']:>9.2f}"
+              f"{r['spikes_sd']:>8.2f}{r['capture_k32']:>12.3f}"
               + ("  <- shipped" if r["is_shipped"] else ""))
     print(f"\nwrote {OUT}")
     return 0

@@ -1653,47 +1653,78 @@ def _ablations() -> None:
     if pat.is_file():
         P_ = json.loads(pat.read_text())
         rows = [r for r in P_["rows"] if "skipped" not in r]
+        rows = sorted(rows, key=lambda r: r["n_tokens"])
         print("### Patch size -- why (6,15,14)\n")
         print("Model-free: one pass over "
               f"{P_['n_clips']} val clips at voxel rate "
-              f"{P_['voxel_rate']:.3e}, nothing trained. The binding quantity "
-              "is the BLANK FRACTION of the token population. At this rate a "
-              "patch is empty unless it happens to catch a spike, so shrinking "
-              "it grows the token grid far faster than it grows the number of "
-              "tokens containing anything.\n")
+              f"{P_['voxel_rate']:.3e}, nothing trained. Two quantities move in "
+              "OPPOSITE directions as the patch changes, and the shipped size "
+              "is where both are still tolerable.\n")
+        print("- **blank** is the fraction of tokens containing no spike. It is "
+              "what the prior is trained against: once nearly every target is "
+              "blank, predicting blank is close to optimal and the prior "
+              "collapses.\n"
+              "- **capture@32** is the fraction of active-patch variance that "
+              "32 centroids can describe (k-means on the raw patches, K = the "
+              "parent codebook size). It is the ALPHABET side: if 32 entries "
+              "cannot describe the patch distribution, no amount of training "
+              "fixes it.\n")
         print("| patch | voxels | tokens | blank " + _arrow("low")
-              + " | active tokens/clip | spikes per active token |")
-        print("|---|---|---|---|---|---|")
+              + " | active tok/clip | spikes/active | spike sd | capture@32 "
+              + _arrow("high") + " |")
+        print("|---|---|---|---|---|---|---|---|")
         for r in rows:
             ps = tuple(r["patch"])
-            lab = f"**{ps}**" if r["is_shipped"] else f"{ps}"
-            tail = " _<- shipped_" if r["is_shipped"] else ""
-            print(f"| {lab}{tail} | {r['voxels_per_patch']} | {r['n_tokens']} "
+            lab = (f"**{ps}** _<- shipped_" if r["is_shipped"] else f"{ps}")
+            print(f"| {lab} | {r['voxels_per_patch']} | {r['n_tokens']} "
                   f"| {100*r['blank_frac']:.1f}% | {r['active_tokens']:.0f} "
-                  f"| {r['spikes_per_active']:.2f} |")
+                  f"| {r['spikes_per_active']:.2f} | {r['spikes_sd']:.2f} "
+                  f"| {r['capture_k32']:.3f} |")
         sh = next(r for r in rows if r["is_shipped"])
-        sm = min(rows, key=lambda r: r["voxels_per_patch"])
-        print(f"\n**Active tokens barely move while the grid explodes.** From "
-              f"{tuple(sh['patch'])} to {tuple(sm['patch'])} the token count "
-              f"rises {sm['n_tokens']/sh['n_tokens']:.0f}x "
-              f"({sh['n_tokens']} -> {sm['n_tokens']}) while tokens carrying "
-              f"any spike go only {sh['active_tokens']:.0f} -> "
-              f"{sm['active_tokens']:.0f}. The same signal is spread over "
-              f"{sm['n_tokens']/sh['n_tokens']:.0f}x more positions, each "
-              f"almost always empty, and the content of a non-blank token "
-              f"falls from {sh['spikes_per_active']:.2f} to "
-              f"{sm['spikes_per_active']:.2f} spikes -- an alphabet entry has "
-              "less and less to distinguish.\n")
-        print("That is the trade: finer patches decode more sharply and give "
-              "BETTER reconstruction, while the prior is handed a target "
-              "distribution that is almost entirely blank, where predicting "
-              "blank is close to optimal. Reconstruction and generation move "
-              "in opposite directions, so the patch is chosen for the prior, "
-              "not for the decoder. It also fixes the token budget at 1024, "
-              "which is what makes the clip fit in memory, and keeps enough "
-              "spikes per token for the variance and covariance context "
-              "features to be legible. Blank fraction is the same quantity "
-              "that binds in **Sparse encoder** below.\n")
+        sm = max(rows, key=lambda r: r["n_tokens"])
+        bg = min(rows, key=lambda r: r["n_tokens"])
+        print(f"\n**Smaller patches: the alphabet gets easier and the prior "
+              f"gets impossible.** From {tuple(sh['patch'])} to "
+              f"{tuple(sm['patch'])} capture@32 rises "
+              f"{sh['capture_k32']:.3f} -> {sm['capture_k32']:.3f}, because a "
+              f"patch holding {sm['spikes_per_active']:.2f} spikes is easy to "
+              f"describe. But blank goes {100*sh['blank_frac']:.1f}% -> "
+              f"{100*sm['blank_frac']:.1f}%, and active tokens barely move "
+              f"({sh['active_tokens']:.0f} -> {sm['active_tokens']:.0f}) while "
+              f"the grid grows {sm['n_tokens']/sh['n_tokens']:.0f}x. The same "
+              "signal is spread over far more positions, each almost always "
+              "empty. Reconstruction IMPROVES here -- finer patches decode "
+              "more sharply -- while generation collapses.\n")
+        print(f"**Larger patches: the prior gets easier and the alphabet "
+              f"cannot keep up.** At {tuple(bg['patch'])} blank falls to "
+              f"{100*bg['blank_frac']:.1f}%, which is what the prior wants, but "
+              f"a non-blank token now holds {bg['spikes_per_active']:.2f} "
+              f"spikes with sd {bg['spikes_sd']:.2f} against "
+              f"{sh['spikes_per_active']:.2f} / {sh['spikes_sd']:.2f} shipped, "
+              f"and capture@32 drops {sh['capture_k32']:.3f} -> "
+              f"{bg['capture_k32']:.3f}. Thirty-two entries cannot span that "
+              "much heterogeneity, so the cost reappears as quantization "
+              "error.\n")
+        print("**The quantizer has no mechanism to absorb that.** The codebook "
+              "is updated by EMA -- a moving average of its assignments, with "
+              "no gradient and no sparsity penalty on the code vectors. The "
+              "only usage term is `max_entropy - entropy` at weight 1e-3 "
+              "(`model/base.py:424`), which pushes usage TOWARD UNIFORM. That "
+              "is an anti-collapse term, the opposite of a sparsity prior, and "
+              "it does nothing to help a small codebook cover a high-diversity "
+              "patch distribution.\n")
+        print("So the patch is chosen for the PRIOR and the ALPHABET jointly, "
+              "not for the decoder: reconstruction alone would pick the "
+              "smallest patch on the table. The shipped size also fixes the "
+              "token budget at 1024, which is what makes a clip fit in memory, "
+              "and keeps enough spikes per token for the variance and "
+              "covariance context features to be legible. Blank fraction is "
+              "the same quantity that binds in **Sparse encoder** below.\n")
+        print("_capture@32 is k-means on RAW binary patches, so it measures the "
+              "intrinsic diversity of the content at each patch size. It is not "
+              "a measurement of our tokenizer, which quantizes 64-d encoder "
+              "outputs rather than raw voxels; read it as a relative comparison "
+              "ACROSS patch sizes, never as an absolute ceiling._\n")
 
     if lad.is_file():
         L = json.loads(lad.read_text())
