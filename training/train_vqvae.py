@@ -30,6 +30,7 @@ from ..utils.losses import (
     soft_code_norm_ceiling_loss,
     spatial_support_violation_loss,
     blank_patch_logit_hinge_loss,
+    token_profile_entropy_loss,
     blank_active_decoder_separation_loss,
 )
 
@@ -74,6 +75,24 @@ def fit_vqvae(
     gamma_peak_final: float = 0.15,
     delta_multi_mid: float = 0.05,
     delta_multi_final: float = 0.05,
+    # ---- token-level profile entropy (default OFF: 0.0 keeps the shipped
+    # path bit-identical) ----
+    # Voxel-level terms never look at a whole token, and the token is the unit
+    # the codebook represents. Measured within-token temporal entropy is 1.723
+    # against a log(6)=1.792 flat ceiling with real data at 0.328, and
+    # peak_radius_t=3 did not move it. This hinges each ACTIVE patch's profile
+    # entropy against the true patch's, so it asks for the truth's level of
+    # concentration and nothing sharper.
+    #
+    # Ramp in LATE. Entropy is stationary at the uniform distribution, so the
+    # term has no symmetry to break and nothing to sharpen until reconstruction
+    # has put structure in the patch.
+    lambda_tok_entropy: float = 0.0,
+    tok_entropy_start_epoch: int = 60,
+    tok_entropy_warmup_epochs: int = 20,
+    tok_entropy_slack: float = 0.05,
+    tok_entropy_min_true_count: int = 1,
+
     lambda_isi: float = 1e-2,
     lambda_vq: float = 1.0,
     lambda_ctx: float = 1e-3,
@@ -252,6 +271,10 @@ def fit_vqvae(
             "loss_enc_var": 0.0,
             "loss_code_norm": 0.0,
             "loss_blank": 0.0,
+            "loss_tok_entropy": 0.0,
+            "tok_h_model": 0.0,
+            "tok_h_true": 0.0,
+            "tok_frac_violating": 0.0,
             "loss_blank_sep": 0.0,
             
         }
@@ -768,6 +791,28 @@ def fit_vqvae(
                     tau=0.25,
                     sharpness=10.0,
                 )
+
+                # --- token-level profile entropy, active patches only ---
+                loss_tok_ent = out["pred_patches_raw"].new_zeros(())
+                tok_ent_parts = None
+                if lambda_tok_entropy > 0.0:
+                    t_te = ((epoch - tok_entropy_start_epoch)
+                            / max(1, tok_entropy_warmup_epochs))
+                    tok_ent_ramp = 0.5 * (1 - math.cos(
+                        math.pi * min(1.0, max(0.0, t_te))))
+                    if tok_ent_ramp > 0.0:
+                        tgt_patches, _ = model.patch_embed.patchify(x)
+                        loss_tok_ent, tok_ent_parts = token_profile_entropy_loss(
+                            out["pred_patches_raw"],
+                            tgt_patches.to(out["pred_patches_raw"].dtype),
+                            active_mask=out["active_mask"],
+                            slack=tok_entropy_slack,
+                            min_true_count=tok_entropy_min_true_count,
+                            return_parts=True,
+                        )
+                else:
+                    tok_ent_ramp = 0.0
+                lambda_tok_ent_eff = lambda_tok_entropy * tok_ent_ramp
                 
                 # --- blank-active decoder latent separation ---
                 t_blank_sep = (epoch - blank_sep_start_epoch) / max(1, blank_sep_warmup_epochs)
@@ -905,6 +950,7 @@ def fit_vqvae(
                 + lambda_ctx_field_eff * loss_ctx_field
                 + loss_sp_cons
                 + lambda_blank_eff * loss_blank + lambda_blank_sep_eff * loss_blank_sep
+                + lambda_tok_ent_eff * loss_tok_ent
             )
             
             scaler.scale(loss / grad_accum_steps).backward()
@@ -920,6 +966,11 @@ def fit_vqvae(
             sums["loss_code_norm"] += float(loss_code_norm.detach().cpu())
             
             sums["loss_blank"] += float(loss_blank.detach().cpu())
+            sums["loss_tok_entropy"] += float(loss_tok_ent.detach().cpu())
+            if tok_ent_parts is not None:
+                sums["tok_h_model"] += tok_ent_parts["h_model"]
+                sums["tok_h_true"] += tok_ent_parts["h_true"]
+                sums["tok_frac_violating"] += tok_ent_parts["frac_violating"]
             sums["loss_blank_sep"] += float(loss_blank_sep.detach().cpu())
             
             sums["loss_isi"] += float(loss_isi.detach().cpu())
@@ -1043,6 +1094,11 @@ def fit_vqvae(
             "loss_enc_var": sums["loss_enc_var"] / max(1, num_batches),
             "loss_code_norm": sums["loss_code_norm"] / max(1, num_batches),
             "blank": sums["loss_blank"] / max(1, num_batches),
+            "loss_tok_entropy": sums["loss_tok_entropy"] / max(1, num_batches),
+            "tok_h_model": sums["tok_h_model"] / max(1, num_batches),
+            "tok_h_true": sums["tok_h_true"] / max(1, num_batches),
+            "tok_frac_violating": (sums["tok_frac_violating"]
+                                   / max(1, num_batches)),
             "blank_sep": sums["loss_blank_sep"] / max(1, num_batches),
             "loss_isi": sums["loss_isi"] / max(1, num_batches),
             

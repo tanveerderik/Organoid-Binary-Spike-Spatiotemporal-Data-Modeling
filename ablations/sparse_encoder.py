@@ -101,10 +101,11 @@ def build(img_size, full_hw, device, *, dense: bool, seed: int):
 
 
 def run_arm(name, *, dense, epochs, seed, loaders, img_size, full_hw, device,
-            blank_thr):
+            blank_thr, tok_entropy=0.0):
     train_loader, val_loader = loaders
     print("\n" + "=" * 78)
-    print(f"ARM: {name}   dense_ablation={dense}   epochs={epochs} seed={seed}")
+    print(f"ARM: {name}   dense_ablation={dense}   "
+          f"lambda_tok_entropy={tok_entropy}   epochs={epochs} seed={seed}")
     print("=" * 78, flush=True)
 
     model = build(img_size, full_hw, device, dense=dense, seed=seed)
@@ -133,6 +134,12 @@ def run_arm(name, *, dense, epochs, seed, loaders, img_size, full_hw, device,
         cfg_ctx_drop_start=0.0, cfg_ctx_drop_end=0.0,
         cfg_ctx_start_epoch=10**9, cfg_ctx_warmup_epochs=1,
         blank_logit_margin=blank_thr,
+        # Token-level profile entropy. Ramped in at 3/4 of the budget: entropy
+        # is stationary at the uniform distribution, so it has nothing to
+        # sharpen until reconstruction has put structure in the patch.
+        lambda_tok_entropy=float(tok_entropy),
+        tok_entropy_start_epoch=int(epochs * 0.75),
+        tok_entropy_warmup_epochs=max(1, int(epochs * 0.10)),
         lambda_code_norm=0.10,
         code_norm_rms_ceiling=10.0, code_norm_token_ceiling=14.0,
         pos_weight_start=100.0, pos_weight_end=1.0,
@@ -151,6 +158,7 @@ def run_arm(name, *, dense, epochs, seed, loaders, img_size, full_hw, device,
         **M.common_fit_kwargs(model),
     )
     rep["_arm"] = {"name": name, "dense_ablation": dense, "seed": seed,
+                   "lambda_tok_entropy": float(tok_entropy),
                    "epochs": epochs, "wall_seconds": time.time() - t0}
     return rep
 
@@ -175,6 +183,14 @@ def summarise(reps: dict) -> dict:
             }
         row["blank_frac_final"] = (log[-1].get("avg_vq_blank_frac")
                                    if log else None)
+        if log and log[-1].get("tok_h_model"):
+            row["tok_entropy"] = {
+                "h_model_final": log[-1].get("tok_h_model"),
+                "h_true_final": log[-1].get("tok_h_true"),
+                "frac_violating_final": log[-1].get("tok_frac_violating"),
+                "loss_final": log[-1].get("loss_tok_entropy"),
+                "h_model_curve": [e.get("tok_h_model") for e in log],
+            }
         row["best_val_auprc"] = rep.get("best_val")
         row["wall_seconds"] = rep["_arm"]["wall_seconds"]
         s[name] = row
@@ -185,7 +201,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--epochs", type=int, default=80)
     ap.add_argument("--seed", type=int, default=20260823)
-    ap.add_argument("--arms", default="sparse,dense")
+    ap.add_argument("--arms", default="sparse,dense",
+                    help="sparse | dense | tokent (sparse + token entropy)")
+    ap.add_argument("--tok-entropy", type=float, default=0.05,
+                    help="lambda for the `tokent` arm")
     a = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -209,7 +228,8 @@ def main() -> int:
         reps[name] = run_arm(
             name, dense=(name == "dense"), epochs=a.epochs, seed=a.seed,
             loaders=(train_loader, val_loader), img_size=img_size,
-            full_hw=full_hw, device=device, blank_thr=blank_thr)
+            full_hw=full_hw, device=device, blank_thr=blank_thr,
+            tok_entropy=(a.tok_entropy if name == "tokent" else 0.0))
         OUT.write_text(json.dumps(
             {"arms": reps, "summary": summarise(reps),
              "scope_caveat": __doc__.split("HONEST SCOPE, ")[1].split("Writes")[0].strip()},

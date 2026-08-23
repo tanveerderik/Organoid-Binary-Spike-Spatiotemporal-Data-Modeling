@@ -513,6 +513,120 @@ def blank_patch_logit_hinge_loss(
     loss = F.softplus(sharpness * (bad_scores - margin)) / sharpness
     return loss.mean()
 
+def token_profile_entropy_loss(
+    pred_patches_raw,
+    target_patches,
+    active_mask=None,
+    *,
+    slack: float = 0.0,
+    min_true_count: int = 1,
+    return_parts: bool = False,
+):
+    """Token-level concentration: the predicted profile inside an ACTIVE patch
+    must be no more spread out than the truth's.
+
+    Why this exists. `tolerant_spike_loss` works at voxel level -- its hit term
+    max_pools over a neighbourhood and its peak/multi terms compare a voxel to
+    its neighbours. Neither ever looks at a whole token, and the token is the
+    unit the codebook has to represent. Measured on the shipped tokenizer
+    (`ablations/profile_entropy.py`), the within-token temporal profile sits at
+    entropy 1.723 against a log(6)=1.792 flat ceiling while REAL data is at
+    0.328 -- the decoder spreads mass over 5.6 of 6 frames where the truth uses
+    1.4. Setting `peak_radius_t=3` did not move it (1.699 -> 1.723), so a local
+    margin penalty does not concentrate a token.
+
+    The loss. For each active patch take p = sigmoid(logits), normalise it to a
+    distribution q over the patch's P voxels, and hinge its entropy against the
+    entropy of the TRUE patch:
+
+        H_model = H(q),  H_true = log(k) for a patch with k true spikes
+        loss    = relu(H_model - H_true - slack)
+
+    Four properties that matter, three of which answer a specific failure mode
+    and one of which is a limitation to schedule around:
+
+    1. EXACTLY SHIFT-INVARIANT, by construction. q is a SOFTMAX over the raw
+       patch logits, not sigmoid-then-normalise. Softmax is invariant to adding
+       any constant to every logit in the patch, so the term is provably blind
+       to how much total mass the patch carries and has ZERO gradient toward
+       making a patch blanker. This is not a detail: with sigmoid-then-normalise
+       the invariance holds only while every probability is small, and it breaks
+       once a voxel saturates -- measured, shifting a patch's logits down by 12
+       then LOWERED the loss 0.0357 -> 0.00014, i.e. a real if weak incentive to
+       turn active patches off. Softmax removes that incentive entirely, and in
+       the regime this model actually operates in (p ~ 1e-4, where
+       sigmoid(x) ~ exp(x)) the two agree to numerical precision anyway.
+       Uniform collapse is the WORST case for this term, not the best: a patch
+       whose logits are all equal has maximum entropy.
+    2. HINGED AGAINST THE TRUTH, not against zero. Once the model is as
+       concentrated as the real patch the gradient is exactly zero, so there is
+       no pressure to keep sharpening toward a delta. A patch that truly holds
+       three spikes is never asked to put its mass on one voxel.
+    3. ACTIVE PATCHES ONLY. Blank patches are already handled by
+       `blank_patch_logit_hinge_loss`, which pushes their logits down; applying
+       an entropy term there would be both redundant and ill-posed, since a
+       patch with no true spike has no target entropy.
+    4. FLAT AT THE MAXIMUM -- schedule accordingly. Entropy is stationary at the
+       uniform distribution, so a patch whose logits are all equal receives an
+       almost zero and perfectly symmetric gradient (measured: every component
+       1.86e-9 from a uniform start). The term cannot break symmetry on its own
+       and has nothing to sharpen until the reconstruction loss has put
+       structure in the patch. Ramp it in LATE; enabling it from epoch 0 buys
+       nothing and only competes with the term doing the real work.
+
+    Args:
+      pred_patches_raw: (B,N,P) raw logits, as returned by the patch renderer.
+      target_patches:   (B,N,P) binary ground truth on the same patch grid.
+      active_mask:      (B,N) bool. If None it is derived as target.sum > 0.
+      slack:            nats of tolerance added to the target before hinging.
+                        A perfectly concentrated patch still carries a little
+                        entropy from its P-k background voxels, so a small slack
+                        keeps the term from chasing a residual it cannot remove.
+      min_true_count:   skip patches with fewer than this many true spikes.
+                        At k=1 the target is H=0, i.e. a delta; that is correct
+                        but it is the strongest possible ask, so this is exposed
+                        rather than hard-coded.
+    """
+    import torch
+
+    if pred_patches_raw is None or target_patches is None:
+        return pred_patches_raw.new_zeros(()) if pred_patches_raw is not None else None
+    if pred_patches_raw.shape != target_patches.shape:
+        raise ValueError(
+            f"pred {tuple(pred_patches_raw.shape)} != target "
+            f"{tuple(target_patches.shape)}")
+
+    tgt = (target_patches > 0.5).to(pred_patches_raw.dtype)
+    k = tgt.sum(-1)                                        # (B,N) true spikes
+    if active_mask is None:
+        active_mask = k > 0
+    sel = active_mask.to(torch.bool) & (k >= float(min_true_count))
+
+    zero = pred_patches_raw.new_zeros(())
+    if not bool(sel.any()):
+        return (zero, {"n_tokens": 0, "h_model": 0.0, "h_true": 0.0,
+                       "frac_violating": 0.0}) if return_parts else zero
+
+    lg = pred_patches_raw[sel]                             # (M,P)
+    # log_softmax over the patch: exactly shift-invariant (see property 1),
+    # computed in log space so a patch whose probabilities are all tiny stays
+    # numerically well-conditioned.
+    logq = torch.log_softmax(lg, dim=1)
+    h_model = -(logq.exp() * logq).sum(1)                  # (M,)
+    h_true = torch.log(k[sel].clamp_min(1.0))              # (M,)
+
+    viol = torch.relu(h_model - h_true - float(slack))
+    loss = viol.mean()
+    if not return_parts:
+        return loss
+    return loss, {
+        "n_tokens": int(sel.sum().item()),
+        "h_model": float(h_model.mean().item()),
+        "h_true": float(h_true.mean().item()),
+        "frac_violating": float((viol > 0).float().mean().item()),
+    }
+
+
 # -------- blank-active decoder latent separation ----------
 
 def blank_active_decoder_separation_loss(
