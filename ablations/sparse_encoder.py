@@ -230,8 +230,16 @@ def main() -> int:
             loaders=(train_loader, val_loader), img_size=img_size,
             full_hw=full_hw, device=device, blank_thr=blank_thr,
             tok_entropy=(a.tok_entropy if name == "tokent" else 0.0))
+        # MERGE, never overwrite. This path is fixed, so a short smoke run used
+        # to clobber a completed one: a 4-epoch --arms tokent run destroyed the
+        # 80-epoch sparse and dense results, and the checkpoints carry weights
+        # only, so the per-epoch curves were unrecoverable. Only the arms this
+        # invocation actually ran are replaced.
+        prev = json.loads(OUT.read_text()) if OUT.is_file() else {}
+        arms_all = {**prev.get("arms", {}), **reps}
+        summ_all = {**prev.get("summary", {}), **summarise(reps)}
         OUT.write_text(json.dumps(
-            {"arms": reps, "summary": summarise(reps),
+            {"arms": arms_all, "summary": summ_all,
              "scope_caveat": __doc__.split("HONEST SCOPE, ")[1].split("Writes")[0].strip()},
             indent=1))
         print(f"[ablation] wrote {OUT} after arm '{name}'", flush=True)
