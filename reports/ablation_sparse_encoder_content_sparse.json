@@ -1,0 +1,130 @@
+{
+ "arms": [
+  {
+   "arm": "sparse",
+   "n_tokens": 163840,
+   "true_blank_frac": 0.907647705078125,
+   "levels": [
+    {
+     "level": 1,
+     "content_codes_used": 32,
+     "content_entropy_nats": 3.0541541505308203,
+     "content_perplexity": 21.203243187727523,
+     "content_uniformity": 0.6626013496164851,
+     "blank_codes_used": 0,
+     "blank_entropy_nats": 0.0,
+     "codes_shared_content_and_blank": 0,
+     "frac_content_codes_also_used_by_blanks": 0.0,
+     "eta2_code_to_content": {
+      "spike_count": 0.30421294151514766,
+      "temporal_spread": 0.09072622281979204,
+      "spatial_spread": 0.11382759843987245
+     }
+    },
+    {
+     "level": 2,
+     "content_codes_used": 8,
+     "content_entropy_nats": 2.0766548907460813,
+     "content_perplexity": 7.977737825391061,
+     "content_uniformity": 0.9972172281738826,
+     "blank_codes_used": 0,
+     "blank_entropy_nats": 0.0,
+     "codes_shared_content_and_blank": 0,
+     "frac_content_codes_also_used_by_blanks": 0.0,
+     "eta2_code_to_content": {
+      "spike_count": 0.004228693045403631,
+      "temporal_spread": 0.001226252761326041,
+      "spatial_spread": 0.002088241836183169
+     }
+    },
+    {
+     "level": 3,
+     "content_codes_used": 4,
+     "content_entropy_nats": 1.385884936198957,
+     "content_perplexity": 3.9983626355280477,
+     "content_uniformity": 0.9995906588820119,
+     "blank_codes_used": 0,
+     "blank_entropy_nats": 0.0,
+     "codes_shared_content_and_blank": 0,
+     "frac_content_codes_also_used_by_blanks": 0.0,
+     "eta2_code_to_content": {
+      "spike_count": 0.00021531060439328176,
+      "temporal_spread": 0.0001886090208025326,
+      "spatial_spread": 0.00047672729167691497
+     }
+    }
+   ],
+   "ladder": [
+    {
+     "levels_used": 1,
+     "n_paths": 32,
+     "n_tokens": 15131,
+     "spike_count": {
+      "eta2": 0.30421294151514766,
+      "eta2_perm_null": 0.0022440138552591443,
+      "excess": 0.30196892765988853
+     },
+     "temporal_spread": {
+      "eta2": 0.09072622281979204,
+      "eta2_perm_null": 0.0021372545167394202,
+      "excess": 0.08858896830305261
+     },
+     "spatial_spread": {
+      "eta2": 0.11382759843987245,
+      "eta2_perm_null": 0.0018994249476526892,
+      "excess": 0.11192817349221976
+     }
+    },
+    {
+     "levels_used": 2,
+     "n_paths": 239,
+     "n_tokens": 15131,
+     "spike_count": {
+      "eta2": 0.416520796441338,
+      "eta2_perm_null": 0.015404605262478305,
+      "excess": 0.40111619117885966
+     },
+     "temporal_spread": {
+      "eta2": 0.18195125112972188,
+      "eta2_perm_null": 0.014647715406923376,
+      "excess": 0.1673035357227985
+     },
+     "spatial_spread": {
+      "eta2": 0.17340511106246204,
+      "eta2_perm_null": 0.015191240549555757,
+      "excess": 0.15821387051290628
+     }
+    },
+    {
+     "levels_used": 3,
+     "n_paths": 781,
+     "n_tokens": 15131,
+     "spike_count": {
+      "eta2": 0.4874910936457112,
+      "eta2_perm_null": 0.047826315830476626,
+      "excess": 0.43966477781523455
+     },
+     "temporal_spread": {
+      "eta2": 0.26286106028007017,
+      "eta2_perm_null": 0.045399787512117706,
+      "excess": 0.21746127276795246
+     },
+     "spatial_spread": {
+      "eta2": 0.22308720098078294,
+      "eta2_perm_null": 0.04746564073716854,
+      "excess": 0.17562156024361442
+     }
+    }
+   ],
+   "l1_codebook": {
+    "n_used_by_content": 32,
+    "mean_norm_used": 9.567453384399414,
+    "mean_norm_unused": NaN,
+    "effective_rank": 3.6730449199676514,
+    "blank_token_norm": 0.2884547710418701
+   }
+  }
+ ],
+ "batches": 40,
+ "ckpt": "ckpts/ablations/sparse_abl_sparse_best.pt"
+}

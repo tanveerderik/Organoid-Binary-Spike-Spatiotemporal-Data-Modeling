@@ -1,0 +1,130 @@
+{
+ "arms": [
+  {
+   "arm": "shipped",
+   "n_tokens": 163840,
+   "true_blank_frac": 0.907647705078125,
+   "levels": [
+    {
+     "level": 1,
+     "content_codes_used": 32,
+     "content_entropy_nats": 3.395183942001957,
+     "content_perplexity": 29.82013814640117,
+     "content_uniformity": 0.9318793170750366,
+     "blank_codes_used": 0,
+     "blank_entropy_nats": 0.0,
+     "codes_shared_content_and_blank": 0,
+     "frac_content_codes_also_used_by_blanks": 0.0,
+     "eta2_code_to_content": {
+      "spike_count": 0.35937046038579956,
+      "temporal_spread": 0.15305626217134038,
+      "spatial_spread": 0.13998894653541794
+     }
+    },
+    {
+     "level": 2,
+     "content_codes_used": 8,
+     "content_entropy_nats": 2.074919963384653,
+     "content_perplexity": 7.96390902920262,
+     "content_uniformity": 0.9954886286503275,
+     "blank_codes_used": 0,
+     "blank_entropy_nats": 0.0,
+     "codes_shared_content_and_blank": 0,
+     "frac_content_codes_also_used_by_blanks": 0.0,
+     "eta2_code_to_content": {
+      "spike_count": 0.007048804018275567,
+      "temporal_spread": 0.007106527590916345,
+      "spatial_spread": 0.004401927485507384
+     }
+    },
+    {
+     "level": 3,
+     "content_codes_used": 4,
+     "content_entropy_nats": 1.3846931320679925,
+     "content_perplexity": 3.9936002089254923,
+     "content_uniformity": 0.9984000522313731,
+     "blank_codes_used": 0,
+     "blank_entropy_nats": 0.0,
+     "codes_shared_content_and_blank": 0,
+     "frac_content_codes_also_used_by_blanks": 0.0,
+     "eta2_code_to_content": {
+      "spike_count": 0.0035060719186790212,
+      "temporal_spread": 0.0023687650178877417,
+      "spatial_spread": 0.0008383110993165355
+     }
+    }
+   ],
+   "ladder": [
+    {
+     "levels_used": 1,
+     "n_paths": 32,
+     "n_tokens": 15131,
+     "spike_count": {
+      "eta2": 0.35937046038579956,
+      "eta2_perm_null": 0.0020372782999870803,
+      "excess": 0.3573331820858125
+     },
+     "temporal_spread": {
+      "eta2": 0.15305626217134038,
+      "eta2_perm_null": 0.002308481219639738,
+      "excess": 0.15074778095170066
+     },
+     "spatial_spread": {
+      "eta2": 0.13998894653541794,
+      "eta2_perm_null": 0.0020073544597329906,
+      "excess": 0.13798159207568494
+     }
+    },
+    {
+     "levels_used": 2,
+     "n_paths": 254,
+     "n_tokens": 15131,
+     "spike_count": {
+      "eta2": 0.5333667759097025,
+      "eta2_perm_null": 0.0156183671537444,
+      "excess": 0.5177484087559581
+     },
+     "temporal_spread": {
+      "eta2": 0.3980408466956794,
+      "eta2_perm_null": 0.015992429646717682,
+      "excess": 0.38204841704896175
+     },
+     "spatial_spread": {
+      "eta2": 0.26748566497899184,
+      "eta2_perm_null": 0.01701990217322745,
+      "excess": 0.2504657628057644
+     }
+    },
+    {
+     "levels_used": 3,
+     "n_paths": 804,
+     "n_tokens": 15131,
+     "spike_count": {
+      "eta2": 0.553501100625332,
+      "eta2_perm_null": 0.04476561250037908,
+      "excess": 0.5087354881249528
+     },
+     "temporal_spread": {
+      "eta2": 0.44734718086804537,
+      "eta2_perm_null": 0.04615319926766258,
+      "excess": 0.4011939816003828
+     },
+     "spatial_spread": {
+      "eta2": 0.31841914799575066,
+      "eta2_perm_null": 0.04492294799132601,
+      "excess": 0.27349620000442465
+     }
+    }
+   ],
+   "l1_codebook": {
+    "n_used_by_content": 32,
+    "mean_norm_used": 5.035850524902344,
+    "mean_norm_unused": NaN,
+    "effective_rank": 8.293415069580078,
+    "blank_token_norm": 0.3384765684604645
+   }
+  }
+ ],
+ "batches": 40,
+ "ckpt": "ckpts/vqvae_stage2a_best.pt"
+}

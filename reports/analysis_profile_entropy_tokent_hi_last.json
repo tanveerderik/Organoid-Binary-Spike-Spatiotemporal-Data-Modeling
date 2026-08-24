@@ -1,0 +1,28 @@
+{
+ "n_content_tokens": 3871,
+ "batches": 8,
+ "ckpt": "ckpts/ablations/sparse_abl_tokent_hi_last.pt",
+ "patch": [
+  6,
+  15,
+  14
+ ],
+ "temporal": {
+  "model": 1.7622418403625488,
+  "real": 0.32815617322921753,
+  "flat_ceiling": 1.791759469228055
+ },
+ "spatial": {
+  "model": 4.2709784507751465,
+  "real": 0.24783042073249817,
+  "flat_ceiling": 5.3471075307174685
+ },
+ "prior_measurement_peak_radius_t0": {
+  "temporal_model": 1.699,
+  "temporal_real": 0.312,
+  "temporal_ceiling": 1.792,
+  "spatial_model": 3.19,
+  "spatial_ceiling": 5.35,
+  "source": "code comment, utils/losses.py:118-127"
+ }
+}
