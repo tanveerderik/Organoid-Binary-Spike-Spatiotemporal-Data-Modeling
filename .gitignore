@@ -34,6 +34,14 @@ ckpts/external_baselines/*.pt
 reports/external_baselines/*/*/videos/
 reports/external_baselines/*/*/stats/
 
+# Manuscript. The LaTeX source, the ICLR class files and the Overleaf staging
+# bundle are drafting material and do not belong in the code history; `paper/`
+# is a scratch directory that `tools/make_paper_tables.py` writes into. What the
+# paper is built FROM stays tracked: the generators in `tools/`, the JSON in
+# `reports/`, and the rendered figures in `reports/paper_figures/`.
+paper/
+*_paper_skeleton.zip
+
 # Derived caches. Not reports -- these were sitting in reports/ at 117MB with
 # no code referencing them at all. Regenerable, so never tracked.
 ckpts/cache/
