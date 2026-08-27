@@ -20,8 +20,6 @@ from .metrics_gen import (
 from .decode import (
     decode_motif_logits_soft_given_activity,
     decode_flat_ids_to_xgen,
-    save_generated_batch_outputs,
-    save_generation_metrics_json,
 )
 __all__ = [
     "iterative_unmask_motif_given_activity",
@@ -29,8 +27,6 @@ __all__ = [
     "ContextBankSampler",
     "decode_motif_logits_soft_given_activity",
     "decode_flat_ids_to_xgen",
-    "save_generated_batch_outputs",
-    "save_generation_metrics_json",
     "evaluate_generation_global_metrics",
     "generate_rate_surrogate",
 ]
