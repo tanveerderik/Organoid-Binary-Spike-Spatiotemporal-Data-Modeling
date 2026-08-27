@@ -18,7 +18,7 @@ from .stage4_activity import (
 )
 from .eval_vqvae import evaluate_vqvae
 from .train_spatial_prior import fit_spatial_prior_pretrain
-from .build_context_prior import build_context_prior, load_context_prior
+from .build_context_prior import build_context_prior
 from .baselines import (
     build_motif_null_baselines,
     load_motif_null_baselines,
@@ -38,7 +38,6 @@ __all__ = [
     "evaluate_true_stage4_generation",
     "evaluate_vqvae",
     "build_context_prior",
-    "load_context_prior",
     "build_null_baselines",
     "build_motif_null_baselines",
     "load_motif_null_baselines",

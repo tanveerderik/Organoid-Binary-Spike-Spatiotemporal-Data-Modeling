@@ -68,7 +68,6 @@ from .training.train_prior import (
 )
 from .inference import (
     ContextBankSampler,
-    decode_codes_to_xgen,
     decode_flat_ids_to_xgen,
     generate_rate_surrogate,
     evaluate_generation_global_metrics,
@@ -79,7 +78,6 @@ from .inference import (
 from .visualization import (
     make_model_videos_vqvae,
     run_plotter,
-    plot_base_then_finetune,
     save_assaywise_spatial_maps,
     save_assaywise_adjacency_diagnostics,
 )
@@ -88,7 +86,6 @@ from .visualization.codebook_diag import (
     plot_blank_active_pca_l1,
 )
 from .visualization.reports_data import (
-    export_base_finetune_flat_xlsx,
     export_viz_quant_tables,
 )
 
@@ -187,7 +184,7 @@ STAGE4A_WARMUP_EPOCHS = 10
 # mean reciprocal rank over the 961-way alphabet: non-loss, and unlike top-1
 # (~0.08) or top-5 (~0.36) it reads the whole ranking.
 STAGE4A_SELECT_ON = "mrr"
-STAGE4B_EPOCHS = 200
+
 STAGE4B_REFINE_EPOCHS = 100
 
 # ---------------------------------------------------------------------------
@@ -364,18 +361,17 @@ STAGE4B_MASKGIT_HYPERPARAMETERS = {
     "save_start_epoch": 10,
     "early_stop_patience": 30,
 }
-# MaskGIT decoding schedule for sampling from the dense prior.
-# Tuned by sweep: total |error| across rate, temporal persistence lags 1-7 and
-# spatial co-activation fell 1.31 -> 0.18 going from (1.0, 1.0, 10) to these, and
-# the mean-field baseline sits at 0.73. Greedy decoding over-produces persistence
-# (0.77 vs 0.61 real at lag 1) because a committed cell raises its temporal
-# neighbours and zero-noise late rounds then take them deterministically; raising
-# temperature and holding noise longer fixes it.
-# Selected on VALIDATION (reports/evaluation_report_3B_sampler_sweep_VAL.json);
-# test is measured once at this setting and never used for selection.
-STAGE4B_SAMPLE_STEPS = 10
-STAGE4B_SAMPLE_TEMPERATURE = 1.5
-STAGE4B_SAMPLE_GUMBEL = 4.0
+# NOTE (provenance, not a live setting). A validation sweep over the MaskGIT
+# decoding schedule for the activity prior selected T=1.5, gumbel=4.0, steps=10
+# (reports/evaluation_report_3B_sampler_sweep_VAL.json, best "T1.5_G4.0_S10"):
+# total |error| across rate, temporal persistence lags 1-7 and spatial
+# co-activation fell 1.31 -> 0.18 versus (1.0, 1.0, 10), against a mean-field
+# baseline of 0.73. Greedy decoding over-produces persistence (0.77 vs 0.61 real
+# at lag 1) because a committed cell raises its temporal neighbours.
+# That schedule is NOT what ships: `prior.maskgit_sample` has no callers, and
+# generation instead takes the activity map from the gumbel top-K readout
+# (STAGE4C_READOUT below). The constants holding the swept values were never
+# read by anything and have been removed rather than left to imply otherwise.
 
 # Stage 4B is selected by a deterministic, hard expected-count top-K metric.
 STAGE4B_HYPERPARAMETERS = {

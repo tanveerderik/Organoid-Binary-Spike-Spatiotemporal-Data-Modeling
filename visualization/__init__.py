@@ -8,7 +8,7 @@ Created on Fri Mar 13 13:02:49 2026
 
 from .video import make_model_videos_vqvae
 from .rollout import generate_full_video, generate_masked_video, rollout_causal_long
-from .reports_plot import run_plotter, plot_base_then_finetune
+from .reports_plot import run_plotter
 from .reports_data import export_viz_quant_tables
 from .spatial_bias import (
     save_assaywise_spatial_maps,

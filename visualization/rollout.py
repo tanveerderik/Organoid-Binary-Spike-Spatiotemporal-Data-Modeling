@@ -412,7 +412,6 @@ def rollout_causal_long(
 
         if ctx_mode == "prefix_recomputed":
             # local ctx is recomputed from the currently visible prefix
-            # report/evaluation of that choice happens in reports_rollout.py
             from ..utils.recon import compute_activity_ctx
             local_ctx_np = compute_activity_ctx((prefix_hw_t > thr).astype(np.uint8).transpose(2, 0, 1))
             local_ctx_t = torch.from_numpy(local_ctx_np).unsqueeze(0).to(device=device, dtype=torch.float32)

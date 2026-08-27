@@ -17,7 +17,6 @@ from ..model.prior import (
     maskgit_activity_loss,
 )
 from ..inference.decode import (
-    decode_codes_to_xgen,
     decode_flat_ids_to_xgen,
     decode_motif_logits_soft_given_activity,
 )
@@ -201,21 +200,6 @@ def deterministic_validation_task_and_masks(batch, x, device):
         torch.tensor(task_ids, device=device, dtype=torch.long),
         mask_specs,
     )
-
-
-def _count_teacher_probability(
-    epoch: int,
-    teacher_epochs: int,
-    transition_epochs: int,
-) -> float:
-    teacher_epochs = max(0, int(teacher_epochs))
-    transition_epochs = max(0, int(transition_epochs))
-    if int(epoch) <= teacher_epochs:
-        return 1.0
-    if transition_epochs == 0 or int(epoch) >= teacher_epochs + transition_epochs:
-        return 0.0
-    progress = (int(epoch) - teacher_epochs) / float(transition_epochs)
-    return float(max(0.0, 1.0 - progress))
 
 
 def _binary_prf(tp: float, fp: float, fn: float) -> Tuple[float, float, float]:
@@ -704,35 +688,6 @@ def _finalize_hard_activity_stats(total: Dict[str, float]) -> Dict[str, float]:
     return result
 
 
-def _save_activity_checkpoint(
-    path: str,
-    activity_prior,
-    *,
-    epoch: int,
-    token_grid,
-    selection: str,
-    validation_metrics: Dict[str, float],
-    hyperparameters: Dict,
-) -> None:
-    coordinate_metadata = activity_prior.coordinate_metadata()
-    torch.save({
-        "model": activity_prior.state_dict(),
-        "epoch": int(epoch),
-        "selection": selection,
-        "best_val_loss": float(validation_metrics["loss"]),
-        "best_hard_metric": float(validation_metrics.get("hard_metric", float("nan"))),
-        "hard_metrics": {
-            key: value
-            for key, value in validation_metrics.items()
-            if key.startswith("hard_")
-        },
-        "hard_metric_formula": HARD_ACTIVITY_COMPOSITE_FORMULA,
-        "token_grid": tuple(map(int, token_grid)),
-        "Kmax": int(activity_prior.Kmax),
-        **coordinate_metadata,
-        "hyperparameters": hyperparameters,
-        "deterministic_validation_masks": True,
-    }, path)
 
 
 

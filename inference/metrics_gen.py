@@ -560,8 +560,8 @@ def generate_rate_surrogate(
     matching marginal spike counts demonstrates nothing beyond knowing the
     assay's average firing rate.
 
-    Returns the same keys as ``decode_codes_to_xgen`` so it drops directly into
-    the existing generation metric suite.
+    Returns the same keys as ``decode_flat_ids_to_xgen`` so it drops directly
+    into the existing generation metric suite.
     """
     rate_bank = null_baselines.get("firing_rate_map", None)
     if not rate_bank:

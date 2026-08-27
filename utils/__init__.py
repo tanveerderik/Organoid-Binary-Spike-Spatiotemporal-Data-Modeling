@@ -1,21 +1,7 @@
-from .constants import (
-    ACTIVITY_CTX_NAMES,
-    ACTIVITY_CTX_DIM,
-    ACTIVITY_CTX_INDEX,
-    DEFAULT_GAP_BINS,
-    normalize_gap_bins,
-    max_gap_from_bins,
-    gap_bin_label,
-    gap_bin_labels,
-)
+"""Package marker for `utils`.
 
-__all__ = [
-    "ACTIVITY_CTX_NAMES",
-    "ACTIVITY_CTX_DIM",
-    "ACTIVITY_CTX_INDEX",
-    "DEFAULT_GAP_BINS",
-    "normalize_gap_bins",
-    "max_gap_from_bins",
-    "gap_bin_label",
-    "gap_bin_labels",
-]
+Deliberately empty of re-exports. Every consumer imports from the concrete
+module (`utils.constants`, `utils.recon`, ...) rather than through this
+facade, so re-exporting a subset here only created a second, partial name
+for things that already had one.
+"""

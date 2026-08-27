@@ -329,16 +329,7 @@ def build_context_prior(
     return artifact
 
 
-def load_context_prior(path: str) -> Dict[str, Any]:
-    with open(path, "rb") as f:
-        artifact = pickle.load(f)
 
-    if not isinstance(artifact, dict):
-        raise TypeError(f"Expected dict artifact, got {type(artifact)}")
-    if artifact.get("version", None) not in (1, 2):
-        raise ValueError(f"Unsupported context prior version: {artifact.get('version', None)}")
-
-    return artifact
 
 
 

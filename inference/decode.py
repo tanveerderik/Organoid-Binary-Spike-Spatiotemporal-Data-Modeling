@@ -295,42 +295,6 @@ def decode_flat_ids_to_xgen(
 
 
 @torch.no_grad()
-def decode_codes_to_xgen(
-    model,
-    codes,
-    *,
-    grid,
-    global_ctx,
-    local_ctx,
-    threshold: Optional[float] = None,
-    roi_hw=None,
-    pad_hw=None,
-):
-    dec = model.decode_from_codes(
-        codes,
-        grid=grid,
-        global_ctx=global_ctx,
-        local_ctx=local_ctx,
-        roi_hw=roi_hw,
-        pad_hw=pad_hw,
-    )
-
-    logits = dec["logits_vol"]
-    prob = torch.sigmoid(logits)
-    if threshold is None:
-        threshold = float(model.best_thr_tol.item())
-    
-    x_gen = (prob >= threshold).float()
-
-    return {
-        "logits": logits,
-        "prob": prob,
-        "x_gen": x_gen,
-        "threshold": float(threshold),
-    }
-
-
-@torch.no_grad()
 def save_generated_batch_outputs(
     *,
     x_gen,

@@ -192,28 +192,6 @@ def distance_neighborhood_ce_loss(
     q = torch.zeros_like(lm).scatter(1, near_idx, q_local)
     return -(q * F.log_softmax(lm, dim=-1)).sum(dim=-1).mean()
 
-def topk_margin_ce_loss(logits, target, mask, k=5, margin=1.0):
-    """
-    Penalize only when target logit is not competitive with top-k logits.
-
-    logits: (B,N,C)
-    target: (B,N)
-    mask:   (B,N) bool
-    """
-    mask = mask.bool()
-    if int(mask.sum().item()) == 0:
-        return logits.new_zeros(())
-
-    lm = logits[mask]          # (M,C)
-    ym = target[mask].long()   # (M,)
-
-    target_logit = lm.gather(1, ym[:, None]).squeeze(1)  # (M,)
-
-    topk_vals = lm.topk(min(k, lm.size(-1)), dim=-1).values
-    kth_logit = topk_vals[:, -1]                         # (M,)
-
-    # zero loss if target_logit >= kth_logit - margin
-    return F.relu(kth_logit - target_logit + margin).mean()
 
 @torch.no_grad()
 def _masked_cls_metrics(logits, target, mask, num_classes: int, topk: int = 5):
@@ -306,7 +284,6 @@ def train_motif_prior_mgit(
     
     lambda_topk: Union[float, tuple, list] = (1.0, 1.0),
     topk: Union[int, tuple, list] = (5, 2),
-    topk_margin: float = 0.25,
     lambda_z1_distance: float = 0.05,
     lambda_z1_neighbor_ce: float = 0.25,
     z1_neighbor_tau: float = 0.25,
