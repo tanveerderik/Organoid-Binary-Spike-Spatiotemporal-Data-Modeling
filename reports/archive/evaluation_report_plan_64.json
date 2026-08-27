@@ -1,0 +1,50 @@
+[
+  {
+    "parents": 32,
+    "children": 8,
+    "entries": 288,
+    "captured": 0.33032450990697115,
+    "occ": 1.0,
+    "abs_err": 0.6696754900930288
+  },
+  {
+    "parents": 32,
+    "children": 24,
+    "entries": 800,
+    "captured": 0.5524368367393022,
+    "occ": 1.0,
+    "abs_err": 0.4475631632606978
+  },
+  {
+    "parents": 32,
+    "children": 64,
+    "entries": 2080,
+    "captured": 0.735874967577585,
+    "occ": 0.99365234375,
+    "abs_err": 0.26412503242241503
+  },
+  {
+    "parents": 16,
+    "children": 8,
+    "entries": 144,
+    "captured": 0.35557293819647506,
+    "occ": 1.0,
+    "abs_err": 0.7895603420609745
+  },
+  {
+    "parents": 16,
+    "children": 24,
+    "entries": 400,
+    "captured": 0.5205409917494342,
+    "occ": 1.0,
+    "abs_err": 0.5874393565954086
+  },
+  {
+    "parents": 16,
+    "children": 64,
+    "entries": 1040,
+    "captured": 0.6812372187096765,
+    "occ": 0.9873046875,
+    "abs_err": 0.39055226813027477
+  }
+]

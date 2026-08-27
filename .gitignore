@@ -27,3 +27,7 @@ ckpts/motif_prior_adapt_SEED*.pt
 ckpts/external_baselines/*.pt
 reports/external_baselines/*/*/videos/
 reports/external_baselines/*/*/stats/
+
+# Derived caches. Not reports -- these were sitting in reports/ at 117MB with
+# no code referencing them at all. Regenerable, so never tracked.
+ckpts/cache/

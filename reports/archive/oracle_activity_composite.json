@@ -1,0 +1,305 @@
+{
+  "config": {
+    "phase": "4b",
+    "seeds": 4,
+    "batches": 4,
+    "motif_steps": 12,
+    "base_seed": 20260820,
+    "activity_ckpt": "/home/derik/.claude/jobs/602ce84e/tmp/pilot_ep16_snapshot.pt",
+    "out": null
+  },
+  "runs": {
+    "model": [
+      {
+        "generation_metric": 0.6815628658031233,
+        "generation_distribution_match": 0.5221865247872494,
+        "generation_stat_error": 0.9150245219510839,
+        "generation_ks_avalanche": 0.20376432078559736,
+        "generation_ks_isi": 0.27347159576878943,
+        "decoded_spike_count_relative_error": 0.30051683634519577,
+        "decoded_spatial_support_violation": 0.4806263462181433,
+        "hard_exact_f1": 0.5323741007194245,
+        "hard_predicted_count_mean": 79.0625,
+        "hard_target_count_mean": 86.0
+      },
+      {
+        "generation_metric": 0.6853853774032157,
+        "generation_distribution_match": 0.5376398846607,
+        "generation_stat_error": 0.8599810552208038,
+        "generation_ks_avalanche": 0.22913256955810146,
+        "generation_ks_isi": 0.26696541489696113,
+        "decoded_spike_count_relative_error": 0.2906559184193611,
+        "decoded_spatial_support_violation": 0.4858892077317449,
+        "hard_exact_f1": 0.5323741007194245,
+        "hard_predicted_count_mean": 79.0625,
+        "hard_target_count_mean": 86.0
+      },
+      {
+        "generation_metric": 0.6769819443770199,
+        "generation_distribution_match": 0.5195883729587655,
+        "generation_stat_error": 0.9246004184149825,
+        "generation_ks_avalanche": 0.22917200717764674,
+        "generation_ks_isi": 0.2760471517907077,
+        "decoded_spike_count_relative_error": 0.29665353894233704,
+        "decoded_spatial_support_violation": 0.4924866425318185,
+        "hard_exact_f1": 0.5323741007194245,
+        "hard_predicted_count_mean": 79.0625,
+        "hard_target_count_mean": 86.0
+      },
+      {
+        "generation_metric": 0.6805583615685511,
+        "generation_distribution_match": 0.5215208964252124,
+        "generation_stat_error": 0.9174687090288105,
+        "generation_ks_avalanche": 0.2270436730123181,
+        "generation_ks_isi": 0.2742356937548994,
+        "decoded_spike_count_relative_error": 0.28418994694948196,
+        "decoded_spatial_support_violation": 0.48398723261643356,
+        "hard_exact_f1": 0.5323741007194245,
+        "hard_predicted_count_mean": 79.0625,
+        "hard_target_count_mean": 86.0
+      }
+    ],
+    "oracle": [
+      {
+        "generation_metric": 0.7349505469995632,
+        "generation_distribution_match": 0.5919961237067879,
+        "generation_stat_error": 0.6892002497220641,
+        "generation_ks_avalanche": 0.19287095882840566,
+        "generation_ks_isi": 0.17989330563686157,
+        "decoded_spike_count_relative_error": 0.2530059218406677,
+        "decoded_spatial_support_violation": 0.49842109710594806,
+        "hard_exact_f1": 1.0,
+        "hard_predicted_count_mean": 86.0,
+        "hard_target_count_mean": 86.0
+      },
+      {
+        "generation_metric": 0.7248743116701737,
+        "generation_distribution_match": 0.5591663261465724,
+        "generation_stat_error": 0.7883766479490638,
+        "generation_ks_avalanche": 0.18022528160200246,
+        "generation_ks_isi": 0.19389890787775788,
+        "decoded_spike_count_relative_error": 0.24789626896381378,
+        "decoded_spatial_support_violation": 0.49815221458822795,
+        "hard_exact_f1": 1.0,
+        "hard_predicted_count_mean": 86.0,
+        "hard_target_count_mean": 86.0
+      },
+      {
+        "generation_metric": 0.7368206691582786,
+        "generation_distribution_match": 0.5957863022375771,
+        "generation_stat_error": 0.6784541642604563,
+        "generation_ks_avalanche": 0.17956157317859445,
+        "generation_ks_isi": 0.20639287098024028,
+        "decoded_spike_count_relative_error": 0.24189076572656631,
+        "decoded_spatial_support_violation": 0.5080427558783589,
+        "hard_exact_f1": 1.0,
+        "hard_predicted_count_mean": 86.0,
+        "hard_target_count_mean": 86.0
+      },
+      {
+        "generation_metric": 0.7371495315952834,
+        "generation_distribution_match": 0.5975168800840076,
+        "generation_stat_error": 0.6735928863790516,
+        "generation_ks_avalanche": 0.18358662613981758,
+        "generation_ks_isi": 0.1941711032876734,
+        "decoded_spike_count_relative_error": 0.2498081438243389,
+        "decoded_spatial_support_violation": 0.5042551451083055,
+        "hard_exact_f1": 1.0,
+        "hard_predicted_count_mean": 86.0,
+        "hard_target_count_mean": 86.0
+      }
+    ],
+    "marginal": [
+      {
+        "generation_metric": 0.6775483083163231,
+        "generation_distribution_match": 0.517140786291595,
+        "generation_stat_error": 0.9337094008209595,
+        "generation_ks_avalanche": 0.20118502558577978,
+        "generation_ks_isi": 0.2841166851295036,
+        "decoded_spike_count_relative_error": 0.3064381144940853,
+        "decoded_spatial_support_violation": 0.4903019865203588,
+        "hard_exact_f1": 0.5808405906853464,
+        "hard_predicted_count_mean": 79.0625,
+        "hard_target_count_mean": 86.0
+      },
+      {
+        "generation_metric": 0.6586931102848171,
+        "generation_distribution_match": 0.5078363718890226,
+        "generation_stat_error": 0.9691382015042626,
+        "generation_ks_avalanche": 0.29372080954852103,
+        "generation_ks_isi": 0.29283566567947017,
+        "decoded_spike_count_relative_error": 0.31179821118712425,
+        "decoded_spatial_support_violation": 0.49641352380480464,
+        "hard_exact_f1": 0.5785687239681939,
+        "hard_predicted_count_mean": 79.0625,
+        "hard_target_count_mean": 86.0
+      },
+      {
+        "generation_metric": 0.6639170182563447,
+        "generation_distribution_match": 0.49849068546805303,
+        "generation_stat_error": 1.006055537549432,
+        "generation_ks_avalanche": 0.225531914893617,
+        "generation_ks_isi": 0.2982808695397072,
+        "decoded_spike_count_relative_error": 0.3140498101711273,
+        "decoded_spatial_support_violation": 0.5017683584080319,
+        "hard_exact_f1": 0.5823551684967816,
+        "hard_predicted_count_mean": 79.0625,
+        "hard_target_count_mean": 86.0
+      },
+      {
+        "generation_metric": 0.6637632682391993,
+        "generation_distribution_match": 0.49499445621479277,
+        "generation_stat_error": 1.0202246458414281,
+        "generation_ks_avalanche": 0.24231678486997632,
+        "generation_ks_isi": 0.2850969255463638,
+        "decoded_spike_count_relative_error": 0.3033001348376274,
+        "decoded_spatial_support_violation": 0.4984764867676602,
+        "hard_exact_f1": 0.5785687239681939,
+        "hard_predicted_count_mean": 79.0625,
+        "hard_target_count_mean": 86.0
+      }
+    ]
+  },
+  "summary": {
+    "generation_metric": {
+      "model": [
+        0.6811221372879774,
+        0.0034558403852993315
+      ],
+      "oracle": [
+        0.7334487648558247,
+        0.0057977584784973425
+      ],
+      "marginal": [
+        0.6659804262741711,
+        0.008084848208632945
+      ]
+    },
+    "generation_distribution_match": {
+      "model": [
+        0.5252339197079818,
+        0.008343726629569332
+      ],
+      "oracle": [
+        0.5861164080437362,
+        0.018114042315316794
+      ],
+      "marginal": [
+        0.5046155749658658,
+        0.00995547837385791
+      ]
+    },
+    "generation_stat_error": {
+      "model": [
+        0.9042686761539203,
+        0.0298032559630444
+      ],
+      "oracle": [
+        0.707405987077659,
+        0.05437288116302653
+      ],
+      "marginal": [
+        0.9822819464290206,
+        0.03888822568573976
+      ]
+    },
+    "generation_ks_avalanche": {
+      "model": [
+        0.22227814263341591,
+        0.01238252015309027
+      ],
+      "oracle": [
+        0.18406110993720504,
+        0.00613182904792697
+      ],
+      "marginal": [
+        0.24068863372447352,
+        0.03918045316429441
+      ]
+    },
+    "generation_ks_isi": {
+      "model": [
+        0.27267996405283945,
+        0.003959840106055191
+      ],
+      "oracle": [
+        0.19358904694563328,
+        0.010831220972856541
+      ],
+      "marginal": [
+        0.2900825364737612,
+        0.006714166219387092
+      ]
+    },
+    "decoded_spike_count_relative_error": {
+      "model": [
+        0.29300406016409397,
+        0.007140561665899308
+      ],
+      "oracle": [
+        0.24815027508884668,
+        0.0046751759571386775
+      ],
+      "marginal": [
+        0.3088965676724911,
+        0.004910515785580881
+      ]
+    },
+    "decoded_spatial_support_violation": {
+      "model": [
+        0.4857473572745351,
+        0.004992022982819425
+      ],
+      "oracle": [
+        0.50221780317021,
+        0.004796694128294336
+      ],
+      "marginal": [
+        0.4967400888752139,
+        0.004825431891287394
+      ]
+    },
+    "hard_exact_f1": {
+      "model": [
+        0.5323741007194245,
+        0.0
+      ],
+      "oracle": [
+        1.0,
+        0.0
+      ],
+      "marginal": [
+        0.580083301779629,
+        0.0018549714068785863
+      ]
+    },
+    "hard_predicted_count_mean": {
+      "model": [
+        79.0625,
+        0.0
+      ],
+      "oracle": [
+        86.0,
+        0.0
+      ],
+      "marginal": [
+        79.0625,
+        0.0
+      ]
+    },
+    "hard_target_count_mean": {
+      "model": [
+        86.0,
+        0.0
+      ],
+      "oracle": [
+        86.0,
+        0.0
+      ],
+      "marginal": [
+        86.0,
+        0.0
+      ]
+    }
+  }
+}
