@@ -23,6 +23,12 @@ reports/generation_regimes_*/*/stats/
 # reports/stage4c_seed_deployment.json, not worth 25MB in history.
 ckpts/motif_prior_adapt_SEED*.pt
 
+# Stage-2A reconstruction sample tree: 7 mp4 + arrays.npz per test clip (279
+# clips, ~36MB). Regenerable from ckpts/vqvae_stage2a_best.pt; the summary
+# figures, codebook_debug.* and per-sample results.json stay tracked.
+reports/reconstruction_stage2a/*/*/*.mp4
+reports/reconstruction_stage2a/*/*/arrays.npz
+
 # external baselines: fitted weights and generated sample trees
 ckpts/external_baselines/*.pt
 reports/external_baselines/*/*/videos/

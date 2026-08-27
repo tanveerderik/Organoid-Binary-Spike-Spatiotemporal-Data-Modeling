@@ -1,0 +1,328 @@
+{
+ "plotted": 87,
+ "skipped": 65,
+ "series": {
+  "adj_memory_used": {
+   "reason": "constant",
+   "value": 1.0,
+   "n_epochs": 300
+  },
+  "cfg_drop_prob": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "child_per_active_parent_l1": {
+   "reason": "constant",
+   "value": 1.0,
+   "n_epochs": 300
+  },
+  "cont_adapter_delta_logit_norm": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "cont_alpha_adapter_enabled": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "cont_alpha_entropy": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "cont_alpha_final_entropy": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "cont_alpha_final_max": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "cont_alpha_final_usage_entropy": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "cont_alpha_mean_entropy": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "cont_alpha_mean_max": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "cont_alpha_sample_entropy": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "cont_alpha_sample_max": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "cont_decode_uses_projection_target": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "cont_distance_reference_mse": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "cont_geometric_projection_mse": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "cont_hard_vertex_mse": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "cont_hull_expansion_fraction": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "cont_hull_scale": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "cont_hull_scale_delta": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "cont_projection_gain_vs_hard": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "cont_residual_norm": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "cont_safe_radius": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "continuous_gumbel_tau": {
+   "reason": "gated by cont_alpha_adapter_enabled = 0",
+   "n_epochs": 300
+  },
+  "continuous_posterior_temperature": {
+   "reason": "constant",
+   "value": 0.35,
+   "n_epochs": 300
+  },
+  "continuous_sample_mix": {
+   "reason": "gated by cont_alpha_adapter_enabled = 0",
+   "n_epochs": 300
+  },
+  "ctx_cf_bank_frac": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "ctx_cf_displacement": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "ctx_cf_pair_frac": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "ctx_cf_sigma_eff": {
+   "reason": "gated by ctx_cf_pair_frac = 0",
+   "n_epochs": 300
+  },
+  "ctx_steer_gain": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "lambda_ctx_cf_eff": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "lambda_isi": {
+   "reason": "constant",
+   "value": 0.01,
+   "n_epochs": 300
+  },
+  "lambda_vq": {
+   "reason": "constant",
+   "value": 1.0,
+   "n_epochs": 300
+  },
+  "latent_hidden_active_frac": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "latent_hidden_frac": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "loss_cont_parent_margin": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "loss_cont_projection": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "loss_ctx_cf": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "training_prob_threshold_used": {
+   "reason": "constant",
+   "value": 0.5,
+   "n_epochs": 300
+  },
+  "vq_l1_alive": {
+   "reason": "constant",
+   "value": 32.0,
+   "n_epochs": 300
+  },
+  "vq_l1_alive_frac": {
+   "reason": "constant",
+   "value": 1.0,
+   "n_epochs": 300
+  },
+  "vq_l1_code_dim": {
+   "reason": "constant",
+   "value": 64.0,
+   "n_epochs": 300
+  },
+  "vq_l1_dead": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "vq_l1_dead_frac": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "vq_l1_num_codes": {
+   "reason": "constant",
+   "value": 32.0,
+   "n_epochs": 300
+  },
+  "vq_l2_alive": {
+   "reason": "constant",
+   "value": 256.0,
+   "n_epochs": 300
+  },
+  "vq_l2_alive_frac": {
+   "reason": "constant",
+   "value": 1.0,
+   "n_epochs": 300
+  },
+  "vq_l2_code_dim": {
+   "reason": "constant",
+   "value": 64.0,
+   "n_epochs": 300
+  },
+  "vq_l2_dead": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "vq_l2_dead_frac": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "vq_l2_num_codes": {
+   "reason": "constant",
+   "value": 256.0,
+   "n_epochs": 300
+  },
+  "vq_l3_alive": {
+   "reason": "constant",
+   "value": 1024.0,
+   "n_epochs": 300
+  },
+  "vq_l3_alive_frac": {
+   "reason": "constant",
+   "value": 1.0,
+   "n_epochs": 300
+  },
+  "vq_l3_code_dim": {
+   "reason": "constant",
+   "value": 64.0,
+   "n_epochs": 300
+  },
+  "vq_l3_dead": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "vq_l3_dead_frac": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "vq_l3_num_codes": {
+   "reason": "constant",
+   "value": 1024.0,
+   "n_epochs": 300
+  },
+  "vq_near_zero_thresh": {
+   "reason": "constant",
+   "value": 1e-06,
+   "n_epochs": 300
+  },
+  "vq_num_levels": {
+   "reason": "constant",
+   "value": 3.0,
+   "n_epochs": 300
+  },
+  "vq_total_alive": {
+   "reason": "constant",
+   "value": 1312.0,
+   "n_epochs": 300
+  },
+  "vq_total_alive_frac": {
+   "reason": "constant",
+   "value": 1.0,
+   "n_epochs": 300
+  },
+  "vq_total_codes": {
+   "reason": "constant",
+   "value": 1312.0,
+   "n_epochs": 300
+  },
+  "vq_total_dead": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "vq_total_dead_frac": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  }
+ }
+}

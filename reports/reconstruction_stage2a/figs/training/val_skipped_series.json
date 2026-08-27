@@ -1,0 +1,161 @@
+{
+ "plotted": 18,
+ "skipped": 31,
+ "series": {
+  "AUPRC_tol_uncond": {
+   "reason": "identical to AUPRC_tol_cond",
+   "max_abs_diff": 0.0,
+   "n_epochs": 300
+  },
+  "AUPRC_uncond": {
+   "reason": "identical to AUPRC_cond",
+   "max_abs_diff": 0.0,
+   "n_epochs": 300
+  },
+  "BestF1_threshold_tol_uncond": {
+   "reason": "identical to BestF1_threshold_tol_cond",
+   "max_abs_diff": 0.0,
+   "n_epochs": 300
+  },
+  "BestF1_threshold_uncond": {
+   "reason": "identical to BestF1_threshold_cond",
+   "max_abs_diff": 0.0,
+   "n_epochs": 300
+  },
+  "BestF1_tol_uncond": {
+   "reason": "identical to BestF1_tol_cond",
+   "max_abs_diff": 0.0,
+   "n_epochs": 300
+  },
+  "BestF1_uncond": {
+   "reason": "identical to BestF1_cond",
+   "max_abs_diff": 0.0,
+   "n_epochs": 300
+  },
+  "cont_adapter_projection_mse": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "cont_distance_reference_mse": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "cont_geometric_projection_mse": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "cont_hard_vertex_mse": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "ctx_effect_auprc_tol": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "ctx_effect_bce": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "eval_count": {
+   "reason": "constant",
+   "value": 186.0,
+   "n_epochs": 300
+  },
+  "eval_density": {
+   "reason": "constant",
+   "value": 26880.0,
+   "n_epochs": 300
+  },
+  "eval_mask_frac": {
+   "reason": "constant",
+   "value": 1.0,
+   "n_epochs": 300
+  },
+  "latent_masking_enabled": {
+   "reason": "constant",
+   "value": 0.0,
+   "n_epochs": 300
+  },
+  "val_loss_BCE_cond": {
+   "reason": "identical to val_loss_BCE",
+   "max_abs_diff": 0.0,
+   "n_epochs": 300
+  },
+  "val_loss_BCE_full_cond": {
+   "reason": "identical to val_loss_BCE_full",
+   "max_abs_diff": 0.0,
+   "n_epochs": 300
+  },
+  "val_loss_BCE_full_uncond": {
+   "reason": "identical to val_loss_BCE_full",
+   "max_abs_diff": 0.0,
+   "n_epochs": 300
+  },
+  "val_loss_BCE_uncond": {
+   "reason": "identical to val_loss_BCE",
+   "max_abs_diff": 0.0,
+   "n_epochs": 300
+  },
+  "val_loss_recon_ref1_exact_uncond": {
+   "reason": "identical to val_loss_recon_ref1_exact_cond",
+   "max_abs_diff": 0.0,
+   "n_epochs": 300
+  },
+  "val_loss_recon_ref1_tol_uncond": {
+   "reason": "identical to val_loss_recon_ref1_tol_cond",
+   "max_abs_diff": 0.0,
+   "n_epochs": 300
+  },
+  "val_loss_recon_ref1_uncond": {
+   "reason": "identical to val_loss_recon_ref1_cond",
+   "max_abs_diff": 0.0,
+   "n_epochs": 300
+  },
+  "val_loss_recon_ref2_exact_uncond": {
+   "reason": "identical to val_loss_recon_ref2_exact_cond",
+   "max_abs_diff": 0.0,
+   "n_epochs": 281
+  },
+  "val_loss_recon_ref2_tol_uncond": {
+   "reason": "identical to val_loss_recon_ref2_tol_cond",
+   "max_abs_diff": 0.0,
+   "n_epochs": 281
+  },
+  "val_loss_recon_ref2_uncond": {
+   "reason": "identical to val_loss_recon_ref2_cond",
+   "max_abs_diff": 0.0,
+   "n_epochs": 281
+  },
+  "val_loss_recon_ref3_exact_uncond": {
+   "reason": "identical to val_loss_recon_ref3_exact_cond",
+   "max_abs_diff": 0.0,
+   "n_epochs": 251
+  },
+  "val_loss_recon_ref3_tol_uncond": {
+   "reason": "identical to val_loss_recon_ref3_tol_cond",
+   "max_abs_diff": 0.0,
+   "n_epochs": 251
+  },
+  "val_loss_recon_ref3_uncond": {
+   "reason": "identical to val_loss_recon_ref3_cond",
+   "max_abs_diff": 0.0,
+   "n_epochs": 251
+  },
+  "val_loss_vq_cond": {
+   "reason": "identical to val_loss_vq",
+   "max_abs_diff": 0.0,
+   "n_epochs": 300
+  },
+  "val_loss_vq_uncond": {
+   "reason": "identical to val_loss_vq",
+   "max_abs_diff": 0.0,
+   "n_epochs": 300
+  }
+ }
+}

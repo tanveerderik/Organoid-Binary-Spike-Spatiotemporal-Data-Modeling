@@ -71,8 +71,6 @@ from .inference import (
     decode_flat_ids_to_xgen,
     generate_rate_surrogate,
     evaluate_generation_global_metrics,
-    save_generated_batch_outputs,
-    save_generation_metrics_json,
     sample_hierarchical_roi,
 )
 from .visualization import (
@@ -443,21 +441,17 @@ STAGE4_RECOMPUTE_KMAX = False
 STAGE4_KMAX_PASSES = 5
 STAGE4_KMAX_MARGIN = 1.25
 
-# Independently evaluate any saved Stage-4 substages. Evaluation order is
-# always 3A -> 3B -> 3C, regardless of tuple order.
+# Independently evaluate saved Stage-4 substages. Only 4A has an in-process
+# evaluator: held-out teacher-forced masked-motif prediction metrics.
 #
-# 3A: held-out teacher-forced activity / masked motif prediction metrics.
-# 3B: held-out activity-count and coordinate metrics.
-# 3C: held-out refined activity metrics.
-STAGE4_EVAL_PHASES = ("4b",)
+# Sample-based evaluation of 4B and 4C is not run from here. Generate with
+# analysis/generate_regimes.py and score with external_baselines/task_eval.py,
+# which is the protocol every external baseline was measured against.
+STAGE4_EVAL_PHASES = ("4a",)
 
 # Stable Stage-3A evaluation starts from a fully masked motif ROI. Set this to
 # 0.15 to reproduce the mixed masking regime used during training validation.
 STAGE4A_EVAL_FULL_MASK_PROB = 1.0
-
-# For selected 3B/3C evaluation phases, also run the expensive decoded
-# generation evaluations. Set False to evaluate only the prior heads.
-RUN_STAGE4_GENERATION_EVAL = True
 
 # --- Null-baseline / leakage-audit entry points (opt-in; default path unchanged) ---
 #
@@ -547,7 +541,11 @@ REPORTS = {
 MOTIF_NULL_BASELINE_PATH = Path("ckpts/motif_null_baselines.pkl")
 
 VIZ_ROOTS = {
-    2: Path("../viz_out_vqvae/vqvae_stage2a"),
+    # Stage-2A reconstruction videos and their per-sample arrays/results. Kept
+    # inside reports/ alongside the generation sample trees so every generated
+    # artifact lives under one root; the mp4s and .npz are gitignored for the
+    # same reason the generation videos are.
+    2: Path("reports/reconstruction_stage2a"),
 }
 
 
@@ -2726,725 +2724,6 @@ def evaluate_stage4a_predictive(model, test_loader, device, train_loader=None):
     return report
 
 
-@torch.no_grad()
-def collect_generation_diagnostics(
-    model,
-    sampled,
-    gen,
-    grid,
-):
-    activity_out = sampled["activity_out"]
-    activity = sampled["activity"].bool()
-    flat_ids = sampled["flat_ids"].long()
-
-    count_prob = torch.softmax(
-        activity_out["count_logits"],
-        dim=-1,
-    )
-
-    count_values = torch.arange(
-        count_prob.shape[-1],
-        device=count_prob.device,
-        dtype=count_prob.dtype,
-    )
-
-    prob = gen["prob"]
-    x_gen = gen["x_gen"]
-
-    # (B,N,P), then count thresholded voxels per latent patch.
-    generated_patches = model.patchify(
-        x_gen,
-        grid,
-    )
-
-    patch_spike_count = generated_patches.sum(
-        dim=-1
-    )
-
-    rows = []
-
-    for b in range(activity.shape[0]):
-        active_mask = activity[b]
-        active_count = int(
-            active_mask.sum().item()
-        )
-
-        blank_active_count = int(
-            (
-                active_mask
-                & patch_spike_count[b].eq(0)
-            ).sum().item()
-        )
-
-        p = prob[b].float().reshape(-1)
-
-        rows.append({
-            "threshold_used": float(
-                gen["threshold"]
-            ),
-            "patch_size": [
-                int(v)
-                for v in model.patch_size
-            ],
-            "token_grid_shape": [
-                int(v)
-                for v in grid
-            ],
-            "Ntok": int(activity.shape[1]),
-            "Kmax": int(
-                activity_out["count_logits"].shape[-1] - 1
-            ),
-            "sampled_active_token_count": active_count,
-            "count_argmax": int(
-                count_prob[b].argmax().item()
-            ),
-            "expected_count": float(
-                (
-                    count_prob[b]
-                    * count_values
-                ).sum().item()
-            ),
-            "p_count_zero": float(
-                count_prob[b, 0].item()
-            ),
-            "count_entropy": float(
-                -(
-                    count_prob[b]
-                    * count_prob[b]
-                    .clamp_min(1e-12)
-                    .log()
-                ).sum().item()
-            ),
-            "generated_nonblank_motif_tokens": int(
-                flat_ids[b].ne(-1).sum().item()
-            ),
-            "decoded_probability_mean": float(
-                p.mean().item()
-            ),
-            "decoded_probability_max": float(
-                p.max().item()
-            ),
-            "decoded_probability_p50": float(
-                torch.quantile(p, 0.50).item()
-            ),
-            "decoded_probability_p90": float(
-                torch.quantile(p, 0.90).item()
-            ),
-            "decoded_probability_p95": float(
-                torch.quantile(p, 0.95).item()
-            ),
-            "decoded_probability_p99": float(
-                torch.quantile(p, 0.99).item()
-            ),
-            "decoded_probability_p99_9": float(
-                torch.quantile(p, 0.999).item()
-            ),
-            "voxels_above_threshold": int(
-                x_gen[b].sum().item()
-            ),
-            "final_generated_spike_count": int(
-                x_gen[b].sum().item()
-            ),
-            "fraction_active_latents_decoding_zero_spikes": (
-                float(
-                    blank_active_count
-                    / active_count
-                )
-                if active_count > 0
-                else None
-            ),
-        })
-
-    return rows
-
-
-@torch.no_grad()
-def evaluate_stage4_prior(
-    model,
-    test_loader,
-    device,
-    *,
-    activity_phase="4b",
-    out_dir="../viz_out_vqvae/vqvae_stage4/stage4_prior_gen",
-    max_batches=20,
-    samples_per_context=4,
-    steps=12,
-    temperature=1.0,
-):
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    prior = load_stage4_prior(model, device, activity_phase=activity_phase)
-
-    model.eval()
-    prior.eval()
-
-    rows = []
-
-    for bidx, batch in enumerate(test_loader):
-        if bidx >= max_batches:
-            break
-
-        x = batch["x"].to(device).float()
-        gct = batch["global_ctx"].to(device).float()
-        lct = batch["local_ctx"].to(device).float()
-
-        # Each real test video provides only the requested global/local context.
-        # Stage 4 then performs complete task-0 generation over all tokens.
-        B = x.shape[0]
-
-        gct_rep = gct.repeat_interleave(
-            samples_per_context,
-            dim=0,
-        )
-        lct_rep = lct.repeat_interleave(
-            samples_per_context,
-            dim=0,
-        )
-
-        roi_hw = batch.get("roi_hw", None)
-        pad_hw = batch.get("pad_hw", None)
-
-        # Preserve the exact crop/padding metadata for every repeated sample.
-        roi_hw_rep = (
-            None
-            if roi_hw is None
-            else [
-                roi
-                for roi in roi_hw
-                for _ in range(samples_per_context)
-            ]
-        )
-
-        pad_hw_rep = (
-            None
-            if pad_hw is None
-            else [
-                pad
-                for pad in pad_hw
-                for _ in range(samples_per_context)
-            ]
-        )
-
-        # Encode the ground-truth video only to obtain its VQ codes,
-        # reconstruction and token-grid geometry.
-        # Do not inherit the randomly sampled dataset mask.
-        tok_out = model(
-            x,
-            global_ctx=gct,
-            local_ctx=lct,
-            predict_mask_spec=None,
-            roi_hw=roi_hw,
-            pad_hw=pad_hw,
-        )
-
-        grid = tok_out["grid"]
-        full_codes = tok_out["codes"].long()
-
-        N = int(
-            grid[0]
-            * grid[1]
-            * grid[2]
-        )
-
-        # Full generation: every token is inside the prediction ROI.
-        generation_roi = torch.ones(
-            (B * samples_per_context, N),
-            dtype=torch.bool,
-            device=device,
-        )
-
-        # Task 0 = full/exact generation.
-        task_id = torch.zeros(
-            (B * samples_per_context,),
-            dtype=torch.long,
-            device=device,
-        )
-        
-        sampled = sample_hierarchical_roi(
-            prior=prior,
-            global_ctx=gct_rep,
-            local_ctx=lct_rep,
-            task_id=task_id,
-            roi_mask=generation_roi,
-            visible_codes=None,
-            activity_count_temperature=1.0,
-            activity_coord_temperature=temperature,
-            motif_steps=steps,
-            motif_temperature=temperature,
-        )
-
-        # This is a completely generated latent field.
-        # Completely generated latent field, in the flat Stage-2B alphabet.
-        flat_ids = sampled["flat_ids"]
-
-        gen = decode_flat_ids_to_xgen(
-            model,
-            flat_ids,
-            flat_codebook=prior.motif_prior.flat_codebook,
-            grid=grid,
-            global_ctx=gct_rep,
-            local_ctx=lct_rep,
-            roi_hw=roi_hw_rep,
-            pad_hw=pad_hw_rep,
-        )
-        
-        x_gen = gen["x_gen"]
-
-        global_metric_rows = evaluate_generation_global_metrics(
-            model=model,
-            logits=gen["logits"],
-            x_hard=x_gen,
-            global_ctx=gct_rep,
-            roi_hw=roi_hw_rep,
-            pad_hw=pad_hw_rep,
-            gap_bins=gap_bins,
-            prob_threshold=float(gen["threshold"]),
-        )
-
-        diagnostic_rows = collect_generation_diagnostics(
-            model=model,
-            sampled=sampled,
-            gen=gen,
-            grid=grid,
-        )
-
-        batch_rows = save_generated_batch_outputs(
-            x_gen=x_gen,
-            out_dir=out_dir,
-            prefix=f"stage4_testctx_b{bidx:04d}",
-            intended_local_ctx=lct_rep,
-            fps=30,
-        )
-        
-        for i, r in enumerate(batch_rows):
-            source_i = i // samples_per_context
-
-            decoder_support = diagnostic_rows[i]
-            global_metrics = global_metric_rows[i]
-
-            # Keep the old flat fields temporarily for compatibility.
-            r.update(decoder_support)
-
-            r["local_context_metrics"] = {
-                key: value
-                for key, value in r.items()
-                if (
-                    key.startswith("gen_")
-                    or key.startswith("target_")
-                    or key.startswith("err_")
-                    or key.startswith("match_")
-                    or key == "all_context_matches"
-                )
-            }
-
-            r["global_spatial_metrics"] = global_metrics[
-                "global_spatial_metrics"
-            ]
-            r["global_adjacency_metrics"] = global_metrics[
-                "global_adjacency_metrics"
-            ]
-            r["decoder_support_metrics"] = decoder_support
-
-            r["generation_mode"] = "test_context"
-            r["batch"] = int(bidx)
-            r["sample_within_context"] = int(
-                i % samples_per_context
-            )
-            r["task_id"] = int(task_id[i].item())
-
-            r["assay_id"] = int(
-                batch["assay_idx"][source_i].item()
-            )
-
-            r["global_ctx"] = (
-                gct_rep[i]
-                .detach()
-                .cpu()
-                .tolist()
-            )
-
-            r["roi_hw"] = (
-                None
-                if roi_hw_rep is None
-                else [
-                    int(v)
-                    for v in roi_hw_rep[i]
-                ]
-            )
-
-            r["pad_hw"] = (
-                None
-                if pad_hw_rep is None
-                else [
-                    int(v)
-                    for v in pad_hw_rep[i]
-                ]
-            )
-
-            r["full_spatial_size"] = [
-                int(v)
-                for v in model.full_spatial_size
-            ]
-
-            r["target_active_token_count"] = int(
-                full_codes[source_i, :, 0]
-                .ne(-1)
-                .sum()
-                .item()
-            )
-
-            rows.append(r)
-
-        # torch.save(
-        #     {
-        #         "codes": codes.detach().cpu(),
-        #         "logits": logits.detach().cpu(),
-        #         "prob": prob.detach().cpu(),
-        #         "x_gen": x_gen.detach().cpu(),
-        #         "global_ctx": gct_rep.detach().cpu(),
-        #         "local_ctx": lct_rep.detach().cpu(),
-        #         "task_id": task_id.detach().cpu(),
-        #         "grid": tuple(map(int, grid)),
-        #     },
-        #     out_dir / f"stage4_gen_batch_{bidx:04d}.pt",
-        # )
-
-    with open(out_dir / "stage4_generation_metrics.json", "w") as f:
-        json.dump(rows, f, indent=2)
-
-    print(f"Saved Stage 4 generated samples/metrics to: {out_dir}")
-    return rows
-
-@torch.no_grad()
-def evaluate_stage4_prior_sampled_contexts(
-    model,
-    ref_loader,
-    device,
-    *,
-    activity_phase="4b",
-    out_dir="../viz_out_vqvae/vqvae_stage4/stage4_prior_sampled_ctx",
-    context_bank_path="ckpts/context_prior.pkl",
-    mode="random_full",
-    fixed_global_ctx=None,
-    partial_local=None,
-    assay_id=None,
-    k=64,
-    max_samples=64,
-    batch_size_gen=4,
-    task_id=0,
-    steps=12,
-    temperature=1.0,
-    ctx_temperature=0.05,
-):
-    """
-    Stage-4 free-generation eval with controllable context sampling.
-
-    Modes:
-      random_full:
-          sample realistic (global_ctx, local_ctx) pairs from context bank
-
-      fixed_global:
-          keep/query global_ctx fixed, retrieve realistic matching local_ctx
-
-      partial_local:
-          retrieve realistic full contexts matching partial local constraints
-
-      fixed_global_partial_local:
-          retrieve realistic local_ctx matching both fixed global_ctx and partial local constraints
-    """
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    prior = load_stage4_prior(model, device, activity_phase=activity_phase)
-    model.eval()
-    prior.eval()
-
-    ctx_sampler = ContextBankSampler.from_file(
-        context_bank_path,
-        model=model,
-        device=device,
-        seed=0,
-    )
-
-    # Only used to infer token grid geometry. This does not provide generation context.
-    ref_batch = next(iter(ref_loader))
-    x_ref = ref_batch["x"].to(device).float()
-    g_ref = ref_batch["global_ctx"].to(device).float()
-    l_ref = ref_batch["local_ctx"].to(device).float()
-
-    tok_out = model(x_ref, global_ctx=g_ref, local_ctx=l_ref)
-    grid = tok_out["grid"]
-    N = int(grid[0] * grid[1] * grid[2])
-
-    fixed_global_np = None
-    if fixed_global_ctx is not None:
-        fixed_global_np = fixed_global_ctx
-        if isinstance(fixed_global_np, torch.Tensor):
-            fixed_global_np = fixed_global_np.detach().cpu().numpy()
-
-    rows = []
-    n_done = 0
-    sample_id = 0
-
-    while n_done < max_samples:
-        B = min(batch_size_gen, max_samples - n_done)
-
-        if mode == "random_full":
-            ctx_np = ctx_sampler.sample(
-                assay_id=assay_id,
-                batch_size=B,
-                return_index=True,
-            )
-
-        elif mode == "fixed_global":
-            if fixed_global_np is None:
-                raise ValueError("mode='fixed_global' requires fixed_global_ctx.")
-            ctx_np = ctx_sampler.sample(
-                global_ctx=fixed_global_np,
-                assay_id=assay_id,
-                batch_size=B,
-                k=k,
-                temperature=ctx_temperature,
-                return_index=True,
-            )
-
-        elif mode == "partial_local":
-            if partial_local is None:
-                raise ValueError("mode='partial_local' requires partial_local.")
-            ctx_np = ctx_sampler.sample(
-                partial_local=partial_local,
-                assay_id=assay_id,
-                batch_size=B,
-                k=k,
-                temperature=ctx_temperature,
-                return_index=True,
-            )
-
-        elif mode == "fixed_global_partial_local":
-            if fixed_global_np is None:
-                raise ValueError("mode='fixed_global_partial_local' requires fixed_global_ctx.")
-            if partial_local is None:
-                raise ValueError("mode='fixed_global_partial_local' requires partial_local.")
-            ctx_np = ctx_sampler.sample(
-                global_ctx=fixed_global_np,
-                partial_local=partial_local,
-                assay_id=assay_id,
-                batch_size=B,
-                k=k,
-                temperature=ctx_temperature,
-                return_index=True,
-            )
-
-        else:
-            raise ValueError(f"Unknown context sampling mode: {mode}")
-
-        if mode in (
-            "fixed_global",
-            "fixed_global_partial_local",
-        ):
-            fixed_global_array = np.asarray(
-                fixed_global_np,
-                dtype=np.float32,
-            ).reshape(1, -1)
-
-            ctx_np["global_ctx"] = np.repeat(
-                fixed_global_array,
-                B,
-                axis=0,
-            )
-
-        ctx_t = ctx_sampler.to_torch(
-            ctx_np,
-            device=device,
-            task_id=task_id,
-        )
-
-        full_H, full_W = map(
-            int,
-            model.full_spatial_size,
-        )
-
-        runtime_H = int(
-            grid[1] * model.patch_size[1]
-        )
-        runtime_W = int(
-            grid[2] * model.patch_size[2]
-        )
-
-        pad_h = runtime_H - full_H
-        pad_w = runtime_W - full_W
-
-        if pad_h < 0 or pad_w < 0:
-            raise RuntimeError(
-                "Runtime spatial size is smaller than the "
-                "full spatial memory: "
-                f"runtime={(runtime_H, runtime_W)}, "
-                f"full={(full_H, full_W)}"
-            )
-
-        pad_top = pad_h // 2
-        pad_bottom = pad_h - pad_top
-        pad_left = pad_w // 2
-        pad_right = pad_w - pad_left
-
-        generation_roi_hw = [
-            (0, 0, full_H, full_W)
-            for _ in range(B)
-        ]
-
-        generation_pad_hw = [
-            (
-                pad_top,
-                pad_bottom,
-                pad_left,
-                pad_right,
-            )
-            for _ in range(B)
-        ]
-
-        roi_mask = torch.ones(
-            (B, N),
-            device=device,
-            dtype=torch.bool,
-        )
-        
-        sampled = sample_hierarchical_roi(
-            prior=prior,
-            global_ctx=ctx_t["global_ctx"],
-            local_ctx=ctx_t["local_ctx"],
-            task_id=ctx_t["task_id"],
-            roi_mask=roi_mask,
-            activity_count_temperature=1.0,
-            activity_coord_temperature=temperature,
-            motif_steps=steps,
-            motif_temperature=temperature,
-        )
-        
-        # Completely generated latent field, in the flat Stage-2B alphabet.
-        flat_ids = sampled["flat_ids"]
-
-        gen = decode_flat_ids_to_xgen(
-            model,
-            flat_ids,
-            flat_codebook=prior.motif_prior.flat_codebook,
-            grid=grid,
-            global_ctx=ctx_t["global_ctx"],
-            local_ctx=ctx_t["local_ctx"],
-            roi_hw=generation_roi_hw,
-            pad_hw=generation_pad_hw,
-        )
-
-        x_gen = gen["x_gen"]
-
-        global_metric_rows = evaluate_generation_global_metrics(
-            model=model,
-            logits=gen["logits"],
-            x_hard=x_gen,
-            global_ctx=ctx_t["global_ctx"],
-            roi_hw=generation_roi_hw,
-            pad_hw=generation_pad_hw,
-            gap_bins=gap_bins,
-        )
-
-        diagnostic_rows = collect_generation_diagnostics(
-            model=model,
-            sampled=sampled,
-            gen=gen,
-            grid=grid,
-        )
-
-        batch_rows = save_generated_batch_outputs(
-            x_gen=x_gen,
-            out_dir=out_dir,
-            prefix=f"{mode}_gen_{sample_id:04d}",
-            intended_local_ctx=ctx_t["local_ctx"],
-            fps=30,
-            local_min=ctx_sampler.local_min,
-            local_max=ctx_sampler.local_max,
-            local_mean=ctx_sampler.local_mean,
-            local_std=ctx_sampler.local_std,
-            partial_local=partial_local,
-        )
-        
-        for i, r in enumerate(batch_rows):
-            decoder_support = diagnostic_rows[i]
-            global_metrics = global_metric_rows[i]
-
-            # Keep existing flat fields for compatibility.
-            r.update(decoder_support)
-
-            r["local_context_metrics"] = {
-                key: value
-                for key, value in r.items()
-                if (
-                    key.startswith("gen_")
-                    or key.startswith("target_")
-                    or key.startswith("err_")
-                    or key.startswith("match_")
-                    or key.startswith("partial_")
-                    or key.startswith("in_bank_")
-                    or key.startswith("z_from_bank_")
-                    or key == "all_context_matches"
-                    or key == "all_features_in_bank_range"
-                )
-            }
-
-            r["global_spatial_metrics"] = global_metrics[
-                "global_spatial_metrics"
-            ]
-            r["global_adjacency_metrics"] = global_metrics[
-                "global_adjacency_metrics"
-            ]
-            r["decoder_support_metrics"] = decoder_support
-
-            r["mode"] = str(mode)
-            r["generation_mode"] = str(mode)
-            r["sample_id"] = int(sample_id)
-
-            r["context_bank_index"] = int(
-                ctx_np["index"][i]
-            )
-            r["assay_id"] = int(
-                ctx_np["assay_id"][i]
-            )
-            r["task_id"] = int(
-                ctx_t["task_id"][i].item()
-            )
-
-            r["global_ctx"] = (
-                ctx_t["global_ctx"][i]
-                .detach()
-                .cpu()
-                .tolist()
-            )
-
-            r["roi_hw"] = [
-                int(v)
-                for v in generation_roi_hw[i]
-            ]
-            r["pad_hw"] = [
-                int(v)
-                for v in generation_pad_hw[i]
-            ]
-            r["full_spatial_size"] = [
-                full_H,
-                full_W,
-            ]
-
-            rows.append(r)
-            sample_id += 1
-
-        n_done += B
-        
-        
-    save_generation_metrics_json(rows, out_dir /  f"{mode}_generation_metrics.json")
-
-
-    print(f"Saved sampled-context Stage 4 generations to: {out_dir} | mode={mode}")
-    return rows
-
-
 def make_viz_loader(test_loader):
     return DataLoader(
         test_loader.dataset,
@@ -3972,14 +3251,19 @@ def evaluate_and_visualize(
             )
             
         if RUN_PLOTTER:
-            report_path = REPORTS["stage2a"]
-            if report_path.exists():
-                run_plotter(
-                    train_report=str(report_path),
-                    eval_roots=[str(VIZ_ROOTS[stage])],
-                    out_dir=str(VIZ_ROOTS[stage] / "figs"),
-                    do_threshold_sweep=True,
-                )
+            # `run_plotter` already skips only the training-curve section when
+            # the report is missing (visualization/reports_plot.py:601), so the
+            # outer existence check was not a guard but a silent suppressor: it
+            # threw away samples.csv, the per-assay stats, the context and
+            # adjacency consistency tables and the threshold sweep, none of
+            # which read the training report. Pass the path and let the callee
+            # decide.
+            run_plotter(
+                train_report=str(REPORTS["stage2a"]),
+                eval_roots=[str(VIZ_ROOTS[stage])],
+                out_dir=str(VIZ_ROOTS[stage] / "figs"),
+                do_threshold_sweep=True,
+            )
 
             if model.spatial_map_prior is not None:
                 save_assaywise_spatial_maps(
@@ -4240,6 +3524,21 @@ def debug_vq_codebooks(
             json.dump(out_json, f, indent=2)
 
 
+def _base_dataset(loader):
+    """The underlying dataset behind however many Subset wrappers a loader has.
+
+    `make_loaders_for_assays` wraps val and test in `DeterministicSubset` but
+    leaves train as a bare `NpzBurstDataset` (dataset.py:1126-1140), so a fixed
+    `loader.dataset.dataset` is correct for two of the three loaders and an
+    AttributeError on the third. That is what the Stage 1 branch hit: it used
+    the train loader with the val/test unwrapping depth.
+    """
+    ds = loader.dataset
+    while hasattr(ds, "dataset"):
+        ds = ds.dataset
+    return ds
+
+
 def run_stage_evaluation(
     stage,
     model,
@@ -4271,20 +3570,18 @@ def run_stage_evaluation(
         # not the final in-memory early-stopping epoch.
         load_spatial_pretrain_if_available(model)
 
-        out_dir = Path(
-            "../viz_out_vqvae/pre_stage1_spatial_maps"
-        )
+        # Kept inside reports/ alongside the Stage-2A reconstruction tree and
+        # the generation sample trees, so every generated artifact lives under
+        # one root. The directory name drops the old "pre_stage1" prefix: this
+        # stage was numbered 0 before the 2026-08-20 renumbering and is Stage 1
+        # now, so the path said one thing and the code another.
+        out_dir = Path("reports/stage1_spatial_maps")
         out_dir.mkdir(
             parents=True,
             exist_ok=True,
         )
 
-        assay_codebook = (
-            train_loader
-            .dataset
-            .dataset
-            .assay_codebook
-        )
+        assay_codebook = _base_dataset(train_loader).assay_codebook
 
         save_assaywise_spatial_maps(
             model,
@@ -4311,7 +3608,7 @@ def run_stage_evaluation(
             )
 
         print(
-            f"Saved Stage 0 visualizations to: "
+            f"Saved Stage 1 visualizations to: "
             f"{out_dir.resolve()}"
         )
         return
@@ -4325,9 +3622,7 @@ def run_stage_evaluation(
             test_loader,
             stage=2,
             assay_indices=assay_indices,
-            assay_codebook=(
-                test_loader.dataset.dataset.assay_codebook
-            ),
+            assay_codebook=_base_dataset(test_loader).assay_codebook,
         )
 
         if RUN_CODEBOOK_DEBUG:
@@ -4343,9 +3638,20 @@ def run_stage_evaluation(
     # Stage 4 substages
     # ============================================================
     if stage == 4:
+        # 4A only. The 4B and 4B-refine arms used to run two in-process
+        # generation evaluators here, `evaluate_stage4_prior` and
+        # `evaluate_stage4_prior_sampled_contexts`, writing
+        # ../viz_out_vqvae/vqvae_stage4/<phase>/ -- one JSON of rows per mode,
+        # no per-clip files, no manifest, no pinned protocol. That structure is
+        # superseded by analysis/generate_regimes.py, and its four context
+        # modes map onto the regimes one for one: random_full -> random,
+        # fixed_global -> global_only, fixed_global_partial_local ->
+        # global_partial_local, plus global_full_local which the old code had
+        # no equivalent for. `_normalize_substage_phases` raises on "4b" rather
+        # than silently doing nothing, so an old config fails loudly here.
         eval_phases = _normalize_substage_phases(
             STAGE4_EVAL_PHASES,
-            ("4a", "4b", "4b_refine"),
+            ("4a",),
             name="STAGE4_EVAL_PHASES",
         )
         if not eval_phases:
@@ -4365,93 +3671,6 @@ def run_stage_evaluation(
                     print(f"Skipping Stage 4A evaluation: {exc}")
                 else:
                     raise
-
-        for phase in ("4b", "4b_refine"):
-            if phase not in eval_phases:
-                continue
-
-            # The old predictive evaluator went with the set-prediction
-            # readout it scored. Stage 4B is now scored by NLL/AUPRC during
-            # training and by sample-based generative metrics afterwards.
-
-            if not RUN_STAGE4_GENERATION_EVAL:
-                continue
-
-            phase_root = Path(
-                "../viz_out_vqvae/vqvae_stage4"
-            ) / phase
-
-            # A. Held-out exact-context generation.
-            evaluate_stage4_prior(
-                model,
-                test_loader,
-                device,
-                activity_phase=phase,
-                out_dir=str(phase_root / "stage4_prior_test_ctx"),
-                max_batches=20,
-                samples_per_context=4,
-                steps=12,
-                temperature=1.0,
-            )
-
-            ref_batch = next(iter(test_loader))
-            fixed_gctx = ref_batch["global_ctx"][0:1]
-            fixed_assay_id = int(ref_batch["assay_idx"][0].item())
-
-            evaluate_stage4_prior_sampled_contexts(
-                model,
-                test_loader,
-                device,
-                activity_phase=phase,
-                out_dir=str(phase_root / "stage4_prior_random_full"),
-                context_bank_path="ckpts/context_prior.pkl",
-                mode="random_full",
-                max_samples=64,
-            )
-            evaluate_stage4_prior_sampled_contexts(
-                model,
-                test_loader,
-                device,
-                activity_phase=phase,
-                out_dir=str(phase_root / "stage4_prior_fixed_global"),
-                context_bank_path="ckpts/context_prior.pkl",
-                mode="fixed_global",
-                fixed_global_ctx=fixed_gctx,
-                assay_id=fixed_assay_id,
-                max_samples=64,
-            )
-            evaluate_stage4_prior_sampled_contexts(
-                model,
-                test_loader,
-                device,
-                activity_phase=phase,
-                out_dir=str(phase_root / "stage4_prior_partial_local"),
-                context_bank_path="ckpts/context_prior.pkl",
-                mode="partial_local",
-                partial_local={
-                    "log_mean_firing_density": -9.1,
-                    "temporal_trend": 0.0,
-                },
-                max_samples=64,
-            )
-            evaluate_stage4_prior_sampled_contexts(
-                model,
-                test_loader,
-                device,
-                activity_phase=phase,
-                out_dir=str(
-                    phase_root / "stage4_prior_fixed_global_partial_local"
-                ),
-                context_bank_path="ckpts/context_prior.pkl",
-                mode="fixed_global_partial_local",
-                fixed_global_ctx=fixed_gctx,
-                assay_id=fixed_assay_id,
-                partial_local={
-                    "log_mean_firing_density": -9.1,
-                    "temporal_trend": 0.0,
-                },
-                max_samples=64,
-            )
 
         return
 

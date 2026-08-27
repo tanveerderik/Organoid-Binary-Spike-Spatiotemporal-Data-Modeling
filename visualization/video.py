@@ -330,7 +330,7 @@ def save_spatial_bias_heatmap_png(
 def make_model_videos_vqvae(
     model: torch.nn.Module,
     loader: torch.utils.data.DataLoader,
-    out_root: str = "viz_out_vqvae",
+    out_root: str = "reports/reconstruction_stage2a",
     max_samples: int | None = None,
     fps: int = 30,
     pool_t: int | None = 1,

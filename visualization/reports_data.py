@@ -694,9 +694,9 @@ def export_viz_quant_tables(eval_roots, out_dir, stage_names=None, ctx_names=Non
 
     Example:
       export_viz_quant_tables(
-          eval_roots=["../viz_out_vqvae/vqvae_stage1", "../viz_out_vqvae/vqvae_stage2"],
-          stage_names=["stage1", "stage2"],
-          out_dir="../viz_out_vqvae/quant_tables_ctx_adj",
+          eval_roots=["reports/reconstruction_stage2a"],
+          stage_names=["stage2a"],
+          out_dir="reports/reconstruction_stage2a/quant_tables_ctx_adj",
       )
     """
 
