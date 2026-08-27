@@ -2388,7 +2388,89 @@
   ],
   "null_mean": 0.12425885085358951,
   "null_sd": 0.002328271393408625,
-  "z": -6.691464562465735
+  "z": -6.691464562465735,
+  "curve": [
+   {
+    "budget": 40,
+    "recordings_at_or_above": 31,
+    "mean_all": 0.04527804048528461,
+    "within_organoid": 0.042572880622202214,
+    "within_slice": 0.05783699927990549,
+    "cross_prep": 0.042860479259093066
+   },
+   {
+    "budget": 60,
+    "recordings_at_or_above": 31,
+    "mean_all": 0.06358022704611561,
+    "within_organoid": 0.060855900571040615,
+    "within_slice": 0.0787054547085182,
+    "cross_prep": 0.06031977487953045
+   },
+   {
+    "budget": 80,
+    "recordings_at_or_above": 31,
+    "mean_all": 0.08065488352641312,
+    "within_organoid": 0.07885266264289653,
+    "within_slice": 0.09646472336746612,
+    "cross_prep": 0.07656331210579737
+   },
+   {
+    "budget": 100,
+    "recordings_at_or_above": 31,
+    "mean_all": 0.09631553657611373,
+    "within_organoid": 0.09570956251868375,
+    "within_slice": 0.11177773250997693,
+    "cross_prep": 0.09155768507160712
+   },
+   {
+    "budget": 117,
+    "recordings_at_or_above": 31,
+    "mean_all": 0.10881172999855325,
+    "within_organoid": 0.1094557969128361,
+    "within_slice": 0.12376878300859584,
+    "cross_prep": 0.103404924987149
+   },
+   {
+    "budget": 140,
+    "recordings_at_or_above": 30,
+    "mean_all": 0.12361761244461268,
+    "within_organoid": 0.12625671151029932,
+    "within_slice": 0.1365973470688664,
+    "cross_prep": 0.11756546946280995
+   },
+   {
+    "budget": 170,
+    "recordings_at_or_above": 29,
+    "mean_all": 0.14148178347530313,
+    "within_organoid": 0.14775320536667236,
+    "within_slice": 0.15074767761821312,
+    "cross_prep": 0.13429260701151477
+   },
+   {
+    "budget": 200,
+    "recordings_at_or_above": 28,
+    "mean_all": 0.15693782499905773,
+    "within_organoid": 0.16721915955865652,
+    "within_slice": 0.16220486548068463,
+    "cross_prep": 0.14845973378031624
+   },
+   {
+    "budget": 250,
+    "recordings_at_or_above": 27,
+    "mean_all": 0.1790780435706841,
+    "within_organoid": 0.1961206476516238,
+    "within_slice": 0.176840339573957,
+    "cross_prep": 0.16868070377308128
+   },
+   {
+    "budget": 300,
+    "recordings_at_or_above": 25,
+    "mean_all": 0.19755503690150536,
+    "within_organoid": 0.22092849376387996,
+    "within_slice": 0.1879281071115628,
+    "cross_prep": 0.1854813686266002
+   }
+  ]
  },
  "label_shuffle_null": {
   "mean_jaccard": 0.4721005811126699,

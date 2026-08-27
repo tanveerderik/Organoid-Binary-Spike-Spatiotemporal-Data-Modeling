@@ -134,6 +134,43 @@ def _block_mean(J: np.ndarray, rows, cols, same: bool) -> float:
     return float(np.mean(vals)) if vals else float("nan")
 
 
+def _block_means(J, org, sli, allrec):
+    return (_block_mean(J, allrec, allrec, same=True),
+            _block_mean(J, org, org, same=True),
+            _block_mean(J, sli, sli, same=True),
+            _block_mean(J, org, sli, same=False))
+
+
+def rarefaction_curve(counts, org, sli, budgets, draws, seed):
+    """Block means as a function of sampling budget.
+
+    The rarefied statistic is only as trustworthy as its budget, which is set
+    by the smallest recording -- 117 tokens here, against 846 entries in play.
+    The honest way to show that is not to drop the small recordings (they are
+    slice recordings, i.e. exactly the group the cross-preparation claim rests
+    on) but to sweep the budget and show the ordering does not move.
+
+    Above a given budget the recordings that cannot supply it contribute their
+    whole vocabulary instead, so `recordings_at_or_above` is reported per row:
+    once it falls below the full set the row is no longer a clean rarefaction
+    and is read as a trend indicator only.
+    """
+    allrec = list(range(counts.shape[0]))
+    rng = np.random.default_rng(seed)
+    out = []
+    for n_sub in budgets:
+        acc = np.zeros((counts.shape[0], counts.shape[0]))
+        for _ in range(draws):
+            acc += _jaccard_matrix(_rarefied_sets(counts, n_sub, rng))
+        acc /= draws
+        allm, o, sl, cr = _block_means(acc, org, sli, allrec)
+        out.append({"budget": int(n_sub),
+                    "recordings_at_or_above": int((counts.sum(axis=1) >= n_sub).sum()),
+                    "mean_all": allm, "within_organoid": o,
+                    "within_slice": sl, "cross_prep": cr})
+    return out
+
+
 @torch.no_grad()
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
@@ -149,7 +186,40 @@ def main() -> int:
                          "Jaccard, which is the only comparable one")
     ap.add_argument("--seed", type=int, default=20260827)
     ap.add_argument("--out", default=str(OUT))
+    ap.add_argument("--curve", action="store_true",
+                    help="recompute the rarefaction curve from the saved "
+                         "per-recording tally and exit. No encode pass, no GPU.")
     a = ap.parse_args()
+    if a.curve:
+        npz = Path(a.out).with_suffix(".npz")
+        if not npz.exists():
+            raise SystemExit(f"{npz} missing -- run the full analysis first.")
+        z = np.load(npz)
+        counts = z["counts"]
+        row_of = {int(aid): i for i, aid in enumerate(z["assay_ids"].tolist())}
+        prov = json.loads(
+            (ROOT / "reports" / "data_provenance.json").read_text())
+        prep = {row_of[r["assay_idx"]]:
+                ("organoid" if r["dandiset"] == "000732" else "slice")
+                for r in prov["used"] if r["assay_idx"] in row_of}
+        org = [i for i in range(counts.shape[0]) if prep.get(i) == "organoid"]
+        sli = [i for i in range(counts.shape[0]) if prep.get(i) == "slice"]
+        curve = rarefaction_curve(
+            counts, org, sli, (40, 60, 80, 100, 117, 140, 170, 200, 250, 300),
+            a.rarefy_draws, a.seed + 3)
+        res = json.loads(Path(a.out).read_text())
+        res["jaccard_rarefied"]["curve"] = curve
+        Path(a.out).write_text(json.dumps(res, indent=1) + "\n")
+        print(f"{'budget':>7}{'n>=':>5}{'all':>9}{'within-org':>12}"
+              f"{'within-sli':>12}{'cross':>9}")
+        print("-" * 54)
+        for c in curve:
+            print(f"{c['budget']:>7}{c['recordings_at_or_above']:>5}"
+                  f"{c['mean_all']:>9.4f}{c['within_organoid']:>12.4f}"
+                  f"{c['within_slice']:>12.4f}{c['cross_prep']:>9.4f}")
+        print(f"\nwrote curve into {a.out}")
+        return 0
+
     dev = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Resolve the checkpoint paths against the project root, not the cwd.
