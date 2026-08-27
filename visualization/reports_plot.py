@@ -5,6 +5,7 @@ Created on Fri Mar 13 13:03:53 2026
 
 @author: derik
 """
+import json
 import os
 from typing import List, Dict, Any, Optional
 
@@ -118,7 +119,9 @@ def _plot_listdict_all_numeric(listdict, out_dir, prefix, x_key="epoch", skip_ke
             keys.update(d.keys())
     keys = sorted(keys)
 
-    # Plot each numeric key
+    # Gather every numeric series first, so a key can be judged against the
+    # others before anything is drawn.
+    series = {}
     for k in keys:
         if k in skip_keys:
             continue
@@ -133,18 +136,94 @@ def _plot_listdict_all_numeric(listdict, out_dir, prefix, x_key="epoch", skip_ke
             else:
                 y.append(np.nan)
 
-        if not any_numeric:
-            continue
+        if any_numeric:
+            series[k] = np.asarray(y, dtype=float)
 
+    # Two classes of curve carry no information as a curve, and this report
+    # holds many of both: config echoes and abandoned code paths log a flat
+    # line for every epoch, and the classifier-free-guidance split logs its
+    # conditional and unconditional halves separately even when the context
+    # branch contributes nothing, so the two are bit-identical. Drawing them
+    # buries the ~110 curves that do move. They are not discarded silently --
+    # each is recorded in a manifest with the constant value or the twin it
+    # duplicates, which preserves the null as a stated number.
+    skipped = {}
+    for k, y in series.items():
+        f = y[np.isfinite(y)]
+        if f.size and np.nanmax(f) == np.nanmin(f):
+            skipped[k] = {"reason": "constant", "value": float(f[0]),
+                          "n_epochs": int(f.size)}
+
+    def _same(a, b):
+        if a is None or b is None or a.shape != b.shape:
+            return None
+        m = np.isfinite(a) & np.isfinite(b)
+        return int(m.sum()) if m.any() and np.array_equal(a[m], b[m]) else None
+
+    for k, y in series.items():
+        if k in skipped:
+            continue
+        for suf in ("_uncond", "_cond"):
+            if not k.endswith(suf):
+                continue
+            stem = k[: -len(suf)]
+            # Prefer the unsuffixed series when the report carries one; fall
+            # back to the conditional half. Whichever it matches, an identical
+            # curve is a second drawing of the same measurement.
+            for ref in (stem, stem + "_cond"):
+                if ref == k:
+                    continue
+                n_eq = _same(y, series.get(ref))
+                if n_eq is not None:
+                    skipped[k] = {"reason": "identical to " + ref,
+                                  "max_abs_diff": 0.0, "n_epochs": n_eq}
+                    break
+            break
+
+    # A series can move every epoch and still describe nothing: a schedule for
+    # machinery that was switched off. Those are invisible to the constant test
+    # -- the schedule itself varies -- so the enabling flag is checked instead.
+    # Both entries below are abandoned Stage-2 paths whose flags read zero for
+    # all 300 epochs of the shipped run: the continuous alpha/hull adapter and
+    # the classifier-free counterfactual context branch.
+    GATED_BY = {
+        "cont_alpha_adapter_enabled": ("continuous_gumbel_tau",
+                                       "continuous_sample_mix",
+                                       "continuous_posterior_temperature"),
+        "ctx_cf_pair_frac": ("ctx_cf_sigma_eff",),
+    }
+    for gate, gated in GATED_BY.items():
+        g = series.get(gate)
+        if g is None:
+            continue
+        gf = g[np.isfinite(g)]
+        if not (gf.size and np.all(gf == 0.0)):
+            continue
+        for k in gated:
+            if k in series and k not in skipped:
+                skipped[k] = {"reason": f"gated by {gate} = 0",
+                              "n_epochs": int(gf.size)}
+
+    for k, y in series.items():
+        if k in skipped:
+            continue
         fn = f"{prefix}_{_safe_name(k)}.png"
-        out_path = os.path.join(out_dir, fn)
         _plot_series(
             x=x,
-            y=np.asarray(y, dtype=float),
-            out_path=out_path,
+            y=y,
+            out_path=os.path.join(out_dir, fn),
             title=f"{prefix}: {k}",
             ylabel=str(k),
         )
+
+    if skipped:
+        man = os.path.join(out_dir, f"{prefix}_skipped_series.json")
+        with open(man, "w") as fh:
+            json.dump({"plotted": len(series) - len(skipped),
+                       "skipped": len(skipped),
+                       "series": dict(sorted(skipped.items()))}, fh, indent=1)
+        print(f"[{prefix}] plotted {len(series) - len(skipped)}, "
+              f"skipped {len(skipped)} flat/duplicate -> {man}")
 
 def plot_report_json(train_report_path: str, out_dir: str):
     out_dir = _ensure_dir(out_dir)
