@@ -237,9 +237,7 @@ STAGE4B_REGION_GRID = None        # None = derive from the token grid (region ex
                                   # identical to the hand-picked value. Pin a tuple only to
                                   # override; it must tile the token grid exactly.
 STAGE4B_DECODER_LAYERS = 4
-# Ablation: False replaces the region/within factorization with a flat Ntok-way
-# grid head, isolating the region head from the sparse-memory encoder.
-STAGE4B_REGION_FACTORIZATION = True
+
 # Per-assay adjacency target for the 3B structural loss, keyed by global_ctx --
 # the same statistic Stage 0 supervised the global embedder on.
 STAGE4B_USE_TOKEN_ADJ_BANK = False
@@ -1250,7 +1248,7 @@ def run_stage2a(model, train_loader, val_loader, blank_logit_threshold):
 
     with open(REPORTS["stage2a"], "w") as f:
         json.dump(report, f, indent=4)
-    print(f"Saved report: {REPORTS['stage1']}")
+    print(f"Saved report: {REPORTS['stage2a']}")
     return report
 
 
@@ -2752,7 +2750,7 @@ def collect_generation_diagnostics(
 ):
     activity_out = sampled["activity_out"]
     activity = sampled["activity"].bool()
-    codes = sampled["flat_ids"].long().unsqueeze(-1)
+    flat_ids = sampled["flat_ids"].long()
 
     count_prob = torch.softmax(
         activity_out["count_logits"],
@@ -2795,17 +2793,6 @@ def collect_generation_diagnostics(
 
         p = prob[b].float().reshape(-1)
 
-        z1 = codes[b, :, 0]
-        z2 = codes[b, :, 1]
-
-        invalid = (
-            (z1 < -1)
-            | (z1 >= int(model.vq.num_codes_per_level[0]))
-            | (z2 < -1)
-            | (z2 >= int(model.vq.num_codes_per_level[1]))
-            | (z1.eq(-1) ^ z2.eq(-1))
-        )
-
         rows.append({
             "threshold_used": float(
                 gen["threshold"]
@@ -2844,10 +2831,7 @@ def collect_generation_diagnostics(
                 ).sum().item()
             ),
             "generated_nonblank_motif_tokens": int(
-                z1.ne(-1).sum().item()
-            ),
-            "invalid_motif_codes": int(
-                invalid.sum().item()
+                flat_ids[b].ne(-1).sum().item()
             ),
             "decoded_probability_mean": float(
                 p.mean().item()
@@ -4404,13 +4388,6 @@ def run_stage_evaluation(
             # The old predictive evaluator went with the set-prediction
             # readout it scored. Stage 4B is now scored by NLL/AUPRC during
             # training and by sample-based generative metrics afterwards.
-            try:
-                pass
-            except FileNotFoundError as exc:
-                if RUN_SKIP_MISSING_EVAL:
-                    print(f"Skipping Stage {phase.upper()} evaluation: {exc}")
-                    continue
-                raise
 
             if not RUN_STAGE4_GENERATION_EVAL:
                 continue

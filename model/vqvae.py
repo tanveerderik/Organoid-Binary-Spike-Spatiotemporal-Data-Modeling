@@ -535,41 +535,29 @@ class TransformerVQVAE(nn.Module):
           codes: (B,N,L) long or backward-compatible (B,N)
           return_all_refinements:
             False -> return final cumulative decode only
-            True  -> return list of cumulative refinement decodes
+            True  -> NOT IMPLEMENTED here; raises. Use
+                     forward(..., return_all_refinements=True) instead.
         """
         
         L_active = int(self.vq.active_quantizers)
         
-        refinements = []
-        
         if return_all_refinements:
-            
-            z_q_list, active_mask_list = self._codes_to_quantized_cumulative(codes)
-            z_q_list = z_q_list[:L_active]
-            active_mask_list = active_mask_list[:L_active]
+            # This branch never worked. Its per-level loop called `_apply_hole`,
+            # a closure defined inside `forward` and therefore out of scope in
+            # this method, so the branch raised NameError on every call --
+            # which is why nothing ever noticed it was here.
+            #
+            # `forward(..., return_all_refinements=True)` takes the same option
+            # and IS exercised (training/train_vqvae.py, training/eval_vqvae.py),
+            # so it is the supported route. See the note in
+            # ablations/ladder_decode_depth.py, which already routes around this.
+            raise NotImplementedError(
+                "decode_from_codes(..., return_all_refinements=True) is not "
+                "implemented; use forward(..., return_all_refinements=True), "
+                "which offers the same option and has test coverage behind it."
+            )
 
-            for lvl_idx, (z_q_i, active_mask_i) in enumerate(
-                zip(z_q_list[:-1], active_mask_list[:-1]),
-                start=1,
-            ):
-                z_q_i, active_mask_i = _apply_hole(z_q_i, active_mask_i)
-                dec_i = self._decode_quantized_latent(
-                    z_q=z_q_i,
-                    active_mask=active_mask_i,
-                    grid=grid,
-                    global_ctx=global_ctx,
-                    local_ctx=local_ctx,
-                    roi_hw=roi_hw,
-                    pad_hw=pad_hw,
-                )
-                dec_i["level"] = lvl_idx
-                refinements.append(dec_i)
-                
-            z_q_final = z_q_list[-1]
-            active_mask_final = active_mask_list[-1]
-            
-        else:
-            z_q_final, active_mask_final = self._codes_to_quantized_final(codes)
+        z_q_final, active_mask_final = self._codes_to_quantized_final(codes)
     
         final_dec = self._decode_quantized_latent(
             z_q=z_q_final,
@@ -583,9 +571,6 @@ class TransformerVQVAE(nn.Module):
         final_dec["level"] = L_active
         final_dec["grid"] = grid
         
-        if return_all_refinements:
-            final_dec["refinements"] = refinements + [final_dec]
-    
         return final_dec
         
     @torch.no_grad()
