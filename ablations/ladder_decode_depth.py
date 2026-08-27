@@ -32,19 +32,31 @@ from scipy.stats import wilcoxon
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT.parent))
 import MAGVIT_project.main as M                                    # noqa: E402
+from MAGVIT_project.ablations import resolve_out                   # noqa: E402
 from MAGVIT_project.ablations.sparse_encoder import build          # noqa: E402
 from MAGVIT_project.external_baselines.task_eval import clip_ap    # noqa: E402
 
 OUT = ROOT / "reports" / "ablation_ladder_decode_depth.json"
 
 
+CKPT_DEFAULT = "ckpts/vqvae_stage2a_best.pt"
+
+
 @torch.no_grad()
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--ckpt", default="ckpts/vqvae_stage2a_best.pt")
+    ap.add_argument("--ckpt", default=CKPT_DEFAULT)
+    ap.add_argument("--out", default=None,
+                    help="explicit output path; overrides --tag")
+    ap.add_argument("--tag", default=None,
+                    help="suffix for the output filename; REQUIRED when --ckpt "
+                         "is not the shipped checkpoint, so a non-shipped "
+                         "result cannot overwrite the shipped one")
     ap.add_argument("--batches", type=int, default=12)
     ap.add_argument("--seed", type=int, default=20260823)
     a = ap.parse_args()
+    out_path = resolve_out(OUT, ckpt_overridden=(a.ckpt != CKPT_DEFAULT),
+                           out=a.out, tag=a.tag)
     dev = "cuda" if torch.cuda.is_available() else "cpu"
 
     ad = M.find_assays()
@@ -120,8 +132,8 @@ def main() -> int:
         print(f"{step:<20}{d.mean():>+10.4f}{np.median(d):>+10.4f}"
               f"{100*(d>0).mean():>7.0f}%{p:>12.3e}")
 
-    OUT.write_text(json.dumps(res, indent=1))
-    print(f"\nwrote {OUT}")
+    out_path.write_text(json.dumps(res, indent=1))
+    print(f"\nwrote {out_path}")
     return 0
 
 

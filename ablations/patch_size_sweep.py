@@ -52,6 +52,7 @@ from sklearn.cluster import KMeans
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT.parent))
 import MAGVIT_project.main as M                                  # noqa: E402
+from MAGVIT_project.ablations import resolve_out                 # noqa: E402
 
 OUT = ROOT / "reports" / "ablation_patch_size.json"
 
@@ -70,7 +71,13 @@ CANDIDATES = [(24, 15, 14), (12, 30, 14), (6, 30, 28),      # 256 tokens
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--batches", type=int, default=12)
+    ap.add_argument("--out", default=None,
+                    help="explicit output path; overrides --tag")
+    ap.add_argument("--tag", default=None,
+                    help="suffix for the output filename")
     a = ap.parse_args()
+    out_path = resolve_out(OUT, ckpt_overridden=False,
+                           out=a.out, tag=a.tag)
 
     ad = M.find_assays()
     _tr, val, _te, _m = M.make_loaders(assay_dict=ad,
@@ -122,7 +129,7 @@ def main() -> int:
     out = {"n_clips": int(B), "shape": [T, H, W],
            "voxel_rate": float(X.float().mean()),
            "shipped_patch": list(shipped), "rows": rows}
-    OUT.write_text(json.dumps(out, indent=1))
+    out_path.write_text(json.dumps(out, indent=1))
 
     print(f"{B} val clips, {T}x{H}x{W}, rate {out['voxel_rate']:.3e}\n")
     hdr = (f"{'patch':<13}{'vox':>6}{'tokens':>8}{'blank%':>9}"
@@ -136,7 +143,7 @@ def main() -> int:
               f"{r['active_tokens']:>12.0f}{r['spikes_per_active']:>9.2f}"
               f"{r['spikes_sd']:>8.2f}{r['capture_k32']:>12.3f}"
               + ("  <- shipped" if r["is_shipped"] else ""))
-    print(f"\nwrote {OUT}")
+    print(f"\nwrote {out_path}")
     return 0
 
 

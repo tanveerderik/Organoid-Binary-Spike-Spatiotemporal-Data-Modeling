@@ -20,6 +20,9 @@ from MAGVIT_project import main as M
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--seeds", default="101,202,303")
+ap.add_argument("--out", default="reports/stage4c_seed_spread.json",
+                help="output path; override to keep a re-run from replacing "
+                     "the recorded seed spread")
 args = ap.parse_args()
 
 M.RUN_EVAL = M.RUN_VIZ = M.RUN_VIDEO_GEN = M.RUN_PLOTTER = M.RUN_CODEBOOK_DEBUG = False
@@ -92,5 +95,5 @@ for k, v in out.items():
 print(f"\n  val-MRR across {len(vals)} runs: mean {mean:.5f}  sd {sd:.5f}  "
       f"range {min(vals):.5f}-{max(vals):.5f}")
 print("=" * 78)
-json.dump(out, open("reports/stage4c_seed_spread.json", "w"), indent=2)
-print("wrote reports/stage4c_seed_spread.json")
+json.dump(out, open(args.out, "w"), indent=2)
+print(f"wrote {args.out}")

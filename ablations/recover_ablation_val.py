@@ -39,9 +39,15 @@ OUT = ROOT / "reports" / "ablation_sparse_encoder.json"
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--arms", default="sparse,dense")
+    ap.add_argument("--out", default=None,
+                    help="explicit output path. This script is the SECOND "
+                         "writer of ablation_sparse_encoder.json; it merges "
+                         "rather than truncating, but pass --out to keep a "
+                         "recovery run away from the shipped file entirely.")
     ap.add_argument("--epochs", type=int, default=80,
                     help="budget the recovered arms were trained for")
     a = ap.parse_args()
+    out_path = Path(a.out) if a.out else OUT
     dev = "cuda" if torch.cuda.is_available() else "cpu"
 
     ad = M.find_assays()
@@ -51,7 +57,8 @@ def main() -> int:
     b0 = next(iter(val))
     img = tuple(b0["x"].shape[-3:]); full = tuple(map(int, b0["full_hw"][0]))
 
-    existing = json.loads(OUT.read_text()) if OUT.is_file() else {"arms": {}, "summary": {}}
+    existing = (json.loads(out_path.read_text()) if out_path.is_file()
+                else {"arms": {}, "summary": {}})
     summary = dict(existing.get("summary", {}))
 
     for name in [s.strip() for s in a.arms.split(",") if s.strip()]:
@@ -80,8 +87,8 @@ def main() -> int:
         print(f"  {name:<8} val AUPRC (exact) = {auprc:.4f}   [recovered]", flush=True)
 
     out = {**existing, "summary": summary}
-    OUT.write_text(json.dumps(out, indent=1))
-    print(f"\nwrote {OUT}")
+    out_path.write_text(json.dumps(out, indent=1))
+    print(f"\nwrote {out_path}")
     return 0
 
 

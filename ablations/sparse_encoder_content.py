@@ -43,6 +43,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT.parent))
 import MAGVIT_project.main as M                                # noqa: E402
+from MAGVIT_project.ablations import resolve_out               # noqa: E402
 from MAGVIT_project.ablations.sparse_encoder import build      # noqa: E402
 
 CK = ROOT / "ckpts" / "ablations"
@@ -237,7 +238,12 @@ def main() -> int:
     ap.add_argument("--ckpt", default=None,
                     help="analyse ONE checkpoint (e.g. the shipped tokenizer) "
                          "instead of the two ablation arms")
-    ap.add_argument("--tag", default="shipped", help="name for --ckpt output")
+    ap.add_argument("--out", default=None,
+                    help="explicit output path; overrides --tag")
+    ap.add_argument("--tag", default=None,
+                    help="suffix for the output filename; REQUIRED when "
+                         "--ckpt is given, so a non-shipped result cannot "
+                         "overwrite the shipped one")
     a = ap.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     ad = M.find_assays()
@@ -261,8 +267,8 @@ def main() -> int:
         print(f"[{name}] {codes.shape[0]} tokens, true blank frac "
               f"{blank.mean():.4f}", flush=True)
 
-    out = (OUT if not a.ckpt else
-           OUT.with_name(f"ablation_sparse_encoder_content_{a.tag}.json"))
+    out = resolve_out(OUT, ckpt_overridden=bool(a.ckpt),
+                      out=a.out, tag=a.tag)
     out.write_text(json.dumps({"arms": res, "batches": a.batches,
                                "ckpt": a.ckpt}, indent=1))
 
