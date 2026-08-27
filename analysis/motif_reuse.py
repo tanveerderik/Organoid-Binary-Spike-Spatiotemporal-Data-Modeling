@@ -186,6 +186,11 @@ def main() -> int:
                          "Jaccard, which is the only comparable one")
     ap.add_argument("--seed", type=int, default=20260827)
     ap.add_argument("--out", default=str(OUT))
+    ap.add_argument("--collect-patches", type=int, default=64,
+                    help="accumulate the mean REAL voxel patch for the K most "
+                         "used entries, so a motif atlas shows what the data "
+                         "does under a code rather than what the decoder "
+                         "renders for it. 0 disables.")
     ap.add_argument("--curve", action="store_true",
                     help="recompute the rarefaction curve from the saved "
                          "per-recording tally and exit. No encode pass, no GPU.")
@@ -272,6 +277,17 @@ def main() -> int:
     clip_rows = []            # (dense row, per-clip count vector)
     mm = merge_map.to(dev)
 
+    # Empirical motif atlas. For each flat entry, the running sum of the actual
+    # binary voxel patches the encoder assigned to it. A decoder-rendered atlas
+    # would show what the model believes a code means; this shows what the data
+    # does under it, which is the thing a reviewer will ask about. Two passes
+    # are avoided by accumulating during the pass already being made.
+    K_PATCH = int(a.collect_patches)
+    pt, ph, pw = 6, 15, 14
+    patch_sum = (torch.zeros(V, pt, ph, pw, device=dev)
+                 if K_PATCH else None)
+    patch_n = torch.zeros(V, device=dev) if K_PATCH else None
+
     for i, batch in enumerate(test):
         if a.batches and i >= a.batches:
             break
@@ -294,6 +310,21 @@ def main() -> int:
         active = c0.ne(BLANK_CODE)                 # blank excluded here
         nominal = (c0.clamp_min(0) * K2 + c1.clamp_min(0)) * K3 + c2.clamp_min(0)
         fid = mm[nominal.clamp(0, merge_map.numel() - 1)]
+
+        if patch_sum is not None:
+            # Token index -> voxel patch, using the same raster order the
+            # prior's positional embedding assumes (model/prior.py:409):
+            # t = n // (H*W), h = (n // W) % H, w = n % W over the token grid.
+            B_, T_, H_, W_ = x.shape[0], x.shape[2], x.shape[3], x.shape[4]
+            tt, hh, ww = T_ // pt, H_ // ph, W_ // pw
+            xp = (x[:, 0]
+                  .reshape(B_, tt, pt, hh, ph, ww, pw)
+                  .permute(0, 1, 3, 5, 2, 4, 6)
+                  .reshape(B_, tt * hh * ww, pt, ph, pw))
+            flat_act = fid[active]                       # (M,)
+            patch_sum.index_add_(0, flat_act, xp[active].float())
+            patch_n.index_add_(0, flat_act,
+                               torch.ones_like(flat_act, dtype=torch.float32))
 
         for b in range(fid.shape[0]):
             r = row_of.get(int(aidx[b]))
@@ -496,8 +527,16 @@ def main() -> int:
     }
     # Persist the raw tally. Every statistic above is derived from it, so a
     # follow-up question does not need another encode pass over the test split.
+    extra = {}
+    if patch_sum is not None:
+        n = patch_n.clamp_min(1.0).view(-1, 1, 1, 1)
+        mean_patch = (patch_sum / n).cpu().numpy()
+        top = np.argsort(counts.sum(axis=0))[::-1][:K_PATCH]
+        extra = {"atlas_ids": top.astype(np.int32),
+                 "atlas_mean_patch": mean_patch[top].astype(np.float32),
+                 "atlas_n": patch_n.cpu().numpy()[top].astype(np.int64)}
     np.savez_compressed(Path(a.out).with_suffix(".npz"),
-                        counts=counts, assay_ids=np.array(assay_ids))
+                        counts=counts, assay_ids=np.array(assay_ids), **extra)
     Path(a.out).write_text(json.dumps(res, indent=1) + "\n")
     print(f"\nwrote {a.out}")
     print(f"  clips / tokens           {res['n_clips']} / {res['n_tokens']:,}")

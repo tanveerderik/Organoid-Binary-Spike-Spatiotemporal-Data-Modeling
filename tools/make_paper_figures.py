@@ -41,7 +41,7 @@ MIRROR = ROOT / "paper" / "figures"
 
 FIGURES = [
     ("f1_pipeline",   "f1_pipeline",   (TEXT_W, 2.2)),
-    ("f2_motifs",     "f2_motifs",     (TEXT_W, 4.4)),
+    ("f2_motifs",     "f2_motifs",     (TEXT_W, 3.2)),
     ("f3_task_axis",  "f3_task_axis",  (TEXT_W, 2.6)),
     ("f4_generation", "f4_generation", (TEXT_W, 2.4)),
 ]
