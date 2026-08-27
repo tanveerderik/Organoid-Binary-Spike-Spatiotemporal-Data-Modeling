@@ -114,29 +114,18 @@ from .utils.constants import (
 TRAIN_STAGES = (4,)        # 1,2,3,4
 EVAL_STAGES  = ()          # 1,2,3,4
 
-# Stage-2 continuous quantization.
+# Stage-2 substages. Any subset of ("2a", "2b") is valid; execution order is
+# always 2A -> 2B.
 #
 # Stage 2A:
-#   project the frozen encoder residual onto the convex hull of the selected
-#   z1 parent's frozen z2 children; train the decoder on that fixed geometry.
+#   train encoder, the three-level codebook ladder (32/8/4) and the decoder.
+#   Levels are activated by a staged loss-weight warm-up rather than by scaling
+#   the levels, because a level scale != 1 biases the EMA target.
 # Stage 2B:
-#   train the optional alpha adapter to reproduce the same geometric projection.
-#   The decoder is frozen and does not define the adapter target.
-# Stage 2B:
-#   freeze the continuous mapping and decoder backbone; train only zero-gated
-#   decoder cross-attention and context projections.
-# Stage-1 training substages. Any subset of ("1a", "1b") is valid; execution
-# order is always 1A -> 1B.
-# Stage 1A:
-#   joint context-agnostic training of encoder/to_code/VQ/decoder. The discrete
-#   hierarchy (z1 parents and z2 children) is learned here. This is the stage the
-#   z1-level results characterise: codebook perplexity, eta^2(code->activity),
-#   motif syntax, and the causal code->context response.
-# Stage 1B:
-#   refit ONLY the z2 children against the frozen encoder and z1, at a new
-#   children-per-parent count. Residuals depend solely on the encoder and z1, so
-#   this is well posed and leaves every z1-level Stage 1A result intact. Used to
-#   widen the child hull without paying for a full Stage 1A retrain.
+#   flatten the ladder -- sum each (z1, z2, z3) triple into one embedding so the
+#   prior predicts ONE categorical instead of three coupled ones, then merge
+#   duplicates by pairwise-relative distance. 1024 nominal -> 961 rows.
+#   See training/stage2b_flatten.py.
 STAGE2_PHASES = ("2a", "2b")
 
 # ---- Stage 3: standalone lct mapper ----

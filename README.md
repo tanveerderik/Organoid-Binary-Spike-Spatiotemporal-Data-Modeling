@@ -105,10 +105,20 @@ stream rather than a weaker copy of gct.
   alphabet, conditioned on gct, lct, and a task token.
 - **4B — activity prior.** Predicts which token positions are active and their
   counts. Selected on **NLL, not F1**, because F1 is maximised by emitting the
-  mode.
-- **4C — refinement.** Refines with the motif prior frozen, and runs the only
-  end-to-end generation validation in the pipeline
+  mode. This is also where the end-to-end generation validation runs
   (`iterative_unmask_motif_given_activity` -> `decode_flat_ids_to_xgen`).
+- **4C — activity-map adaptation.** 4A is teacher-forced on the *true* activity
+  map but is handed 4B's prediction at generation time, and that mismatch costs
+  free-generation motif MRR 0.228 -> 0.155 (median rank 8 -> 21). 4C adapts 4A to
+  the maps 4B actually emits, at a tenth of 4A's learning rate. **This is the
+  shipped motif prior**, and it must be paired with a soft activity field at
+  generation time — fed a hard 0/1 map it is worse than the unadapted 4A.
+  Selected on val MRR under the model arm; the oracle arm is logged every epoch
+  and never selected on.
+- **4b_refine — ablation, rejected.** Attacked the same mismatch from the other
+  side, moving 4B with gradients from a frozen 4A. All variation sat inside the
+  0.92 seed sd and motif-MRR *declined* (t = -10.45). Retained only to show why
+  4C moves the motif prior instead.
 
 ---
 

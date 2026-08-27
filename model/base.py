@@ -112,7 +112,7 @@ class LctMapper(nn.Module):
 class HierarchicalVectorQuantizerEMA(nn.Module):
     def __init__(
         self,
-        num_codes: Union[int, Sequence[int]] = 512,
+        num_codes: Union[int, Sequence[int]] = (32, 8, 4),
         code_dim: int = 128,
         decay: float = 0.95,
         eps: float = 1e-5,
@@ -121,7 +121,7 @@ class HierarchicalVectorQuantizerEMA(nn.Module):
         blank_token_std: float = 0.02,
         usage_loss_weight: float = 1e-3,
         usage_tau: float = 0.5,
-        num_quantizers: int = 2,
+        num_quantizers: int = 3,
         level_scale_decay: float = 1.0,
 
         active_quantizers: Optional[int] = None,
@@ -1043,7 +1043,7 @@ class ActivePatchEmbed3D(nn.Module):
 
     This fully removes blank patches from the patch embedding forward path.
     """
-    def __init__(self, in_chans=1, embed_dim=384, patch_size=(16, 16, 16), bias=True):
+    def __init__(self, in_chans=1, embed_dim=384, patch_size=(6, 15, 14), bias=True):
         super().__init__()
         self.patch_size = tuple(int(v) for v in patch_size)
         self.in_chans = int(in_chans)
@@ -1143,7 +1143,7 @@ class PatchRenderer3D(nn.Module):
         self,
         token_dim: int,
         out_chans: int = 1,
-        patch_size=(16, 16, 16),
+        patch_size=(6, 15, 14),
         refine_layers: int = 1,
         refine_hidden: int = 32,
     ):

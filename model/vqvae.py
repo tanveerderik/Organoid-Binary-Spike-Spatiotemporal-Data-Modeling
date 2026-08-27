@@ -26,23 +26,27 @@ from ..utils.constants import (
 )
     
 class TransformerVQVAE(nn.Module):
+    # Defaults match the SHIPPED configuration (main.py: patch_size,
+    # num_codes, num_quantizers). They used to describe a two-level
+    # (16,64) / (16,16,16) model, so a bare TransformerVQVAE() built
+    # something no checkpoint on disk could load -- the same trap main.py
+    # documents one layer up. Every real caller passes these explicitly;
+    # the defaults exist so the bare constructor is not a landmine.
     def __init__(
         self,
         img_size,
         full_spatial_size=None,
-        patch_size=(16,16,16),
-        encoder_embed_dim=256, encoder_depth=8, encoder_num_heads=6, mlp_ratio=4.0,
+        patch_size=(6,15,14),
+        encoder_embed_dim=64, encoder_depth=2, encoder_num_heads=4, mlp_ratio=4.0,
         
-        code_dim=128, num_codes=(16,64),
+        code_dim=64, num_codes=(32,8,4),
         vq_decay: float = 0.95,
         vq_beta: float = 0.25,
         usage_loss_weight: float = 1e-3,
         usage_tau: float = 0.5,
-        num_quantizers: int = 2,
+        num_quantizers: int = 3,
                 
-        decoder_embed_dim=256, decoder_depth=4, decoder_num_heads=6,
-        
-        
+        decoder_embed_dim=64, decoder_depth=2, decoder_num_heads=4,
         in_chans=1, out_chans=1,
 
         # ---- contexts ----
@@ -469,9 +473,10 @@ class TransformerVQVAE(nn.Module):
         z_decoder_input = z_dec_no_pos + pos_dec
         z_d = z_decoder_input
     
-        # ---------------------------------------------------------
-        # Optional decoder context cross-attention
-        # ---------------------------------------------------------
+        # Decoder blocks. There is deliberately NO context cross-attention
+        # here: the zero-gated branch was measured inert and its submodules
+        # were removed (see removed_dec_block_parts below). Context reaches
+        # the decoder through ctx_loss_soft in output space instead.
         self._ensure_dec_masks(grid, device=z_d.device)
         for blk in self.dec_blocks:
             z_d = blk(z_d)

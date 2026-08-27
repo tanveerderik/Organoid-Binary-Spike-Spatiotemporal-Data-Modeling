@@ -1,4 +1,4 @@
-"""Structured output for Stage 3 generation runs.
+"""Structured output for Stage 4 generation runs.
 
 The previous layout was a flat ``videos/`` directory plus a single JSON of
 local-context comparisons. That makes the two things you actually want to do

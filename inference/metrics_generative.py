@@ -1,4 +1,4 @@
-"""Generative evaluation for the Stage 3 priors.
+"""Generative evaluation for the Stage 4 priors.
 
 Why not exact F1: it scores one guess against one truth and is maximised by
 emitting the mode. A prior that always returns its single most likely map would

@@ -1,7 +1,13 @@
 # analysis/
 
-Post-hoc artifacts for defending the Stage 4 generation composite. Nothing here
-trains anything.
+Post-hoc artifacts for the Stage 4 generation composite. Nothing here trains
+anything.
+
+The composite is **no longer the paper metric and no longer selects epochs** --
+4B selects on val NLL, 4C on val MRR. It remains the **acceptance gate**, and
+`reports/generation_metric_reference.json` is consumed by
+`analysis/generate_regimes.py` and `external_baselines/common/pipeline.py`, so
+these scripts stay live.
 
 | script | needs GPU | answers |
 |---|---|---|
@@ -63,7 +69,7 @@ does not depend on the exact weights.
 3. **Leave-one-out** -- drops each term, renormalises, re-selects.
 
     python analysis/generation_weight_sensitivity.py \
-        --report reports/training_report_prior_4B.json
+        --report reports/training_report_prior_3B_activity.json
 
 Run both once 4B and 4C have finished.
 
@@ -94,9 +100,9 @@ deliberately small; raise `--batches` only when the GPU is free.
 ## Suggested order, once 4B and 4C have finished
 
     python analysis/generation_metric_reference.py --split test
-    python analysis/generation_weight_sensitivity.py --report reports/training_report_prior_4B.json
+    python analysis/generation_weight_sensitivity.py --report reports/training_report_prior_3B_activity.json
     python analysis/generation_seed_spread.py --phase 4b --seeds 8
-    python analysis/generation_seed_spread.py --phase 4c --seeds 8
+    python analysis/generation_seed_spread.py --phase 4b_refine --seeds 8
 
 The first is already run; its output is in
 `reports/generation_metric_reference.json`.

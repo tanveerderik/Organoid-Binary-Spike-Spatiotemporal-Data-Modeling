@@ -364,7 +364,7 @@ class NpzBurstDataset(Dataset):
 
         # Task mix & AR tokenization
         task_probs: Optional[Dict[str, float]] = None,  # {"recon": 0.25, "causal": 0.25, "noncausal": 0.25, "spatial": 0.25}
-        patch_size: Optional[Tuple[int,int,int]] = None,   # (pt, ph, pw), e.g. (16,16,16)
+        patch_size: Optional[Tuple[int,int,int]] = None,   # (pt, ph, pw), e.g. (6,15,14)
 
         # Local context computation control
         use_activity_ctx: bool = True,
@@ -1048,7 +1048,7 @@ def make_loaders_for_assays(
     Builds train/val/test DataLoaders.
 
     Examples of extras via ds_kwargs:
-      task_probs={"recon": 0.25, "causal": 0.25, "noncausal": 0.25, "spatial": 0.25}, patch_size=(16,16,16),
+      task_probs={"recon": 0.25, "causal": 0.25, "noncausal": 0.25, "spatial": 0.25}, patch_size=(6,15,14),
       use_activity_ctx=True, task_id_map={"recon": 0, "causal": 1, "noncausal": 2, "spatial": 3}
     """
     # Default to the mode-safe collate if not supplied
