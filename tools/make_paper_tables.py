@@ -31,6 +31,12 @@ def _esc(s: str) -> str:
     return str(s).replace("_", "\\_").replace("%", "\\%").replace("&", "\\&")
 
 
+def _esc_title(t: str) -> str:
+    """Family titles carry a leading 'A. ' etc. and no LaTeX-special chars,
+    but they do contain hyphens that must not become en-dashes in a table."""
+    return t.replace("lookup-proof", "lookup\\nobreakdash-proof")
+
+
 def _write(name: str, body: str, source: str) -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     p = OUT / name
@@ -100,24 +106,191 @@ def generation() -> None:
 
     The bracketed value is that same arm's `random`-context score, so a cell
     whose value and null are close is not using its conditioning. Without it a
-    reader cannot tell conditioning from an arm's default behaviour.
+    reader cannot tell conditioning from an arm's default behaviour, which is
+    exactly what the lookup arms do once their per-assay map is withheld.
+
+    Source is `generation_families.json`, emitted by
+    `external_baselines.diagnose_table --emit-families`. NOT comparison.json:
+    that file's `per_clip` block holds nine per-clip statistics over seven
+    pipeline variants, excludes both convolutional arms, and its
+    stat_error_clean median is the conditioning-gain median rather than the
+    glob+full value the paper quotes -- rendering from it would silently
+    disagree with diagnostics.md.
     """
-    src = EB / "comparison.json"
+    src = EB / "generation_families.json"
+    if not src.exists():
+        raise SystemExit(
+            f"{src} missing. Generate it with:\n"
+            f"  python -m MAGVIT_project.external_baselines.diagnose_table "
+            f"--emit-families\n"
+            f"The four families exist only inside diagnose_table.py; do not "
+            f"transcribe them from diagnostics.md.")
     d = json.loads(src.read_text())
-    ref = d["reference"]
-    fams = [("stat_error_clean", "A. Conditional accuracy $\\downarrow$")]
+    FULL, NULL = "global_full_local", "random"
+    # Keys as diagnose_table's MODELS labels them, in the order the paper
+    # argues. The dagger and the _ref_ marks travel with the label so a caption
+    # cannot forget them.
+    LABEL = [("Ours (4C+soft)", "Ours"),
+             ("MaskGIT-flat", "MaskGIT-flat"),
+             ("3D U-Net (det.)\u2020", "3D U-Net$^\\dagger$"),
+             ("3D CVAE", "3D CVAE"),
+             ("Dich. Gaussian", "\\emph{ref} DG"),
+             ("Coupled GLM", "\\emph{ref} GLM")]
+
     rows = []
-    for key, label in fams:
-        arms = d["per_clip"].get(key, {})
-        cells = [f"{arms[ref]['median']:.4f}"]
-        for name in ("MaskGIT-flat", "DG (Macke'09)", "GLM (Pillow'08)"):
-            v = arms.get(name)
-            cells.append("--" if v is None else f"{v['median']:.4f}")
-        rows.append(f"{label} & " + " & ".join(cells) + " \\\\")
+    for title, blk in d["families"].items():
+        arrow = "$\\downarrow$" if blk["better"] == "low" else "$\\uparrow$"
+        cells = []
+        for raw, _lbl in LABEL:
+            v = blk["arms"].get(raw)
+            cells.append("--" if v is None else
+                         f"{v[FULL]:.4f} \\emph{{[{v[NULL]:.3f}]}}")
+        rows.append(f"{_esc_title(title)} {arrow} & " + " & ".join(cells)
+                    + " \\\\")
+
+    header = " & ".join(lbl for _, lbl in LABEL)
+    body = ("\\begin{tabular}{l r r r r r r}\n\\toprule\n"
+            f"family & {header} \\\\\n\\midrule\n"
+            + "\n".join(rows) + "\n\\bottomrule\n\\end{tabular}")
+    _write("t3_generation_families.tex", body, str(src))
+
+
+def task_completion() -> None:
+    """Site-level and voxel-level AP on the four completion tasks.
+
+    Two blocks of one table because they answer different questions -- which
+    ELECTRODE fires, and whether the FRAME is right too -- and our result
+    differs sharply between them. Nothing is bolded: 20 of the 32 paired tests
+    go to another arm, so a bolded scoreboard would imply a competition this
+    work does not win. Cells carry the paired-test verdict instead.
+
+    Read WITHIN a column only. The ROI fraction differs by task
+    (1.00 / 0.60 / 0.41 / 0.33), so the columns have different base rates.
+    `recon` is free generation at zero context, not a fourth completion task.
+    """
+    src = EB / "cross_model_tests.json"
+    d = json.loads(src.read_text())
+    # The null is the point of the table, so it is a row and not a footnote:
+    # `marginal` is the clip's own recording's per-site firing rate measured on
+    # that recording's TRAIN clips and held constant in time -- no model, no
+    # completion, no clip-specific information at all. Every learned arm loses
+    # to it. `marginal_xa` withholds the clip's own recording, and the distance
+    # between the two rows is how much of the first is memorisation.
+    nulls = json.loads((EB / "task_eval_nulls.json").read_text())["tasks"]
+    TASKS = ["recon", "causal", "noncausal", "spatial"]
+    ARMLBL = {"MaskGIT-flat": "MaskGIT-flat",
+              "3D U-Net (det.)": "3D U-Net$^\\dagger$",
+              "3D CVAE": "3D CVAE"}
+    MARK = {"pipeline": "$^{\\ast}$", "arm": "", "ns": "$^{\\circ}$"}
+
+    ours, per_arm = {}, {}
+    for r in d["rows"]:
+        if r["arm"] not in ARMLBL:
+            continue
+        ours[(r["family"], r["task"])] = r["pipeline"]
+        per_arm[(r["family"], r["task"], r["arm"])] = r
+
+    blocks = []
+    for fam, famlbl in (("site AP", "Site AP $\\uparrow$ --- which electrode"),
+                        ("voxel AP",
+                         "Voxel AP $\\uparrow$ --- which electrode \\emph{and} frame")):
+        blocks.append(f"\\multicolumn{{5}}{{l}}{{\\textit{{{famlbl}}}}} \\\\")
+        blocks.append("Ours & " + " & ".join(
+            f"{ours[(fam, t)]:.4f}" for t in TASKS) + " \\\\")
+        for arm, lbl in ARMLBL.items():
+            cells = []
+            for t in TASKS:
+                r = per_arm.get((fam, t, arm))
+                cells.append("--" if r is None
+                             else f"{r['arm_value']:.4f}{MARK[r['verdict']]}")
+            blocks.append(f"{lbl} & " + " & ".join(cells) + " \\\\")
+        fld = "site_ap" if fam == "site AP" else "ap"
+        for nk, nlbl in (("marginal", "\\emph{null} recording site map, seen"),
+                         ("marginal_xa",
+                          "\\emph{null} recording site map, unseen")):
+            blocks.append(f"{nlbl} & " + " & ".join(
+                f"{nulls[t]['arms'][nk][fld]:.4f}" for t in TASKS) + " \\\\")
+        blocks.append("\\midrule")
+    blocks.pop()
+
     body = ("\\begin{tabular}{l r r r r}\n\\toprule\n"
-            "metric & Ours & MaskGIT-flat & \\emph{ref} DG & \\emph{ref} GLM "
-            "\\\\\n\\midrule\n" + "\n".join(rows) + "\n\\bottomrule\n\\end{tabular}")
-    _write("t3_generation_perclip.tex", body, str(src))
+            "arm & free gen.\\ (0) & causal (1) & noncausal (2) & spatial (3)"
+            " \\\\\n\\midrule\n" + "\n".join(blocks)
+            + "\n\\bottomrule\n\\end{tabular}")
+    _write("t2_task_completion.tex", body, str(src))
+
+
+def stage_prior_ladder() -> None:
+    """Stage 4A motif prior against the four-rung null ladder.
+
+    The strongest null is `assay_position` -- the empirical distribution of
+    codes at that grid position within that recording. Beating `uniform` is
+    worth nothing; the ladder exists so the reported margin is against the
+    hardest available lookup, and `null_strongest_level` records which that is.
+
+    Median rank, never mean: the distribution has a long tail and the mean
+    (44.65) misrepresents the median (9.0).
+    """
+    src = Path("reports/evaluation_report_prior_4A_V961.json")
+    d = json.loads(src.read_text())
+    assert d["null_strongest_level"] == "assay_position", d["null_strongest_level"]
+    rows = []
+    for pre, lbl in (("null_uniform_z1", "uniform"),
+                     ("null_global_z1", "global marginal"),
+                     ("null_assay_z1", "per-recording marginal"),
+                     ("null_assay_position_z1",
+                      "per-recording $\\times$ position")):
+        rows.append(f"{lbl} & {d[pre+'_acc']:.4f} & {d[pre+'_top5_acc']:.4f} & "
+                    f"{d[pre+'_median_rank']:.0f} & {d[pre+'_mrr']:.4f} & "
+                    f"{d[pre+'_ce']:.4f} \\\\")
+    rows.append("\\midrule")
+    rows.append(f"\\textbf{{motif prior (ours)}} & "
+                f"\\textbf{{{d['flat_acc']:.4f}}} & "
+                f"\\textbf{{{d['flat_top5_acc']:.4f}}} & "
+                f"\\textbf{{{d['flat_median_rank']:.0f}}} & "
+                f"\\textbf{{{d['flat_mrr']:.4f}}} & "
+                f"\\textbf{{{d['loss_flat']:.4f}}} \\\\")
+    body = ("\\begin{tabular}{l r r r r r}\n\\toprule\n"
+            "predictor & top-1 $\\uparrow$ & top-5 $\\uparrow$ & "
+            "median rank $\\downarrow$ & MRR $\\uparrow$ & "
+            "CE (nats) $\\downarrow$ \\\\\n\\midrule\n"
+            + "\n".join(rows) + "\n\\bottomrule\n\\end{tabular}")
+    _write("t4c_prior_nulls.tex", body, str(src))
+
+
+def motif_reuse() -> None:
+    """Is the alphabet shared across recordings? The thesis's own table.
+
+    Only the RAREFIED overlap is rendered. The raw Jaccard in the same JSON
+    tracks sampling effort at r = +0.96 and is explicitly marked unquotable by
+    the analysis that produced it; putting it in a paper table would undo that.
+    """
+    src = Path("reports/analysis_motif_reuse.json")
+    d = json.loads(src.read_text())
+    e, jr = d["entropy"], d["jaccard_rarefied"]
+    rows = [
+        f"alphabet entries in use & {d['vocab_global']} of {d['V']} \\\\",
+        f"used by $\\geq 5$ recordings, rarefied & "
+        f"{d['shared_core']['used_by_ge_k_rarefied']['5']:.0f} \\\\",
+        "\\midrule",
+        f"$H(\\mathrm{{code}})$ & {e['H_code_mm']:.4f} nats \\\\",
+        f"$H(\\mathrm{{code}} \\mid \\mathrm{{recording}})$ & "
+        f"{e['H_code_given_recording_mm']:.4f} nats \\\\",
+        f"\\textbf{{retained fraction}} & "
+        f"\\textbf{{{e['reuse_ratio_mm']:.4f}}} \\\\",
+        "\\midrule",
+        f"rarefied overlap, within organoid & "
+        f"{jr['mean_within_organoid']:.4f} \\\\",
+        f"rarefied overlap, within slice & {jr['mean_within_slice']:.4f} \\\\",
+        f"rarefied overlap, across preparations & "
+        f"{jr['mean_cross_prep']:.4f} \\\\",
+        f"\\emph{{null}} label-shuffled & {jr['null_mean']:.4f} "
+        f"$\\pm$ {jr['null_sd']:.4f} \\\\",
+    ]
+    body = ("\\begin{tabular}{l r}\n\\toprule\n"
+            "quantity & value \\\\\n\\midrule\n"
+            + "\n".join(rows) + "\n\\bottomrule\n\\end{tabular}")
+    _write("t5_motif_reuse.tex", body, str(src))
 
 
 def stage_contributions() -> None:
@@ -161,8 +334,11 @@ def stage_contributions() -> None:
 def main() -> int:
     data_provenance()
     scalability()
+    task_completion()
     generation()
+    motif_reuse()
     stage_contributions()
+    stage_prior_ladder()
     print("\nRemaining tables are trims of rendered blocks in "
           "reports/external_baselines/diagnostics.md; port them here as they "
           "are finalised so nothing in the paper is hand-typed.")

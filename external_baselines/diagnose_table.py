@@ -1474,6 +1474,32 @@ def _sre_factory(real):
     return sre
 
 
+def emit_generation_families(have, rungs, reg, real, out_dir: Path) -> None:
+    """Dump the four generation families so the paper can render them.
+
+    This module is the only place these four are computed. Until now they
+    existed solely as rendered markdown, so the only way to get them into a
+    LaTeX table was to retype them -- and a retyped number cannot be traced
+    back to the run that produced it. This writes the same values the markdown
+    prints, from the same lambdas, at every rung.
+
+    Additive: it does not touch what `report` renders, and diagnostics.md is
+    byte-identical with or without the flag.
+    """
+    fams = GEN_METRICS + [("D. Marginal realism", "low", "", _sre_factory(real))]
+    out = {"rungs": [r for r, _ in rungs], "families": {}}
+    for title, better, _note, fn in fams:
+        blk = {"better": better, "arms": {}}
+        for key, label in MODELS:
+            if not any(key == k for k, _ in have):
+                continue
+            blk["arms"][label] = {r: float(fn(reg, key, r)) for r, _ in rungs}
+        out["families"][title] = blk
+    q = out_dir / "generation_families.json"
+    q.write_text(json.dumps(out, indent=1) + "\n")
+    print(f"wrote {q}", file=sys.stderr)
+
+
 def report(J, have, rungs, reg, real, labels, parts) -> None:
     """Render the sections named in `parts`, in report order."""
     def ladder(title, note, fn, better, fmt="{:.4f}"):
@@ -1836,6 +1862,10 @@ def main() -> int:
     ap_.add_argument("--out-dir", default=str(DIR))
     ap_.add_argument("--stdout", action="store_true",
                      help="print the headline report instead of writing files")
+    ap_.add_argument("--emit-families", action="store_true",
+                     help="also write generation_families.json, the four "
+                          "generation families at every rung, for the paper "
+                          "tables. Additive: the markdown is unchanged.")
     args = ap_.parse_args()
 
     J, have = {}, []
@@ -1883,10 +1913,13 @@ def main() -> int:
                 + _cap(task_section, APPENDIX)
                 + _cap(report, J, have, rungs, reg, real, labels, APPENDIX))
 
+    out = Path(args.out_dir)
+    if args.emit_families:
+        emit_generation_families(have, rungs, reg, real, out)
+
     if args.stdout:
         print(headline, end="")
         return 0
-    out = Path(args.out_dir)
     (out / "diagnostics.md").write_text(headline)
     (out / "diagnostics_appendix.md").write_text(appendix)
     print(f"wrote {out/'diagnostics.md'} "

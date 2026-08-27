@@ -1,0 +1,199 @@
+{
+ "rungs": [
+  "random",
+  "local_only",
+  "global_only",
+  "global_partial_local",
+  "global_full_local"
+ ],
+ "families": {
+  "A. Conditional accuracy": {
+   "better": "low",
+   "arms": {
+    "Ours (4C+soft)": {
+     "random": 1.2601826386526227,
+     "local_only": 1.1964494613930583,
+     "global_only": 0.8643473070114851,
+     "global_partial_local": 0.6661313762888312,
+     "global_full_local": 0.6078025167807937
+    },
+    "MaskGIT-flat": {
+     "random": 1.398523623123765,
+     "local_only": 1.229783128015697,
+     "global_only": 0.922656612470746,
+     "global_partial_local": 0.8122431645169854,
+     "global_full_local": 0.7403469197452068
+    },
+    "3D U-Net (det.)\u2020": {
+     "random": 1.2211741916835308,
+     "local_only": 1.1990484101697803,
+     "global_only": 1.4622962102293968,
+     "global_partial_local": 1.3432453162968159,
+     "global_full_local": 1.3636897783726454
+    },
+    "3D CVAE": {
+     "random": 1.3400490395724773,
+     "local_only": 1.2956674601882696,
+     "global_only": 1.1224121041595936,
+     "global_partial_local": 1.0641690641641617,
+     "global_full_local": 1.0831467565149069
+    },
+    "Dich. Gaussian": {
+     "random": 0.910811148583889,
+     "local_only": 0.6327581219375134,
+     "global_only": 0.7484786622226238,
+     "global_partial_local": 0.6260502673685551,
+     "global_full_local": 0.6571479188278317
+    },
+    "Coupled GLM": {
+     "random": 0.7104682605713606,
+     "local_only": 0.7044654339551926,
+     "global_only": 0.6854863753542304,
+     "global_partial_local": 0.6652378924190998,
+     "global_full_local": 0.6666085980832577
+    }
+   }
+  },
+  "B. Adherence": {
+   "better": "high",
+   "arms": {
+    "Ours (4C+soft)": {
+     "random": 0.6570424415375324,
+     "local_only": 0.33984833796277947,
+     "global_only": 0.7383369497679921,
+     "global_partial_local": 0.7480609419038803,
+     "global_full_local": 0.7763674975892257
+    },
+    "MaskGIT-flat": {
+     "random": 0.4175156058085237,
+     "local_only": 0.20295437307402317,
+     "global_only": 0.5630132943602247,
+     "global_partial_local": 0.5493507986423716,
+     "global_full_local": 0.5490154586954757
+    },
+    "3D U-Net (det.)\u2020": {
+     "random": 0.4228407025242935,
+     "local_only": 0.26359956481809416,
+     "global_only": 0.26176055385581676,
+     "global_partial_local": 0.34771667717772714,
+     "global_full_local": 0.22319480388838198
+    },
+    "3D CVAE": {
+     "random": 0.5563965275867466,
+     "local_only": 0.1960647845426513,
+     "global_only": 0.4181280923526518,
+     "global_partial_local": 0.44865395071405056,
+     "global_full_local": 0.33658038546978175
+    },
+    "Dich. Gaussian": {
+     "random": 0.25024403183295607,
+     "local_only": 0.49310021997844466,
+     "global_only": 0.45521845176910575,
+     "global_partial_local": 0.5280331636507084,
+     "global_full_local": 0.5313785650432173
+    },
+    "Coupled GLM": {
+     "random": 0.09436288675520936,
+     "local_only": 0.4399130726444238,
+     "global_only": 0.4911012419449394,
+     "global_partial_local": 0.5541977361478774,
+     "global_full_local": 0.45241598637161917
+    }
+   }
+  },
+  "C. Spatial placement, lookup-proof": {
+   "better": "high",
+   "arms": {
+    "Ours (4C+soft)": {
+     "random": 0.002912813062463323,
+     "local_only": 0.0010778724204617961,
+     "global_only": -0.01366628281103649,
+     "global_partial_local": 0.02033828621074929,
+     "global_full_local": 0.020430686519601116
+    },
+    "MaskGIT-flat": {
+     "random": 0.002392278090964657,
+     "local_only": 0.0008203187851696624,
+     "global_only": 0.005191917581218175,
+     "global_partial_local": -0.00016698866271372403,
+     "global_full_local": 0.003636209861607037
+    },
+    "3D U-Net (det.)\u2020": {
+     "random": 0.00014891641381041196,
+     "local_only": -0.00033378403862135975,
+     "global_only": -0.002720694128048262,
+     "global_partial_local": 0.013801271936916326,
+     "global_full_local": 0.0077139484983456685
+    },
+    "3D CVAE": {
+     "random": 0.001470128765660269,
+     "local_only": -0.0006977032440294295,
+     "global_only": -0.014983799346165838,
+     "global_partial_local": 0.012778002348925649,
+     "global_full_local": 0.019265808357309094
+    },
+    "Dich. Gaussian": {
+     "random": 0.009094538375567174,
+     "local_only": 0.008564099347445175,
+     "global_only": 0.015422392744902647,
+     "global_partial_local": 0.01379433414834108,
+     "global_full_local": 0.018625110476771622
+    },
+    "Coupled GLM": {
+     "random": -0.0012871969437664443,
+     "local_only": 2.6186908008263288e-05,
+     "global_only": -0.011426945298003255,
+     "global_partial_local": 0.006544351733581477,
+     "global_full_local": 0.027229772008697806
+    }
+   }
+  },
+  "D. Marginal realism": {
+   "better": "low",
+   "arms": {
+    "Ours (4C+soft)": {
+     "random": 0.24306719614886907,
+     "local_only": 0.23681779687204624,
+     "global_only": 0.2708977015600231,
+     "global_partial_local": 0.22008529942915483,
+     "global_full_local": 0.18786802584971843
+    },
+    "MaskGIT-flat": {
+     "random": 0.3059043376406322,
+     "local_only": 0.34633975222964375,
+     "global_only": 0.3516087780706026,
+     "global_partial_local": 0.39704748653207694,
+     "global_full_local": 0.4028051334521843
+    },
+    "3D U-Net (det.)\u2020": {
+     "random": 0.07677455011279508,
+     "local_only": 0.1017940196608792,
+     "global_only": 0.07191644417231458,
+     "global_partial_local": 0.11099710796200601,
+     "global_full_local": 0.06203140327605877
+    },
+    "3D CVAE": {
+     "random": 0.42961297979826407,
+     "local_only": 0.34308983125874665,
+     "global_only": 0.17045235639759185,
+     "global_partial_local": 0.2046057044676644,
+     "global_full_local": 0.23935510153825992
+    },
+    "Dich. Gaussian": {
+     "random": 0.047479954442362714,
+     "local_only": 0.041518004121840923,
+     "global_only": 0.04435876642040415,
+     "global_partial_local": 0.04959043640799351,
+     "global_full_local": 0.03649156717961461
+    },
+    "Coupled GLM": {
+     "random": 0.08763320230307839,
+     "local_only": 0.0791179734099041,
+     "global_only": 0.07926302716425157,
+     "global_partial_local": 0.08197290918744203,
+     "global_full_local": 0.07935983175965297
+    }
+   }
+  }
+ }
+}
