@@ -40,7 +40,7 @@ RAMP = LinearSegmentedColormap.from_list(
     "motif", [SURFACE, "#c3d8f2", PALETTE["pipeline"], "#14365f"])
 
 
-def _band_atlas(fig, gs):
+def _band_atlas(fig, gs, H):
     z = np.load(NPZ)
     ids, patches, ns = z["atlas_ids"], z["atlas_mean_patch"], z["atlas_n"]
     total = float(z["counts"].sum())
@@ -69,14 +69,19 @@ def _band_atlas(fig, gs):
         axt.grid(False)
         for sp in axt.spines.values():
             sp.set_visible(False)
-    fig.text(0.008, 0.965, "A", fontsize=9, weight="bold", color=INK)
-    fig.text(0.5, 0.995,
+    # Placed in inches-from-the-edge, not as a fraction of the figure. The
+    # figure height is a page-budget knob (see tools/make_paper_figures.py) and
+    # a fractional offset silently collapses onto the content when it shrinks.
+    fig.text(0.0, 1 - 0.10 / H, "A", fontsize=9, weight="bold", color=INK,
+             va="top", ha="left")
+    fig.text(0.5, 1 - 0.045 / H,
              "the twelve most-used motifs: mean real patch per entry "
              "(top, electrodes; bottom, its 6 frames)",
              ha="center", va="top", fontsize=6.5, color=INK_2)
+    return None
 
 
-def _band_reuse(fig, gs, d):
+def _band_reuse(fig, gs, d, H):
     d_V = d["V"]
     sub = gs.subgridspec(1, 2, wspace=0.34, width_ratios=[1.0, 1.15])
 
@@ -108,7 +113,7 @@ def _band_reuse(fig, gs, d):
         axm.axhline(v, color=INK, lw=0.8)
         axm.axvline(v, color=INK, lw=0.8)
     axm.set_xticks([n_org / 2 - 0.5, n_org + (len(prep) - n_org) / 2 - 0.5],
-                   ["organoid", "slice"], fontsize=6.5)
+                   ["organoid", "  slice"], fontsize=6.5)
     axm.set_yticks([n_org / 2 - 0.5, n_org + (len(prep) - n_org) / 2 - 0.5],
                    ["organoid", "slice"], fontsize=6.5)
     axm.tick_params(length=0)
@@ -124,12 +129,18 @@ def _band_reuse(fig, gs, d):
         f"{jr['mean_cross_prep']:.3f}\n"
         f"label-shuffled null {jr['null_mean']:.3f} $\\pm$ {jr['null_sd']:.3f}",
         fontsize=6.2, color=INK_2)
-    fig.text(0.008, 0.50, "B", fontsize=9, weight="bold", color=INK)
+    fig.text(0.0, ax.get_position().y1 + 0.06 / H, "B", fontsize=9,
+             weight="bold", color=INK, va="bottom", ha="left")
 
 
 def draw(fig) -> None:
     d = json.loads(SRC.read_text())
-    gs = fig.add_gridspec(2, 1, height_ratios=[1.0, 1.5], hspace=0.38,
-                          left=0.09, right=0.97, top=0.91, bottom=0.14)
-    _band_atlas(fig, gs[0])
-    _band_reuse(fig, gs[1], d)
+    # Margins in inches, converted to fractions against this figure's actual
+    # height, so the reserved strips stay the same physical size whatever
+    # height the page budget asks for.
+    H = float(fig.get_size_inches()[1])
+    gs = fig.add_gridspec(2, 1, height_ratios=[1.0, 1.5], hspace=0.42,
+                          left=0.115, right=0.97,
+                          top=1 - 0.22 / H, bottom=0.44 / H)
+    _band_atlas(fig, gs[0], H)
+    _band_reuse(fig, gs[1], d, H)

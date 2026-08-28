@@ -104,10 +104,12 @@ def draw(fig) -> None:
     handles.append(Line2D([], [], ls="none", marker="|", ms=11, mew=1.6,
                           color=PALETTE["null"],
                           label="null: recording site map"))
+    # Anchored in inches above the axes, not as a figure fraction: the figure
+    # height is a page-budget knob and a fractional anchor slides down onto the
+    # panels as the figure shrinks. The asterisk is explained in the caption,
+    # so there is no second annotation line competing for this strip.
+    H = float(fig.get_size_inches()[1])
     fig.legend(handles=handles, loc="upper center", ncol=5,
-               bbox_to_anchor=(0.5, 1.13), handletextpad=0.4,
+               bbox_to_anchor=(0.5, 1 + 0.16 / H), handletextpad=0.4,
                columnspacing=1.1, labelcolor=INK_2)
-    fig.text(0.5, 1.00, "$\\ast$  paired Wilcoxon favours ours, "
-                        "BH-FDR $q<0.05$", ha="center", va="bottom",
-             fontsize=6.5, color=INK_2)
     fig.subplots_adjust(wspace=0.12)

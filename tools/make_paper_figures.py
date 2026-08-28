@@ -39,11 +39,16 @@ from MAGVIT_project.tools.paper_figs.style import TEXT_W, apply_style  # noqa: E
 OUT = ROOT / "reports" / "paper_figures"
 MIRROR = ROOT / "paper" / "figures"
 
+# Heights are a page-budget decision, not a drawing decision. The main text is
+# capped at 9 pages and four full-width floats plus their captions were costing
+# ~2.3 of them, so each figure is drawn at the smallest height its own content
+# stays legible at. Changing a number here changes the page count; re-compile
+# and re-check before keeping an edit.
 FIGURES = [
-    ("f1_pipeline",   "f1_pipeline",   (TEXT_W, 2.2)),
-    ("f2_motifs",     "f2_motifs",     (TEXT_W, 3.2)),
-    ("f3_task_axis",  "f3_task_axis",  (TEXT_W, 2.6)),
-    ("f4_generation", "f4_generation", (TEXT_W, 2.4)),
+    ("f1_pipeline",   "f1_pipeline",   (TEXT_W, 1.55)),
+    ("f2_motifs",     "f2_motifs",     (TEXT_W, 1.95)),
+    ("f3_task_axis",  "f3_task_axis",  (TEXT_W, 1.75)),
+    ("f4_generation", "f4_generation", (TEXT_W, 1.9)),
 ]
 
 

@@ -41,7 +41,7 @@ def _box(ax, x, w, title, lines, accent=INK_2):
             va="bottom", fontsize=7.2, color=accent, weight="bold")
     for i, ln in enumerate(lines):
         ax.text(x + w / 2, 0.66 - i * 0.105, ln, transform=ax.transAxes,
-                ha="center", va="center", fontsize=5.9, color=INK_2)
+                ha="center", va="center", fontsize=5.5, color=INK_2)
 
 
 def _arrow(ax, x0, x1):
@@ -68,31 +68,31 @@ def draw(fig) -> None:
     # Text outside $...$ is NOT LaTeX here -- matplotlib's default path
     # renders "\," and "\%" literally -- so escapes are avoided and anything
     # symbolic goes through mathtext.
-    _box(ax, 0.005, 0.230, "recordings",
+    _box(ax, 0.000, 0.238, "recordings",
          [f"{prov['n_used']} recordings",
           f"{n_org} organoid, {n_sli} slice",
-          f"{min(ch)}-{max(ch)} of 26,880 sites",
+          f"{min(ch)}-{max(ch)} routed sites",
           f"20 kHz, {pre['frame_ms']:.0f} ms frames"],
          accent=INK)
-    _box(ax, 0.258, 0.196, "clip",
+    _box(ax, 0.254, 0.238, "clip",
          [f"${T}\\times{H}\\times{W}$",
           f"{pre['clip_ms']:.0f} ms, {pre['clip_voxels'] / 1e6:.2f}M voxels",
           f"rate {pre['clip_voxel_rate']:.1e}",
           f"$\\approx${pre['mean_spikes_per_clip']:.0f} spikes"])
-    _box(ax, 0.487, 0.243, "tokenise",
+    _box(ax, 0.508, 0.238, "tokenise",
          [f"patch $({pt},{ph},{pw})$",
-          f"${gt}\\times{gh}\\times{gw}$ = {gt*gh*gw:,} tokens",
+          f"${gt}{{\\times}}{gh}{{\\times}}{gw}$ = {gt*gh*gw:,} tokens",
           f"{ship['blank_frac']*100:.0f}% blank: one token",
           "residual ladder 32/8/4"],
          accent=PALETTE["pipeline"])
-    _box(ax, 0.752, 0.243, "motifs and priors",
+    _box(ax, 0.762, 0.238, "motifs and priors",
          [f"{flat['F']:,} sums $\\rightarrow$ $V$ = {flat['distinct']}",
           f"{flat['merged']} duplicates merged",
           "activity prior: where",
           "motif prior: which motif"],
          accent=PALETTE["pipeline"])
 
-    for x0, x1 in ((0.238, 0.255), (0.457, 0.484), (0.733, 0.749)):
+    for x0, x1 in ((0.241, 0.251), (0.495, 0.505), (0.749, 0.759)):
         _arrow(ax, x0, x1)
 
     ax.text(0.5, 0.16,
