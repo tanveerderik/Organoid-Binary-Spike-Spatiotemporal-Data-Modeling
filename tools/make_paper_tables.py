@@ -46,6 +46,29 @@ def _write(name: str, body: str, source: str) -> None:
     print(f"wrote {p}")
 
 
+def preproc_macros() -> None:
+    """Macros for the numbers Section 3 states about a clip.
+
+    Note \\VoxelRate is the CLIP rate, not the burst-window rate. A clip is a
+    288 ms span drawn at random inside a 600 ms window and the draw lands
+    preferentially on the active part, so the two differ by about 2x. Every
+    other number in the paper is computed on clips.
+    """
+    d = json.loads(Path("reports/preproc_stats.json").read_text())
+    m = [f"\\newcommand{{\\FrameMs}}{{{d['frame_ms']:.0f}}}",
+         f"\\newcommand{{\\WindowMs}}{{{d['window_ms']:.0f}}}",
+         f"\\newcommand{{\\ClipMs}}{{{d['clip_ms']:.0f}}}",
+         f"\\newcommand{{\\ClipFrames}}{{{d['clip_frames']}}}",
+         f"\\newcommand{{\\ClipVoxels}}{{{d['clip_voxels']:,}}}",
+         f"\\newcommand{{\\NWindows}}{{{d['n_windows']:,}}}",
+         f"\\newcommand{{\\VoxelRate}}{{{d['clip_voxel_rate']:.2e}}}",
+         f"\\newcommand{{\\SpikesPerClip}}{{{d['mean_spikes_per_clip']:.0f}}}",
+         f"\\newcommand{{\\NTrain}}{{{d['split_counts']['train']}}}",
+         f"\\newcommand{{\\NVal}}{{{d['split_counts']['val']}}}",
+         f"\\newcommand{{\\NTest}}{{{d['split_counts']['test']}}}"]
+    _write("preproc_macros.tex", "\n".join(m), "reports/preproc_stats.json")
+
+
 def data_provenance() -> None:
     """The 31 recordings, their source, and what the archive does not say."""
     d = json.loads(Path("reports/data_provenance.json").read_text())
@@ -332,6 +355,7 @@ def stage_contributions() -> None:
 
 
 def main() -> int:
+    preproc_macros()
     data_provenance()
     scalability()
     task_completion()

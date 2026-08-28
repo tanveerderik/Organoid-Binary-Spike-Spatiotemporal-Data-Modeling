@@ -1,0 +1,57 @@
+{
+ "n_windows": 2133,
+ "n_recordings": 31,
+ "raw_shape": [
+  120,
+  220,
+  12000
+ ],
+ "raw_bin_us": 50.0,
+ "window_ms": 600.0,
+ "temporal_pool": 120,
+ "frame_ms": 6.0,
+ "crop_frames_pre": 50,
+ "clip_frames": 48,
+ "clip_ms": 288.0,
+ "clip_shape": [
+  48,
+  120,
+  224
+ ],
+ "clip_voxels": 1290240,
+ "pad_w_from": 220,
+ "pad_w_to": 224,
+ "patch": [
+  6,
+  15,
+  14
+ ],
+ "token_grid": [
+  8,
+  8,
+  16
+ ],
+ "unit_mean_run_len": 1.0,
+ "ch_mean_run_len": 86.8215,
+ "window_pooled_rate": 7.594696969696969e-05,
+ "_window_rate_note": "occupancy of a whole 600 ms burst window; NOT what the paper quotes -- see clip_voxel_rate",
+ "clip_voxel_rate": 0.00016221142141148448,
+ "clip_voxel_rate_n_clips": 48,
+ "clip_voxel_rate_source": "reports/ablation_patch_size.json",
+ "mean_spikes_per_clip": 209.3,
+ "split_counts": {
+  "train": 1069,
+  "val": 426,
+  "test": 638
+ },
+ "sorter": {
+  "name": "SpyKING Circus 2 (SpikeInterface)",
+  "freq_min_hz": 300,
+  "freq_max_hz": 6000,
+  "filter": "butterworth",
+  "filter_order": 4,
+  "radius_um": 100,
+  "ms_before": 2.0,
+  "ms_after": 2.0
+ }
+}
