@@ -2128,27 +2128,27 @@ Budget **1.5 pages**. Four `\todo` blocks to replace.
 **Files:**
 - Modify: `paper/sections/04_method.tex`
 
-- [ ] **Step 1: Tokeniser**
+- [x] **Step 1: Tokeniser**
 
 Encoder/decoder over `(6,15,14)` patches on an `8×8×16` grid, 1024 tokens of 1260 voxels. The sparse encoder: 91.7% of patches are empty and route to one learned blank token, so only content patches are quantised. Three-level residual ladder 32/8/4, citing \citep{lee2022rqvae, zeghidour2022soundstream} for residual quantization and \citep{vandenoord2017vqvae} for the base. Levels are activated by staged loss-weight warm-up rather than by scaling the levels, because a level scale ≠ 1 biases the EMA target.
 
 State that codebooks are EMA-updated with `requires_grad = False`, so no loss gradient reaches the code vectors — this is what §5.6's patch-size argument depends on.
 
-- [ ] **Step 2: Flattening and deduplication**
+- [x] **Step 2: Flattening and deduplication**
 
 The 32×8×4 = 1024 ladder sums are deduplicated by pairwise relative distance `‖eᵢ−eⱼ‖ / (½(‖eᵢ‖+‖eⱼ‖))` at 0.05, giving V = 961. One sentence on why a frequency filter is the wrong criterion: frequency measures how often an entry is used, not whether two entries are the same vector, so it discards rare-but-distinct entries while leaving duplicates in place.
 
-- [ ] **Step 3: Conditioning**
+- [x] **Step 3: Conditioning**
 
 `gct`: a fixed random ±1 code per recording, regenerated from seed 0, so it is a handle rather than storage. This is what makes the per-preparation parameter cost exactly zero **and** why it licenses no zero-shot claim — both halves in the same sentence. It reaches the priors through exactly one frozen mapper, so substituting a measured descriptor is a change to that module alone; that is future work, not a result.
 
 `lct`: a learned mapper over a texton basis attached to the first ladder level.
 
-- [ ] **Step 4: Factorised prior**
+- [x] **Step 4: Factorised prior**
 
 Activity prior over the token grid; motif prior with MaskGIT-style iterative unmasking \citep{chang2022maskgit, yu2023magvit}; adaptation stage re-fitting the motif prior to the maps the activity prior actually emits. State that the adaptation stage requires the *soft* field: feeding it a hard 0/1 map is measurably worse than not adapting at all.
 
-- [ ] **Step 5: Compile and check length**
+- [x] **Step 5: Compile and check length**
 
 If §4 exceeds 1.5 pages, move the EMA/no-gradient detail and the dedup criterion to Appendix S4 and leave forward references.
 
@@ -2161,7 +2161,7 @@ Written after Experiments so the contributions claimed are the ones demonstrated
 **Files:**
 - Modify: `paper/sections/01_introduction.tex`, `paper/sections/02_related.tex`
 
-- [ ] **Step 1: Move 1 — organoid and synthetic biological intelligence**
+- [x] **Step 1: Move 1 — organoid and synthetic biological intelligence**
 
 Replace the `\todo`. Cultured human neural tissue on HD-MEAs is being driven toward closed-loop tasks \citep{kagan2022dishbrain, smirnova2023oi}. Every such system needs a *generative forward model* of the tissue's spontaneous activity: to simulate it, to provide a null against which stimulus-evoked change is measured, and to close the loop without the preparation in the room. Organoids develop rich spontaneous population dynamics \citep{trujillo2019oscillations, sharf2022organoids}, and HD-CMOS arrays now record them at single-electrode resolution across 26,400 sites \citep{ballini2014hdmea} — but no generative model exists at that resolution.
 
@@ -2169,15 +2169,15 @@ Keep this to four or five sentences. It is motivation, not a survey.
 
 One more sentence closes the loop to the method: spontaneous activity in these preparations is not uniform noise but recurring, structured population events, so the modelling question is whether those events form a small enough vocabulary to be learned once and reused — which is the question this paper answers.
 
-- [ ] **Step 2: Move 2 — disease modelling**
+- [x] **Step 2: Move 2 — disease modelling**
 
 Patient-derived organoids and resected tissue are used to study epilepsy and neurodevelopmental disorders, and phenotypes are read as differences in population activity. That requires a model of the reference distribution to difference against, and one whose capacity is *shared* across preparations rather than refit per preparation — a model with a per-preparation parameter table absorbs the phenotype it is meant to detect. Forward-reference §5.5, which measures exactly this.
 
-- [ ] **Step 3: Move 3 — why it is hard**
+- [x] **Step 3: Move 3 — why it is hard**
 
 Already written and correct. Add one sentence connecting it to the method: at this density the informative structure is *which electrodes participate together* rather than per-voxel intensity, which is why the evaluation reports site-level and voxel-level accuracy separately.
 
-- [ ] **Step 4: Contributions**
+- [x] **Step 4: Contributions**
 
 Rewrite around the motif thesis. Four items:
 
@@ -2188,21 +2188,21 @@ Rewrite around the motif thesis. Four items:
 
 The corpus itself — 31 recordings spanning organoid and *ex vivo* human tissue with per-recording provenance released — goes in the same paragraph as item 2, since it is what makes the cross-preparation reuse measurement possible at all.
 
-- [ ] **Step 5: Related work, four threads**
+- [x] **Step 5: Related work, four threads**
 
 - **Statistical models of neural populations.** \citep{macke2009dg, pillow2008glm, truccolo2005pointprocess}. Say here that both are fitted per preparation and are therefore ceilings, and forward-reference the withholding experiment.
 - **Discrete generative models.** \citep{vandenoord2017vqvae, razavi2019vqvae2, esser2021vqgan, chang2022maskgit, yu2023magvit, yu2024magvit2}. Residual quantization is \citep{lee2022rqvae, zeghidour2022soundstream} and must be cited as prior art — the contribution is the application and the flattening, not the residual ladder. Introduce MaskGIT-flat as the peer here.
 - **Organoid and MEA electrophysiology.** \citep{sharf2022organoids, sharf2025protosequences, dandi001132, trujillo2019oscillations, ballini2014hdmea, beggs2003avalanches}.
 - **Generative models for neural data.** \citep{pandarinath2018lfads, ye2021ndt}. The distinction that justifies this paper: these model firing rates of *sorted units* on tens to hundreds of channels; we model an array-level binary volume over 26,880 sites without a unit-level parameterisation.
 
-- [ ] **Step 6: Verify vocabulary**
+- [x] **Step 6: Verify vocabulary**
 
 ```
 grep -niE "generali[sz]|transfer|unseen preparation|zero-shot" paper/sections/*.tex
 ```
 Every hit must be a negation ("we do not claim…"). Any positive use is a violation of a standing constraint.
 
-- [ ] **Step 7: Compile and check length**
+- [x] **Step 7: Compile and check length**
 
 ---
 
@@ -2213,21 +2213,21 @@ Budget **0.5 + 0.2 pages**.
 **Files:**
 - Modify: `paper/sections/06_limitations.tex`, `paper/sections/07_conclusion.tex`
 
-- [ ] **Step 1: Fill the three remaining Limitations `\todo`s**
+- [x] **Step 1: Fill the three remaining Limitations `\todo`s**
 
 - **Token granularity.** Quote the site-level ceiling against our number: our own alphabet's site ceiling is 0.2548 on free generation and we reach 0.2635, i.e. 103% — so within-token *spatial* placement is not the binding constraint. Voxel-level is: ceiling 0.3254 against our 0.0174, 5%. Say plainly that within-token *timing* is the dominant residual error.
 - **Marginal statistics.** Concede with numbers: MaskGIT-flat beats us on pooled `rel_rate`, `rel_persist4` and `rel_avalanche_mean`, and the U-Net wins family D outright at 0.0620 against our 0.1879.
 - **No transformer-versus-convolution tokeniser ablation.** Already drafted; add that the nearest evidence is the spatial-embedding result for the U-Net (map r 0.039 without a positional embedding against our 0.355).
 
-- [ ] **Step 1b: Add a limitation on what the reuse measurement does and does not show**
+- [x] **Step 1b: Add a limitation on what the reuse measurement does and does not show**
 
 Shared vocabulary is not transferable capability. The reuse statistics are measured on recordings the model was trained on, the split is temporal within recording, and `gct` is a seeded random code — so a new preparation still needs training exposure. State that the measurement establishes that capacity is shared rather than tabulated, and nothing about an unseen preparation. Also state the blank-token exclusion, so a reader cannot suspect the overlap was inflated by it.
 
-- [ ] **Step 2: Add a fifth limitation — the lookup gap**
+- [x] **Step 2: Add a fifth limitation — the lookup gap**
 
 New paragraph, and the most important one. Every learned arm loses to a static per-recording site map. Frame it exactly as it is: the gap is the cost of declining to memorise, it is quantified, and §5.5 shows the memorisation does not scale. Do not spin this; a reviewer who finds it only in the appendix will not believe the rest.
 
-- [ ] **Step 3: Conclusion**
+- [x] **Step 3: Conclusion**
 
 Three or four sentences. What was built; the one-line result — a tokeniser 9.5× its matched peer and a prior that roughly doubles site-level accuracy at zero per-preparation storage; the forward pointer, that the conditioning interface is a single frozen mapper, so replacing the random per-recording code with a measured descriptor of the preparation is the route to genuine cross-preparation work.
 
@@ -2240,15 +2240,15 @@ None count toward the page limit. All three are mandatory or strongly expected.
 **Files:**
 - Modify: `paper/sections/08_statements.tex`
 
-- [ ] **Step 1: Ethics statement**
+- [x] **Step 1: Ethics statement**
 
 Required because 13 recordings are human *ex vivo* tissue from neurosurgical resection. State: both datasets are open-access on DANDI, de-identified, and used as secondary data; no new human or animal data were collected; cite the consent and IRB approval reported by each source study — **read both source papers' Methods for the exact approval language and reference numbers before writing this**; note the resected tissue was surgical waste from clinically indicated procedures. Add the dual-use position in one sentence: a forward model of neural tissue activity is a research tool and no clinical claim is made.
 
-- [ ] **Step 2: Reproducibility statement**
+- [x] **Step 2: Reproducibility statement**
 
 Anonymised code with exact commands; the checkpoint manifest `ckpts/CHECKPOINTS.md`; the pinned protocol (`--batches 12 --mc 8`, seed 20260822 for the task axis; 8 batches, seed 20260821 elsewhere); and the fact that every number is rendered from a JSON artifact by a script — naming `tools/make_paper_tables.py` and `tools/make_paper_figures.py`.
 
-- [ ] **Step 3: AI-use statement**
+- [x] **Step 3: AI-use statement**
 
 Mandatory for ICLR 2027. State plainly which parts of the work used AI assistance and in what role. Write what is true; a vague statement is worse than a specific one.
 
@@ -2261,25 +2261,25 @@ Unlimited length, and the place every "did you try X" goes.
 **Files:**
 - Modify: `paper/sections/99_appendix.tex`
 
-- [ ] **Step 1: Fill the sections whose source already exists**
+- [x] **Step 1: Fill the sections whose source already exists**
 
 S1 provenance (table generated; add the unused-recordings note), S3 preprocessing (Task 1 wrote it), S5 training protocol, S6 metrics and FDR, S7 full conditioning ladders, S8 per-task battery, S9 null construction, S10 baseline implementations and the NOMAP variants, S11 seed variance, S15 Stage 3, S16 Stage 1.
 
 Port each from the corresponding block of `reports/external_baselines/diagnostics_appendix.md`. **Port the source, not the rendered markdown** — extend a generator to emit the `.tex`. A table transcribed from markdown is a hand-typed table.
 
-- [ ] **Step 2: S4 architecture and the two cut design curves**
+- [x] **Step 2: S4 architecture and the two cut design curves**
 
 Full architecture, plus the patch-size sweep (13 rows) and ladder-depth increments that were cut from the main text.
 
-- [ ] **Step 3: S12 rejected designs**
+- [x] **Step 3: S12 rejected designs**
 
 Brief, framed as negative results, never as ablations of the shipped model: the refinement variant; the zero-gated decoder cross-attention whose conditional and unconditional validation curves are bit-identical across all 300 epochs; the continuous alpha/hull adapter with 25 logged series identically zero throughout; and the generation composite. This section exists to pre-empt "did you try X", nothing more.
 
-- [ ] **Step 4: S13 within-token blur**
+- [x] **Step 4: S13 within-token blur**
 
 Two attempted fixes, both rejected, with the cost of each: the peak term, and the entropy constraint that cost 28% AUPRC to close 1–4% of the gap.
 
-- [ ] **Step 5: S14 reproducibility**
+- [x] **Step 5: S14 reproducibility**
 
 Exact commands, checkpoint manifest, pinned protocol.
 
@@ -2287,7 +2287,7 @@ Exact commands, checkpoint manifest, pinned protocol.
 
 ## Task 14: Trim, verify, and prepare the release
 
-- [ ] **Step 1: Compile and measure**
+- [x] **Step 1: Compile and measure**
 
 ```
 cd paper && pdflatex main && bibtex main && pdflatex main && pdflatex main
@@ -2295,14 +2295,14 @@ cd paper && pdflatex main && bibtex main && pdflatex main && pdflatex main
 
 Count pages of main text, excluding references, appendix and the three statements. Target ≤ 9.
 
-- [ ] **Step 2: Verify no LaTeX drafting artifacts remain**
+- [x] **Step 2: Verify no LaTeX drafting artifacts remain**
 
 ```
 grep -c "todo{" paper/sections/*.tex paper/main.tex
 ```
 Expected: 0 everywhere. Then set `\newcommand{\todo}[1]{}` in `main.tex` and confirm the log is clean.
 
-- [ ] **Step 3: Verify anonymity**
+- [x] **Step 3: Verify anonymity**
 
 ```
 grep -n "iclrfinalcopy" paper/main.tex          # must still be commented out
@@ -2310,7 +2310,7 @@ grep -rniE "derik|tanveerderik|/media/|Seagate" paper/
 ```
 Expected: the first shows a commented line; the second returns nothing.
 
-- [ ] **Step 4: Verify every number is generated**
+- [x] **Step 4: Verify every number is generated**
 
 ```
 cd "/media/derik/Seagate Desktop Drive/organoid_data/MAGVIT_project"
@@ -2322,21 +2322,21 @@ git status --porcelain reports/
 ```
 A dirty `reports/` after a clean regeneration means an artifact was edited by hand. Investigate before continuing.
 
-- [ ] **Step 5: Verify the terminology constraint**
+- [x] **Step 5: Verify the terminology constraint**
 
 ```
 grep -n "reconstruction" paper/main.tex paper/sections/*.tex
 ```
 No occurrence may refer to task 0. Task 0 is *free generation (zero context)*.
 
-- [ ] **Step 6: Verify the pipeline still passes its own tests**
+- [x] **Step 6: Verify the pipeline still passes its own tests**
 
 ```
 /home/derik/anaconda3/envs/pytorch/bin/python -m pytest tests/ -q
 ```
 And confirm `diagnostics.md` and `diagnostics_appendix.md` still re-render byte-identical (md5 `86073e2f…` and `2960b10b…`).
 
-- [ ] **Step 7: Extend the release scrubber**
+- [x] **Step 7: Extend the release scrubber**
 
 `tools/make_release.py` does not yet remove the GitHub remote URL, the `/media/derik/` absolute paths, or the `@author` headers. All three are desk-reject conditions in a supplementary code bundle. Add them, then verify the export imports from a clean directory:
 
@@ -2345,7 +2345,7 @@ And confirm `diagnostics.md` and `diagnostics_appendix.md` still re-render byte-
 grep -rniE "derik|tanveerderik|/media/|Seagate" <export>
 ```
 
-- [ ] **Step 8: Final commit**
+- [x] **Step 8: Final commit**
 
 ```bash
 git add tools/ reports/ docs/ tests/
