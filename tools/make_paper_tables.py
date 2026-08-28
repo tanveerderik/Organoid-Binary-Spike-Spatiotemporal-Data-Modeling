@@ -361,6 +361,140 @@ def stage_contributions() -> None:
            "reports/ablation_ladder_decode_depth.json")
 
 
+# ---------------------------------------------------------------------------
+# Appendix tables. Same rule: read the artifact, never retype it.
+# ---------------------------------------------------------------------------
+
+def app_patch_sweep() -> None:
+    """The full patch-size sweep cut from the main text.
+
+    The point of showing all of it is that the two columns disagree: capture
+    rises monotonically as the patch shrinks while the blank fraction rises
+    with it, and the prior is what pays for the blanks.
+    """
+    src = Path("reports/ablation_patch_size.json")
+    d = json.loads(src.read_text())
+    rows = []
+    for r in sorted(d["rows"], key=lambda r: -r["voxels_per_patch"]):
+        t, h, w = r["patch"]
+        lab = f"$({t},{h},{w})$"
+        if r["is_shipped"]:
+            lab = "\\textbf{" + lab + "} (shipped)"
+        rows.append(f"{lab} & {r['voxels_per_patch']} & {r['n_tokens']} & "
+                    f"{r['blank_frac']*100:.1f} & {r['active_tokens']:.1f} & "
+                    f"{r['spikes_per_active']:.2f} & {r['capture_k32']:.4f} \\\\")
+    body = ("\\begin{tabular}{l r r r r r r}\n\\toprule\n"
+            "patch $(T,H,W)$ & voxels & tokens & blank \\% & active tok. & "
+            "spikes/active & capture$_{K=32}$ \\\\\n\\midrule\n"
+            + "\n".join(rows) + "\n\\bottomrule\n\\end{tabular}")
+    _write("a_patch_sweep.tex", body, str(src))
+
+
+def app_texton_basis() -> None:
+    """Which basis the Stage 3 textons are clustered on, and how many.
+
+    Rendered as delta-NLL against that basis's own marginal, so the six cells
+    are comparable despite having different base entropies -- which are given
+    in the row below the table by the caller.
+    """
+    src = Path("reports/analysis_stage1c_texton_basis.json")
+    last = json.loads(src.read_text())["log"][-1]
+    bases = [("z1_32", "$z_1$, 32"), ("z1_128", "$z_1$, 128"),
+             ("z12_32", "$z_1{+}z_2$, 32"), ("z12_128", "$z_1{+}z_2$, 128"),
+             ("flat_32", "flat, 32"), ("flat_128", "flat, 128")]
+    rows = []
+    for key, lab in bases:
+        cells = " & ".join(f"{last['arms'][a][key]['dnll']:.4f}"
+                           for a in ("lct", "gct", "both"))
+        rows.append(f"{lab} & {last['base'][key]:.4f} & {cells} \\\\")
+    body = ("\\begin{tabular}{l r r r r}\n\\toprule\n"
+            "basis, \\#textons & base NLL & $\\Delta$\\texttt{lct} & "
+            "$\\Delta$\\texttt{gct} & $\\Delta$both \\\\\n\\midrule\n"
+            + "\n".join(rows) + "\n\\bottomrule\n\\end{tabular}")
+    _write("a_texton_basis.tex", body, str(src))
+
+
+def app_seed_spread() -> None:
+    """The adaptation stage across four seeds, including the shipped one.
+
+    The shipped checkpoint is not the best of the four. It is the one the
+    validation metric selected, and it is kept for exactly that reason.
+    """
+    src = Path("reports/stage4c_seed_spread.json")
+    d = json.loads(src.read_text())
+    rows = []
+    for key in ("shipped", "101", "202", "303"):
+        v = d[key]
+        lab = "\\textbf{shipped}" if key == "shipped" else f"seed {key}"
+        rows.append(f"{lab} & {v['best_epoch']} & {v['epochs_run']} & "
+                    f"{v['best_mrr']:.5f} & {v['oracle_at_best']:.5f} \\\\")
+    sm = d["_summary"]
+    rows += ["\\midrule",
+             f"mean $\\pm$ sd & & & {sm['mean_best_val_mrr']:.5f} "
+             f"$\\pm$ {sm['sd_best_val_mrr']:.5f} & \\\\"]
+    body = ("\\begin{tabular}{l r r r r}\n\\toprule\n"
+            "run & best epoch & epochs & val MRR & oracle MRR \\\\\n"
+            "\\midrule\n" + "\n".join(rows) + "\n\\bottomrule\n"
+            "\\end{tabular}")
+    _write("a_seed_spread.tex", body, str(src))
+
+
+def app_generation_ladders() -> None:
+    """All five conditioning rungs for all four generation families.
+
+    The collapsed main-text table keeps only the first and last rung; the
+    monotonicity between them is the evidence that conditioning is used, so
+    the full ladder belongs somewhere.
+    """
+    src = EB / "generation_families.json"
+    d = json.loads(src.read_text())
+    rungs = d["rungs"]
+    head = " & ".join(_esc(r.replace("_", " ")) for r in rungs)
+    blocks = []
+    for fam, blk in d["families"].items():
+        arrow = "$\\downarrow$" if blk["better"] == "low" else "$\\uparrow$"
+        blocks.append("\\multicolumn{6}{l}{\\textbf{" + _esc_title(_esc(fam))
+                      + "} " + arrow + "} \\\\")
+        for arm, vals in blk["arms"].items():
+            cells = " & ".join(f"{vals[r]:.4f}" for r in rungs)
+            blocks.append(f"\\quad {_esc(arm)} & {cells} \\\\")
+        blocks.append("\\midrule")
+    blocks = blocks[:-1]
+    body = ("\\begin{tabular}{l r r r r r}\n\\toprule\n"
+            f"arm & {head} \\\\\n\\midrule\n"
+            + "\n".join(blocks) + "\n\\bottomrule\n\\end{tabular}")
+    _write("a_generation_ladders.tex", body, str(src))
+
+
+def app_withheld_map() -> None:
+    """What the two lookup arms are worth once their per-recording map is gone.
+
+    Adherence is `lct_r_mean_vs_used` and the gap is `within_assay_gap`, both
+    at the full-context rung, exactly as the diagnostics block reads them.
+    """
+    rows = []
+    for key, lab in (("dg", "Dich.\\ Gaussian"), ("glm", "Coupled GLM")):
+        with_map = json.loads((EB / f"diagnose_{key}.json").read_text())
+        without = json.loads((EB / f"diagnose_{key}_NOMAP.json").read_text())
+        a = with_map["context_and_space"]["regimes"]["global_full_local"]
+        b = without["context_and_space"]["regimes"]["global_full_local"]
+        rows.append(f"{lab} & {a['within_assay_gap']:+.4f} & "
+                    f"{b['within_assay_gap']:+.4f} & "
+                    f"{a['lct_r_mean_vs_used']:+.4f} & "
+                    f"{b['lct_r_mean_vs_used']:+.4f} & "
+                    f"{a['map_pearson_r']:.4f} & {b['map_pearson_r']:.4f} "
+                    f"\\\\")
+    body = ("\\begin{tabular}{l r r r r r r}\n\\toprule\n"
+            "\\emph{ref} arm & \\multicolumn{2}{c}{within-recording gap} & "
+            "\\multicolumn{2}{c}{adherence} & "
+            "\\multicolumn{2}{c}{map $r$} \\\\\n"
+            "\\cmidrule(lr){2-3}\\cmidrule(lr){4-5}\\cmidrule(lr){6-7}\n"
+            " & with & without & with & without & with & without "
+            "\\\\\n\\midrule\n"
+            + "\n".join(rows) + "\n\\bottomrule\n\\end{tabular}")
+    _write("a_withheld_map.tex", body, "reports/external_baselines/diagnose_{dg,glm}[_NOMAP].json")
+
+
 def main() -> int:
     preproc_macros()
     data_provenance()
@@ -370,6 +504,11 @@ def main() -> int:
     motif_reuse()
     stage_contributions()
     stage_prior_ladder()
+    app_patch_sweep()
+    app_texton_basis()
+    app_seed_spread()
+    app_generation_ladders()
+    app_withheld_map()
     print("\nRemaining tables are trims of rendered blocks in "
           "reports/external_baselines/diagnostics.md; port them here as they "
           "are finalised so nothing in the paper is hand-typed.")
