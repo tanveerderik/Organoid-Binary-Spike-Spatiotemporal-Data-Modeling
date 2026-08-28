@@ -46,6 +46,13 @@ def _write(name: str, body: str, source: str) -> None:
     print(f"wrote {p}")
 
 
+def _sci(x: float, sig: int = 2) -> str:
+    """Math-mode scientific notation. `1.62e-04` typesets as literal text in a
+    sentence; the macro is used in prose, so it has to arrive as math."""
+    mant, exp = f"{x:.{sig}e}".split("e")
+    return f"$%s\\times 10^{{%d}}$" % (mant, int(exp))
+
+
 def preproc_macros() -> None:
     """Macros for the numbers Section 3 states about a clip.
 
@@ -61,7 +68,7 @@ def preproc_macros() -> None:
          f"\\newcommand{{\\ClipFrames}}{{{d['clip_frames']}}}",
          f"\\newcommand{{\\ClipVoxels}}{{{d['clip_voxels']:,}}}",
          f"\\newcommand{{\\NWindows}}{{{d['n_windows']:,}}}",
-         f"\\newcommand{{\\VoxelRate}}{{{d['clip_voxel_rate']:.2e}}}",
+         f"\\newcommand{{\\VoxelRate}}{{{_sci(d['clip_voxel_rate'])}}}",
          f"\\newcommand{{\\SpikesPerClip}}{{{d['mean_spikes_per_clip']:.0f}}}",
          f"\\newcommand{{\\NTrain}}{{{d['split_counts']['train']}}}",
          f"\\newcommand{{\\NVal}}{{{d['split_counts']['val']}}}",
