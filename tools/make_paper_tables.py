@@ -417,26 +417,41 @@ def app_texton_basis() -> None:
 def app_seed_spread() -> None:
     """The adaptation stage across four seeds, including the shipped one.
 
-    The shipped checkpoint is not the best of the four. It is the one the
-    validation metric selected, and it is kept for exactly that reason.
+    Two metrics, and they disagree, which is the point of showing both. Val MRR
+    is what selected the shipped checkpoint; deployment MRR on the test split is
+    what it is worth. The shipped run is the WORST of the four on deployment.
+    Swapping in the best-deploying seed after the fact would be selecting on
+    test, so the val-selected checkpoint ships and the table says so.
     """
     src = Path("reports/stage4c_seed_spread.json")
+    dep_src = Path("reports/stage4c_seed_deployment.json")
     d = json.loads(src.read_text())
+    dep = json.loads(dep_src.read_text())["deployment_mrr"]
     rows = []
     for key in ("shipped", "101", "202", "303"):
         v = d[key]
         lab = "\\textbf{shipped}" if key == "shipped" else f"seed {key}"
+        dk = "shipped" if key == "shipped" else f"seed{key}"
         rows.append(f"{lab} & {v['best_epoch']} & {v['epochs_run']} & "
-                    f"{v['best_mrr']:.5f} & {v['oracle_at_best']:.5f} \\\\")
+                    f"{v['best_mrr']:.5f} & {dep[dk]:.5f} \\\\")
+    dd = json.loads(dep_src.read_text())
     sm = d["_summary"]
     rows += ["\\midrule",
              f"mean $\\pm$ sd & & & {sm['mean_best_val_mrr']:.5f} "
-             f"$\\pm$ {sm['sd_best_val_mrr']:.5f} & \\\\"]
+             f"$\\pm$ {sm['sd_best_val_mrr']:.5f} & "
+             f"{dd['mean']:.5f} $\\pm$ {dd['sd']:.5f} \\\\",
+             "\\midrule",
+             f"\\emph{{ref}} no adaptation, soft field & & & & "
+             f"{dd['ref_4a_soft']:.5f} \\\\",
+             f"\\emph{{ref}} no adaptation, hard map & & & & "
+             f"{dd['ref_4a_hard']:.5f} \\\\",
+             f"\\emph{{ref}} oracle activity map & & & & "
+             f"{dd['oracle']:.5f} \\\\"]
     body = ("\\begin{tabular}{l r r r r}\n\\toprule\n"
-            "run & best epoch & epochs & val MRR & oracle MRR \\\\\n"
+            "run & best epoch & epochs & val MRR & deployment MRR \\\\\n"
             "\\midrule\n" + "\n".join(rows) + "\n\\bottomrule\n"
             "\\end{tabular}")
-    _write("a_seed_spread.tex", body, str(src))
+    _write("a_seed_spread.tex", body, f"{src}, {dep_src}")
 
 
 def app_generation_ladders() -> None:
