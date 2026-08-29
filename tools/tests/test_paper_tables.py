@@ -49,8 +49,14 @@ def test_task_completion_has_both_metrics_all_arms_and_the_null():
     # arm loses to it, and a table that omits it overstates the result.
     assert "recording site map, seen" in t
     assert "recording site map, unseen" in t
-    # Its free-generation values, site and voxel.
-    assert "0.7205" in t and "0.0869" in t
+    # Its free-generation values, site and voxel. Pinned so the row cannot be
+    # emitted empty. Updated 2026-08-29 from 0.7205/0.0869, which were measured
+    # under the old 12/8-batch prefix budget; at the full 70-batch protocol the
+    # same row reads 0.6796/0.0670. If these need changing again, confirm the
+    # eval budget moved before editing them -- a silent drift here would mean
+    # the table is being regenerated from something other than the pinned
+    # protocol.
+    assert "0.6796" in t and "0.0670" in t
 
 
 def test_generation_table_has_four_families_six_arms_and_per_arm_nulls():
