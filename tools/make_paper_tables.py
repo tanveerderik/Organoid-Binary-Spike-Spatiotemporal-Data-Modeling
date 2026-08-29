@@ -695,6 +695,47 @@ def stage_chronology() -> None:
     _write("t1_stages.tex", body, "reports/hyperparameters.json")
 
 
+def app_cvae_collapse() -> None:
+    """What was done to stop the CVAE's latent collapsing, and what happened.
+
+    A reviewer's first thought on reading "the latent collapses" is that the
+    arm was under-tuned so that it would. The answer is the list of standard
+    anti-collapse measures, all of which were applied, and two independent fits
+    that collapse anyway -- so the settings and the outcome are both read from
+    the fit reports rather than asserted in a sentence.
+    """
+    rows, cfg = [], None
+    for name, label in (("cvae3d", "shipped"),
+                        ("cvae3d_nopos", "no positional embedding")):
+        d = json.loads(Path(f"ckpts/external_baselines/{name}.fit.json").read_text())
+        cfg = cfg or d["config"]
+        k = d["val_kl_per_dim_per_epoch"]
+        rows.append(f"{label} & {d['epochs_run']} & {max(k):.4f} & "
+                    f"{d['final_val_kl_per_dim']:.4f} & "
+                    f"{'yes' if d['latent_collapsed'] else 'no'} \\\\")
+    note = (
+        "Both fits carry the standard anti-collapse measures: a "
+        "\\emph{conditional} prior $p(z \\mid c)$ in place of "
+        "$\\mathcal{N}(0, I)$; the KL down-weighted to $\\beta = "
+        f"{cfg['beta']}$; KL warm-up over the first "
+        f"{cfg['kl_warmup_frac'] * 100:.0f}\\% of training; free bits at "
+        f"{cfg['free_bits']} applied \\emph{{per channel}}, which is where "
+        "collapse happens; the KL charged only on the latent cells the hole "
+        "touches, so the latent is not taxed for what the skip connections "
+        "already carry; and the posterior log-variance initialised at "
+        f"${cfg['post_logvar_init']}$. The latent is a {cfg['z_ch']}-channel "
+        "grid and not a global vector, so it can say \\emph{where} the extra "
+        "spikes go.")
+    body = ("\\begin{tabular}{@{}l r r r l@{}}\n\\toprule\n"
+            "fit & epochs & peak val KL/dim & final val KL/dim & collapsed "
+            "\\\\\n\\midrule\n" + "\n".join(rows)
+            + "\n\\bottomrule\n\\end{tabular}\n\n\\vspace{0.4em}\n\n"
+            "\\begin{minipage}{\\textwidth}\\footnotesize\n" + note
+            + "\n\\end{minipage}")
+    _write("a_cvae_collapse.tex", body,
+           "ckpts/external_baselines/cvae3d*.fit.json")
+
+
 def app_objectives() -> None:
     """Every loss term of every stage, with its coefficient and its job.
 
@@ -785,6 +826,7 @@ def main() -> int:
     app_seed_spread()
     app_generation_ladders()
     app_withheld_map()
+    app_cvae_collapse()
     app_objectives()
     app_hyperparameters()
     app_pooled_marginals()
