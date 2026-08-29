@@ -641,6 +641,39 @@ def app_pooled_marginals() -> None:
            "reports/external_baselines/comparison.json")
 
 
+def app_objectives() -> None:
+    """Every loss term of every stage, with its coefficient and its job.
+
+    The Method names these terms and says what each constrains; without this
+    table that pointer has nowhere to land. Coefficients come from
+    `tools/extract_hparams.py`, which reads them out of the source -- including
+    two that no obvious source line reports correctly, Stage 2A's context
+    weight (rebound at runtime) and Stage 4B's lambdas (one of two config
+    dicts). The descriptions are prose and live in that generator.
+    """
+    d = json.loads(Path("reports/hyperparameters.json").read_text())
+    rows = []
+    for obj in d["objectives"]:
+        rows.append(f"\\multicolumn{{3}}{{l}}{{\\textbf{{Stage {_esc(obj['stage'])}}}"
+                    f"\\quad ${obj['symbol']}$}} \\\\[0.15em]")
+        for t in obj["terms"]:
+            rows.append(f"\\quad {_esc(t['term'])} & {_esc(_val(t['coeff']))} & "
+                        f"{_esc(t['constrains'])} \\\\")
+        rows.append("\\addlinespace")
+    off = "; ".join(f"{_esc(x['where'])}, {_esc(x['what'])} ({_esc(x['why'])})"
+                    for x in d["disabled"])
+    body = (
+        "\\begin{tabular}{@{}l l p{0.52\\textwidth}@{}}\n\\toprule\n"
+        "term & coefficient & what it constrains \\\\\n\\midrule\n"
+        + "\n".join(rows[:-1])
+        + "\n\\bottomrule\n\\end{tabular}\n\n\\vspace{0.4em}\n\n"
+        "\\begin{minipage}{\\textwidth}\\footnotesize\n"
+        "Coefficients are constant unless noted; the ramps and curricula are in "
+        "Appendix~\\ref{app:training}. Present in the code and inactive in the "
+        f"shipped configuration: {off}.\n\\end{{minipage}}")
+    _write("a_objectives.tex", body, "reports/hyperparameters.json")
+
+
 def app_hyperparameters() -> None:
     """One row per shipped stage, from the source rather than from prose.
 
@@ -696,6 +729,7 @@ def main() -> int:
     app_seed_spread()
     app_generation_ladders()
     app_withheld_map()
+    app_objectives()
     app_hyperparameters()
     app_pooled_marginals()
     print("\nRemaining tables are trims of rendered blocks in "

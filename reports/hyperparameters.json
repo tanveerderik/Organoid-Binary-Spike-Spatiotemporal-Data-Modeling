@@ -80,10 +80,6 @@
       "early_stop_patience": 150,
       "select_on": "val MRR",
       "loss_terms": {
-        "$(z_1,\\alpha)$ weights": [
-          1.0,
-          0.1
-        ],
         "lambda_z1_neighbor_ce": 0.05,
         "lambda_ctx": 0.25,
         "lambda_adj": 0.25,
@@ -130,6 +126,210 @@
         "readout": "gumbel",
         "soft_field": true
       }
+    }
+  ],
+  "objectives": [
+    {
+      "stage": "1",
+      "symbol": "\\mathcal{L}_{\\mathrm{global}}",
+      "terms": [
+        {
+          "term": "support, token grid",
+          "coeff": "outside 2.0, mass 1.0",
+          "constrains": "cover the recording's active sites, penalise mass outside them, match the total"
+        },
+        {
+          "term": "support, full array",
+          "coeff": "outside 3.0, mass 2.0",
+          "constrains": "the same at electrode resolution; ramped in as the token arm decays"
+        },
+        {
+          "term": "separation",
+          "coeff": 0.0001,
+          "constrains": "repel the predicted maps of recordings whose true maps already differ, at margin 0.25"
+        },
+        {
+          "term": "adjacency",
+          "coeff": 0.5,
+          "constrains": "match the recording's same-site short-gap rates"
+        }
+      ]
+    },
+    {
+      "stage": "2A",
+      "symbol": "\\mathcal{L}_{\\mathrm{tok}}",
+      "terms": [
+        {
+          "term": "tolerant spike reconstruction",
+          "coeff": "100 to 1 over 100 epochs",
+          "constrains": "exact BCE at a decaying positive weight, plus max-pooled hit, peak-margin and multi-count terms"
+        },
+        {
+          "term": "vector quantisation",
+          "coeff": 1.0,
+          "constrains": "commitment at $\\beta = 0.25$ plus a usage-entropy term at 0.001 against a detached codebook; codebooks are EMA at decay 0.95"
+        },
+        {
+          "term": "context",
+          "coeff": 2.8,
+          "constrains": "the nine local moments recomputed from the decoder's own logits must match the clip's true descriptor"
+        },
+        {
+          "term": "context field",
+          "coeff": 0.05,
+          "constrains": "the same nine moments per patch rather than per clip"
+        },
+        {
+          "term": "spatial, token grid",
+          "coeff": 0.001,
+          "constrains": "no mass where the recording's support map forbids it"
+        },
+        {
+          "term": "spatial, full array",
+          "coeff": 0.0001,
+          "constrains": "the same at electrode resolution, ramped in late"
+        },
+        {
+          "term": "short-gap rate",
+          "coeff": 0.01,
+          "constrains": "same-site inter-spike gaps must not exceed or fall short of the recording's measured rates"
+        },
+        {
+          "term": "code norm",
+          "coeff": 0.1,
+          "constrains": "a soft ceiling on encoder output norms, so codes do not drift out of the EMA's reach"
+        },
+        {
+          "term": "blank hinge",
+          "coeff": 0.05,
+          "constrains": "empty patches must not produce spike logits"
+        },
+        {
+          "term": "blank/active separation",
+          "coeff": 0.01,
+          "constrains": "the decoder's blank and content embeddings stay apart"
+        },
+        {
+          "term": "encoder isotropy",
+          "coeff": 1.0,
+          "constrains": "a variance floor and an off-diagonal correlation penalty, against encoder collapse"
+        }
+      ]
+    },
+    {
+      "stage": "3",
+      "symbol": "\\mathcal{L}_{\\mathrm{local}}",
+      "terms": [
+        {
+          "term": "texton multinomial NLL",
+          "coeff": 1.0,
+          "constrains": "the predicted distribution over the 128-texton basis must match the clip's soft texton histogram"
+        },
+        {
+          "term": "flat-code multinomial NLL",
+          "coeff": 1.0,
+          "constrains": "the same against the $V{=}961$ alphabet"
+        },
+        {
+          "term": "regional summary",
+          "coeff": 1.0,
+          "constrains": "squared error on per-code mean time and per-frame active fraction"
+        }
+      ]
+    },
+    {
+      "stage": "4A / 4C",
+      "symbol": "\\mathcal{L}_{M}",
+      "terms": [
+        {
+          "term": "categorical cross-entropy",
+          "coeff": 1.0,
+          "constrains": "the correct motif at each masked active cell"
+        },
+        {
+          "term": "neighbourhood CE",
+          "coeff": 0.05,
+          "constrains": "partial credit over the five codebook-nearest alternatives at temperature 0.25, so a near miss in alphabet geometry is not a total miss"
+        },
+        {
+          "term": "expected code distance",
+          "coeff": 0.05,
+          "constrains": "the whole predicted distribution is pulled toward the target's neighbourhood, not just its mode"
+        },
+        {
+          "term": "context",
+          "coeff": 0.25,
+          "constrains": "soft-decode the motif logits through the frozen tokeniser; the result's nine moments must match the clip"
+        },
+        {
+          "term": "context field",
+          "coeff": 0.05,
+          "constrains": "the same moment match evaluated per patch, so a clip cannot be right on average and wrong everywhere"
+        },
+        {
+          "term": "adjacency",
+          "coeff": 0.25,
+          "constrains": "the decoded volume's short-gap rates must match the recording's"
+        },
+        {
+          "term": "spatial",
+          "coeff": 0.25,
+          "constrains": "no decoded mass outside the recording's support map"
+        }
+      ]
+    },
+    {
+      "stage": "4B",
+      "symbol": "\\mathcal{L}_{A}",
+      "terms": [
+        {
+          "term": "per-cell BCE",
+          "coeff": 1.0,
+          "constrains": "active against blank at each token cell, at positive weight 1.0 -- deliberately not the class-balancing ratio, which over-produces"
+        },
+        {
+          "term": "count",
+          "coeff": 0.065,
+          "constrains": "one categorical over the clip's total active count, with an ordinal neighbour term at 0.25 and an expected-distance term at 0.05 so a near-miss count is scored as one"
+        },
+        {
+          "term": "temporal co-activation",
+          "coeff": 0.1,
+          "constrains": "the predicted field's co-activation rate along time must match the batch's"
+        },
+        {
+          "term": "spatial co-activation",
+          "coeff": 0.1,
+          "constrains": "the same co-activation match taken across the array instead of along time"
+        },
+        {
+          "term": "spatial support",
+          "coeff": 0.02,
+          "constrains": "no predicted activity in columns the true map leaves empty"
+        }
+      ]
+    }
+  ],
+  "disabled": [
+    {
+      "where": "Stage 2A",
+      "what": "token-profile entropy",
+      "why": "the within-token blur experiment; reported as a failure and not shipped"
+    },
+    {
+      "where": "Stage 4A/4C",
+      "what": "the second entry of loss_weights (0.1)",
+      "why": "the alpha head it weighted was removed; the motif prior reads loss_weights[0] only"
+    },
+    {
+      "where": "Stage 2A",
+      "what": "false-positive weighting",
+      "why": "tolerant_spike_loss is called with fp_weight 0, so the hallucination penalty is inactive"
+    },
+    {
+      "where": "Stage 2A",
+      "what": "latent masking, CFG dropout",
+      "why": "both off in the shipped run"
     }
   ]
 }
