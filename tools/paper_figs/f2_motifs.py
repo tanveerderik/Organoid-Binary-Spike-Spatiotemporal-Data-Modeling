@@ -2,7 +2,7 @@
 
 The paper's identity figure. Two bands, one question each.
 
-Band A, the atlas: the twelve most-used alphabet entries, each drawn as the
+Band A, the atlas: the most-used alphabet entries, each drawn as the
 MEAN REAL VOXEL PATCH the encoder assigned to it across the test split. This is
 deliberately not a decoder rendering. A decoded codebook entry shows what the
 model believes a code means; the empirical mean shows what the data does under
@@ -33,7 +33,12 @@ ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "reports" / "analysis_motif_reuse.json"
 NPZ = ROOT / "reports" / "analysis_motif_reuse.npz"
 
-N_TILES = 12
+# Eight, not twelve. A (15,14) electrode patch drawn 1/12th of the text width
+# is 24 px in print and the motif structure is not readable at that size; the
+# figure's job is to show what a motif IS, and four more examples do not help
+# if none of them can be seen. The tile count and the figure height in
+# tools/make_paper_figures.py are the two knobs on this band's legibility.
+N_TILES = 8
 # Sequential = one hue, light to dark, from the chart surface to the series
 # colour. Never a rainbow: this encodes magnitude, not identity.
 RAMP = LinearSegmentedColormap.from_list(
@@ -57,7 +62,7 @@ def _band_atlas(fig, gs, H):
         ax.set_xticks([]); ax.set_yticks([])
         for sp in ax.spines.values():
             sp.set_edgecolor("#d9d8d2"); sp.set_linewidth(0.5)
-        ax.set_title(f"{ns[i] / total * 100:.1f}%", fontsize=5.2,
+        ax.set_title(f"{ns[i] / total * 100:.1f}%", fontsize=6.0,
                      color=INK_2, pad=1.5)
         # Its temporal profile over the patch's six frames.
         axt = fig.add_subplot(sub[1, i])
@@ -75,7 +80,7 @@ def _band_atlas(fig, gs, H):
     fig.text(0.0, 1 - 0.10 / H, "A", fontsize=9, weight="bold", color=INK,
              va="top", ha="left")
     fig.text(0.5, 1 - 0.045 / H,
-             "the twelve most-used motifs: mean real patch per entry "
+             f"the {N_TILES} most-used motifs: mean real patch per entry "
              "(top, electrodes; bottom, its 6 frames)",
              ha="center", va="top", fontsize=6.5, color=INK_2)
     return None

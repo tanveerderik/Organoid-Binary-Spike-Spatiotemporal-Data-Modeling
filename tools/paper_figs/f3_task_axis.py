@@ -70,12 +70,20 @@ def _panel(ax, fam, fld, ours, arm, verdict, nulls, title, show_legend):
             # Ours and the flat tokenizer land within 0.002 on three of the
             # four voxel rows -- that near-identity is a result, and it has to
             # be visible as two marks rather than one.
+            #
+            # Ours draws on top. On the free-generation voxel row the two means
+            # differ by 0.0003, which is under a marker width, and with a shared
+            # zorder the flat square painted over us: the row carrying a
+            # significance star showed no blue mark at all. Our marker is the
+            # one the star refers to, so it takes the top layer and the flat
+            # arm reads as the ring behind it.
             ax.plot(v, y, marker=MARKER[key], ms=5.5 if categorical else 4.5,
                     color=PALETTE[key],
                     mfc=PALETTE[key] if categorical else "none",
                     mec=SURFACE if categorical else PALETTE[key],
                     mew=1.0 if categorical else 1.2,
-                    ls="none", zorder=4, label="_nolegend_")
+                    ls="none", zorder=6 if key == "pipeline" else 4,
+                    label="_nolegend_")
     ax.set_yticks(ys, [t for _, t in TASKS])
     ax.set_xlabel(title)
     ax.set_ylim(-0.6, len(TASKS) - 0.4)

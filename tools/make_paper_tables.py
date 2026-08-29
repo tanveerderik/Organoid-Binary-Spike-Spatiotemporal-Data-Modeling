@@ -76,6 +76,57 @@ def preproc_macros() -> None:
     _write("preproc_macros.tex", "\n".join(m), "reports/preproc_stats.json")
 
 
+def eval_macros() -> None:
+    """Macros for numbers the main text states about the evaluation itself.
+
+    These move with the pinned protocol, so they are read from the artifacts
+    rather than written into the prose. \\CeilingFactor in particular is a
+    ratio of two oracle-code scores and would otherwise be a hand-computed
+    number sitting in the abstract.
+    """
+    ours = json.loads((EB / "task_eval_pipeline.json").read_text())
+    flat = json.loads((EB / "task_eval_maskgit_flat.json").read_text())
+    o = ours["tasks"]["recon"]["arms"]["oracle"]
+    f = flat["tasks"]["recon"]["arms"]["oracle"]
+    m = [f"\\newcommand{{\\CeilingFactor}}{{{o['mean'] / f['mean']:.1f}}}",
+         f"\\newcommand{{\\OracleOurs}}{{{o['mean']:.4f}}}",
+         f"\\newcommand{{\\OracleFlat}}{{{f['mean']:.4f}}}",
+         f"\\newcommand{{\\OracleOursSite}}{{{o['site_mean']:.4f}}}",
+         f"\\newcommand{{\\OracleFlatSite}}{{{f['site_mean']:.4f}}}"]
+
+    b = json.loads(Path("reports/eval_budget.json").read_text())
+
+    # The manuscript says every number comes from one pinned protocol scored
+    # identically for every arm. That is a claim about the runs, so it is
+    # checked here rather than trusted: if the two batteries ever diverge
+    # again, the macros refuse to render and the sentence cannot survive a
+    # rebuild. (They did diverge once -- 12 and 8 unshuffled batches, which is
+    # a prefix of the split rather than a sample of it, and reached 6 and 4 of
+    # the recordings.)
+    budgets = b["budgets"]
+    spans = {n: (c["batches"], c["clips"], c["recordings"])
+             for n, c in budgets.items()}
+    if len(set(spans.values())) != 1:
+        raise SystemExit(
+            "the evaluation batteries do not share a protocol: "
+            + "; ".join(f"{n} = {v[0]} batches, {v[1]} clips, {v[2]} recordings"
+                        for n, v in spans.items())
+            + " -- Section 5's single-protocol sentence would be false")
+    if not b.get("all_recordings_covered"):
+        raise SystemExit("the pinned protocol does not cover every recording")
+
+    m += [f"\\newcommand{{\\NTestClips}}{{{b['test_clips_available']}}}"]
+    for name, tag in (("task_axis", "Task"), ("diagnostics", "Diag")):
+        cfg = budgets[name]
+        m += [f"\\newcommand{{\\N{tag}Batches}}{{{cfg['batches']}}}",
+              f"\\newcommand{{\\N{tag}Clips}}{{{cfg['clips']}}}",
+              f"\\newcommand{{\\N{tag}Recordings}}{{{cfg['recordings']}}}",
+              f"\\newcommand{{\\N{tag}Seed}}{{{cfg['seed']}}}",
+              f"\\newcommand{{\\N{tag}MC}}{{{cfg['mc'] or 1}}}"]
+    _write("eval_macros.tex", "\n".join(m),
+           "reports/external_baselines/task_eval_*.json, reports/eval_budget.json")
+
+
 def data_provenance() -> None:
     """The 31 recordings, their source, and what the archive does not say."""
     d = json.loads(Path("reports/data_provenance.json").read_text())
@@ -124,8 +175,8 @@ def scalability() -> None:
                     f"\\textbf{{{v['per_assay']:,}}} & "
                     f"{v['per_assay'] * 1000:,} \\\\")
     body = ("\\begin{tabular}{l r r r r}\n\\toprule\n"
-            "arm & fitted (shared) & shared maps & per assay & "
-            "at 1000 assays \\\\\n\\midrule\n"
+            "arm & fitted (shared) & shared maps & per recording & "
+            "at 1000 recordings \\\\\n\\midrule\n"
             + "\n".join(rows) + "\n\\bottomrule\n\\end{tabular}")
     _write("t1_scalability.tex", body,
            "reports/external_baselines/param_census.json")
@@ -312,7 +363,7 @@ def motif_reuse() -> None:
         f"rarefied overlap, within organoid & "
         f"{jr['mean_within_organoid']:.4f} \\\\",
         f"rarefied overlap, within slice & {jr['mean_within_slice']:.4f} \\\\",
-        f"rarefied overlap, across preparations & "
+        f"rarefied overlap, across preparation types & "
         f"{jr['mean_cross_prep']:.4f} \\\\",
         f"\\emph{{null}} label-shuffled & {jr['null_mean']:.4f} "
         f"$\\pm$ {jr['null_sd']:.4f} \\\\",
@@ -510,8 +561,129 @@ def app_withheld_map() -> None:
     _write("a_withheld_map.tex", body, "reports/external_baselines/diagnose_{dg,glm}[_NOMAP].json")
 
 
+def _lr(x: float) -> str:
+    """Learning rates span 1e-3 to 3e-5, so a fixed number of decimals either
+    truncates one end or pads the other. Scientific notation reads the same at
+    both."""
+    return _sci(float(x), 0).replace(".0", "") if float(x) else "0"
+
+
+def _term(key: str) -> str:
+    """Render a loss-coefficient name as mathematics, not as an identifier.
+
+    `lambda_ctx` in a caption is a variable name leaking out of the code; the
+    paper's convention is that a coefficient is typeset as the symbol it is.
+    """
+    if key.startswith("lambda_"):
+        sub = key[len("lambda_"):].replace("_", "\\,")
+        return f"$\\lambda_{{\\mathrm{{{sub}}}}}$"
+    return _esc(key.replace("_", " "))
+
+
+def _val(v) -> str:
+    if isinstance(v, bool):
+        return "on" if v else "off"
+    if isinstance(v, (list, tuple)):
+        return "$(" + ", ".join(str(x) for x in v) + ")$"
+    return _esc(str(v))
+
+
+def app_pooled_marginals() -> None:
+    """Per-clip relative error on the pooled summary statistics.
+
+    Limitations states the direction of this result rather than the values, so
+    the values have to live somewhere a reader can check them. The reference
+    column is ours; every other column is that arm's median with the paired
+    difference against us and its BH-corrected q.
+
+    These come from `comparison.json`, the generation-regime sample sets, which
+    is a different instrument from the four families in
+    Table~\\ref{tab:generation}: it scores four independent draws per clip
+    rather than one, and it scores pooled statistics rather than adjacency.
+    """
+    d = json.loads((EB / "comparison.json").read_text())
+    pc = d["per_clip"]
+    ref = d["reference"]
+    rows_want = [("rel_rate", "firing rate"),
+                 ("rel_persist4", "$4$-frame persistence"),
+                 ("rel_avalanche_mean", "mean avalanche size"),
+                 ("ks_isi", "ISI distribution (KS)"),
+                 ("ks_avalanche", "avalanche size (KS)"),
+                 ("stat_error_clean", "aggregate")]
+    # The matched generative peer, then the two lookup references. The four
+    # other pipeline variants in this file are internal ablations and belong in
+    # the stage appendix, not in a comparison against other people's methods.
+    want = ["MaskGIT-flat", "DG (Macke'09)", "GLM (Pillow'08)"]
+    arms = [a for a in want if a in pc[rows_want[0][0]]]
+    if not arms:
+        raise SystemExit(f"comparison.json has none of {want}; it holds "
+                         f"{sorted(pc[rows_want[0][0]])}")
+    head = " & ".join(f"\\multicolumn{{2}}{{c}}{{{_esc(a)}}}" for a in arms)
+    rows = []
+    for key, lab in rows_want:
+        if key not in pc:
+            continue
+        cells = [f"{pc[key][ref]['median']:.4f}"]
+        for a in arms:
+            e = pc[key].get(a, {})
+            q = e.get("q")
+            cells += [f"{e.get('median', float('nan')):.4f}",
+                      "--" if q is None else _sci(q, 1)]
+        rows.append(f"{lab} & " + " & ".join(cells) + " \\\\")
+    body = ("\\begin{tabular}{l r " + "r r " * len(arms) + "}\n\\toprule\n"
+            f"statistic & {_esc(ref)} & {head} \\\\\n"
+            + "".join(f"\\cmidrule(lr){{{3 + 2 * i}-{4 + 2 * i}}}"
+                      for i in range(len(arms))) + "\n"
+            " & median & " + " & ".join(["median & $q$"] * len(arms))
+            + " \\\\\n\\midrule\n" + "\n".join(rows)
+            + "\n\\bottomrule\n\\end{tabular}")
+    _write("a_pooled_marginals.tex", body,
+           "reports/external_baselines/comparison.json")
+
+
+def app_hyperparameters() -> None:
+    """One row per shipped stage, from the source rather than from prose.
+
+    The loss coefficients are a per-stage list rather than columns: the stages
+    optimise different objectives, so a shared column set would be mostly empty
+    and would imply the terms are comparable across rows.
+    """
+    d = json.loads(Path("reports/hyperparameters.json").read_text())
+    rows = []
+    for st in d["stages"]:
+        clip = "--" if st["grad_clip"] is None else f"{st['grad_clip']:.1f}"
+        sched = st["scheduler"]
+        if "eta_min" in st:
+            sched = f"{sched} to {_lr(st['eta_min'])}"
+        warm = "--" if not st["warmup_epochs"] else str(st["warmup_epochs"])
+        rows.append(
+            f"{st['stage']} & {_esc(st['what'])} & {_lr(st['lr'])} & "
+            f"{_lr(st['weight_decay'])} & {sched} & {warm} & "
+            f"{st['epochs']} & {clip} & {st['early_stop_patience']} & "
+            f"{_esc(st['select_on'])} \\\\")
+    terms = []
+    for st in d["stages"]:
+        kv = ", ".join(f"{_term(k)} {_val(v)}" for k, v in st["loss_terms"].items())
+        terms.append(f"\\textbf{{{st['stage']}}} {kv}")
+    sh = d["shared"]
+    body = (
+        "\\begin{tabular}{l l r r l r r r r l}\n\\toprule\n"
+        "stage & what & lr & wd & schedule & warm & ep. & clip & pat. & "
+        "selected on \\\\\n\\midrule\n" + "\n".join(rows)
+        + "\n\\bottomrule\n\\end{tabular}\n\n\\vspace{0.6em}\n\n"
+        "\\begin{minipage}{\\textwidth}\\footnotesize\n"
+        f"Shared across every stage: batch size {sh['batch_size']} with "
+        f"{sh['grad_accum_steps']} accumulation steps, i.e.\\ an effective batch "
+        f"of {sh['effective_batch']}; {_esc(sh['precision'])}; dropout "
+        f"{sh['prior_dropout']} in both priors; seed {sh['seed']}. Stages run in "
+        "sequence and every earlier stage is frozen thereafter.\\\\[0.3em]\n"
+        "Per-stage settings. " + "; ".join(terms) + ".\n\\end{minipage}")
+    _write("a_hyperparameters.tex", body, "reports/hyperparameters.json")
+
+
 def main() -> int:
     preproc_macros()
+    eval_macros()
     data_provenance()
     scalability()
     task_completion()
@@ -524,6 +696,8 @@ def main() -> int:
     app_seed_spread()
     app_generation_ladders()
     app_withheld_map()
+    app_hyperparameters()
+    app_pooled_marginals()
     print("\nRemaining tables are trims of rendered blocks in "
           "reports/external_baselines/diagnostics.md; port them here as they "
           "are finalised so nothing in the paper is hand-typed.")
