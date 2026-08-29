@@ -132,3 +132,24 @@ def test_regions_are_described_as_roi_occupancy_not_as_a_count_target(method):
         "the ROI-occupancy path is gone; Method 4.4 needs re-reading")
     assert "region_head" not in prior.split("def maskgit_activity_loss")[-1], (
         "a regional head appeared in the activity loss; Method 4.4 is now wrong")
+
+
+def test_paper_does_not_present_the_tokeniser_as_convolution_free(method):
+    """The tokeniser is a hybrid: ConvStem3D in, transformer middle,
+    PatchRenderer3D (ConvTranspose3d + Conv3d) out.
+
+    An earlier draft of Section 4.1 argued for attention "rather than
+    convolution", which reads as though the pipeline contains none. The
+    missing ablation is of the transformer CORE against a convolutional one,
+    and the paper has to say so or a reader of the release will catch it.
+    """
+    base = (ROOT / "model" / "base.py").read_text()
+    assert "class ConvStem3D" in base
+    assert "ConvTranspose3d" in base
+    vq = (ROOT / "model" / "vqvae.py").read_text()
+    assert "ConvStem3D" in vq, "the stem left the tokeniser; 4.1 needs re-reading"
+    assert "convolutional stem" in method, (
+        "Section 4.1 does not say the tokeniser has a convolutional stem")
+    limits = _flat(LIMITS.read_text())
+    assert "all-convolutional core" in limits or "convolutional core" in limits, (
+        "Limitations still implies no convolution is present at all")
