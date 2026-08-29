@@ -1,25 +1,37 @@
-"""F1 -- the pipeline, and the data it is shaped by.
+"""F1 -- the dataflow, and the data it is shaped by.
 
 The only figure not plotted from data, but every NUMBER in it is formatted from
 the same JSON the tables read, so the schematic cannot drift from the results.
-The routed-electrode panel uses a real recording's channel count rather than a
-decorative pattern: the routed fraction is the single most clarifying fact about
-this data, and a made-up version of it would undercut the point.
 
-Four stages left to right, each a labelled box with the quantity that stage is
-constrained by underneath.
+This is a dataflow diagram and not a list of stages, because the question it
+has to answer is one prose answers badly: WHICH CONTEXT REACHES WHICH MODULE.
+Two facts in particular are cheaper to draw than to write -- that empty patches
+leave the pipeline before the quantiser rather than being quantised to a blank
+code, and that the two priors read the recording code by different routes, the
+motif prior through the frozen Stage-1 mapper and the activity prior through a
+projection of its own.
+
+Two rows. The top row is the tokeniser: clip, patchify, the blank branch, the
+residual ladder, the flattened alphabet. The bottom row is generation: the two
+conditioning codes into the activity prior, its field into the motif prior, and
+the decoder back to voxels. The task mask enters both priors, which is why it
+is drawn once and branched rather than twice.
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-import numpy as np
-from matplotlib.patches import FancyArrowPatch, Rectangle
+from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 
 from .style import PALETTE, SURFACE, INK, INK_2, INK_MUTED
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# Row baselines in axes coordinates. The top row sits high enough to leave the
+# blank branch room to drop below it without colliding with the bottom row.
+TOP, BOT = 0.80, 0.30
+BOX_H = 0.15
 
 
 def _load():
@@ -29,74 +41,141 @@ def _load():
                        / "analysis_stage2b_flatten.json").read_text())
     sweep = json.loads((ROOT / "reports"
                         / "ablation_patch_size.json").read_text())
+    hp = json.loads((ROOT / "reports" / "hyperparameters.json").read_text())
     ship = next(r for r in sweep["rows"] if r["is_shipped"])
-    return pre, prov, flat, ship
+    return pre, prov, flat, ship, hp
 
 
-def _box(ax, x, w, title, lines, accent=INK_2):
-    ax.add_patch(Rectangle((x, 0.30), w, 0.46, transform=ax.transAxes,
-                           facecolor="none", edgecolor="#d3d2cc", lw=0.7,
-                           zorder=1))
-    ax.text(x + w / 2, 0.795, title, transform=ax.transAxes, ha="center",
-            va="bottom", fontsize=7.2, color=accent, weight="bold")
-    for i, ln in enumerate(lines):
-        ax.text(x + w / 2, 0.66 - i * 0.105, ln, transform=ax.transAxes,
-                ha="center", va="center", fontsize=5.5, color=INK_2)
+def _box(ax, x, y, w, label, sub=None, accent=INK_2, h=BOX_H, fill="none"):
+    """A rounded node. `sub` is the one quantity that node is constrained by."""
+    # clip_on=False throughout: these are axes-fraction patches on an axis
+    # with no data, and the default clip crops the rounded corner of anything
+    # that touches x=0 or x=1.
+    ax.add_patch(FancyBboxPatch((x, y - h / 2), w, h,
+                                boxstyle="round,pad=0.006,rounding_size=0.012",
+                                transform=ax.transAxes, facecolor=fill,
+                                edgecolor=accent, lw=0.8, zorder=2,
+                                clip_on=False))
+    dy = 0.022 if sub else 0.0
+    ax.text(x + w / 2, y + dy, label, transform=ax.transAxes, ha="center",
+            va="center", fontsize=6.4, color=INK, zorder=3, clip_on=False)
+    if sub:
+        ax.text(x + w / 2, y - 0.030, sub, transform=ax.transAxes,
+                ha="center", va="center", fontsize=5.3, color=INK_2, zorder=3,
+                clip_on=False)
 
 
-def _arrow(ax, x0, x1):
-    ax.add_patch(FancyArrowPatch((x0, 0.53), (x1, 0.53),
-                                 transform=ax.transAxes,
-                                 arrowstyle="-|>", mutation_scale=7,
-                                 lw=0.8, color=INK_MUTED, zorder=2))
+def _arrow(ax, p0, p1, color=INK_MUTED, style="-|>", rad=0.0, lw=0.8,
+           dashed=False):
+    ax.add_patch(FancyArrowPatch(
+        p0, p1, transform=ax.transAxes, arrowstyle=style, mutation_scale=7,
+        lw=lw, color=color, zorder=1,
+        linestyle=(0, (2.4, 1.6)) if dashed else "solid",
+        connectionstyle=f"arc3,rad={rad}", shrinkA=1.0, shrinkB=1.0,
+        clip_on=False))
 
 
 def draw(fig) -> None:
-    pre, prov, flat, ship = _load()
+    pre, prov, flat, ship, hp = _load()
     ax = fig.add_subplot(111)
     ax.axis("off")
-    ax.set_xlim(0, 1); ax.set_ylim(0, 1)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
 
-    n_org = prov["by_preparation"].get("organoid slice", 0) or sum(
-        1 for r in prov["used"] if r["dandiset"] == "000732")
-    n_sli = prov["n_used"] - n_org
-    ch = [r["n_routed_channels"] for r in prov["used"]]
     T, H, W = pre["clip_shape"]
     gt, gh, gw = pre["token_grid"]
     pt, ph, pw = pre["patch"]
+    ch = [r["n_routed_channels"] for r in prov["used"]]
+    blue = PALETTE["pipeline"]
 
-    # Text outside $...$ is NOT LaTeX here -- matplotlib's default path
-    # renders "\," and "\%" literally -- so escapes are avoided and anything
-    # symbolic goes through mathtext.
-    _box(ax, 0.000, 0.238, "recordings",
-         [f"{prov['n_used']} recordings",
-          f"{n_org} organoid, {n_sli} slice",
-          f"{min(ch)}-{max(ch)} routed sites",
-          f"20 kHz, {pre['frame_ms']:.0f} ms frames"],
-         accent=INK)
-    _box(ax, 0.254, 0.238, "clip",
-         [f"${T}\\times{H}\\times{W}$",
-          f"{pre['clip_ms']:.0f} ms, {pre['clip_voxels'] / 1e6:.2f}M voxels",
-          f"rate {pre['clip_voxel_rate']:.1e}",
-          f"$\\approx${pre['mean_spikes_per_clip']:.0f} spikes"])
-    _box(ax, 0.508, 0.238, "tokenise",
-         [f"patch $({pt},{ph},{pw})$",
-          f"${gt}{{\\times}}{gh}{{\\times}}{gw}$ = {gt*gh*gw:,} tokens",
-          f"{ship['blank_frac']*100:.0f}% blank: one token",
-          "residual ladder 32/8/4"],
-         accent=PALETTE["pipeline"])
-    _box(ax, 0.762, 0.238, "motifs and priors",
-         [f"{flat['F']:,} sums $\\rightarrow$ $V$ = {flat['distinct']}",
-          f"{flat['merged']} duplicates merged",
-          "activity prior: where",
-          "motif prior: which motif"],
-         accent=PALETTE["pipeline"])
+    # Five columns, shared by both rows so the vertical links land straight.
+    # Text outside $...$ is NOT LaTeX here -- matplotlib's default path renders
+    # "\%" literally -- so per-cent signs are bare and anything symbolic goes
+    # through mathtext.
+    X = [0.000, 0.205, 0.395, 0.620, 0.830]
+    Wd = [0.170, 0.150, 0.190, 0.160, 0.170]
 
-    for x0, x1 in ((0.241, 0.251), (0.495, 0.505), (0.749, 0.759)):
-        _arrow(ax, x0, x1)
+    # ---- top row: tokeniser -------------------------------------------
+    _box(ax, X[0], TOP, Wd[0], "clip $X$", f"${T}{{\\times}}{H}{{\\times}}{W}$")
+    _box(ax, X[1], TOP, Wd[1], "patchify", f"$({pt},{ph},{pw})$")
+    _box(ax, X[2], TOP, Wd[2], "residual ladder", "$32/8/4$, conditional",
+         accent=blue)
+    _box(ax, X[3], TOP, Wd[3], "flatten $+$ merge", f"{flat['F']:,} paths",
+         accent=blue)
+    _box(ax, X[4], TOP, Wd[4], "alphabet", f"$V = {flat['distinct']}$ motifs",
+         accent=blue, fill="#eaf1fb")
+    for i in range(4):
+        _arrow(ax, (X[i] + Wd[i], TOP), (X[i + 1], TOP))
 
-    ax.text(0.5, 0.16,
-            "conditioning: a per-recording code costing zero stored "
-            "parameters per preparation, plus a local code",
-            transform=ax.transAxes, ha="center", va="center", fontsize=6.3,
-            color=INK_MUTED, style="italic")
+    # The blank branch leaves BEFORE the quantiser. Drawn as a departure from
+    # the chain, not as a box in it, because that is exactly the claim: these
+    # patches are never quantised.
+    _box(ax, 0.245, TOP - 0.245, 0.230, "blank token",
+         f"{ship['blank_frac']*100:.0f}% of patches empty",
+         accent=INK_MUTED, h=0.120)
+    _arrow(ax, (0.290, TOP - BOX_H / 2), (0.290, TOP - 0.245 + 0.060),
+           color=INK_MUTED, dashed=True)
+    ax.text(0.300, TOP - 0.122, "$b_p = 1$", transform=ax.transAxes,
+            fontsize=5.2, color=INK_MUTED, ha="left", va="center")
+
+    # ---- bottom row: conditioning and the two priors --------------------
+    hi, lo = BOT + 0.088, BOT - 0.108
+    _box(ax, X[0], hi, Wd[0], "$g_r$: recording", "seeded, per recording",
+         h=0.120)
+    _box(ax, X[0], lo, Wd[0], "$\\ell(X)$: clip", "$9$ scalars, unlearned",
+         h=0.120)
+    _box(ax, X[1], hi, Wd[1], "Stage-1 mapper", "frozen", accent=INK_MUTED,
+         h=0.110)
+    _box(ax, X[1], lo, Wd[1], "Stage-3 trunk", "frozen", accent=INK_MUTED,
+         h=0.110)
+    _box(ax, X[2], BOT, Wd[2], "activity prior", "$p(A \\mid \\cdot)$, count",
+         accent=blue)
+    _box(ax, X[3], BOT, Wd[3], "motif prior", "$p(M_Z \\mid A, \\cdot)$",
+         accent=blue)
+    _box(ax, X[4], BOT, Wd[4], "decoder", "voxels")
+
+    _arrow(ax, (X[0] + Wd[0], hi), (X[1], hi))
+    _arrow(ax, (X[0] + Wd[0], lo), (X[1], lo))
+    # Both mapped codes condition both priors. Drawn as a rail rather than as
+    # four curves: the four-curve version crossed twice and made the one
+    # asymmetry that matters -- the dashed raw-code path below -- unreadable.
+    rail = X[1] + Wd[1] + 0.028
+    ax.plot([rail, rail], [lo, hi], transform=ax.transAxes, color=INK_MUTED,
+            lw=0.8, zorder=1, clip_on=False)
+    _arrow(ax, (X[1] + Wd[1], hi), (rail, hi), color=INK_MUTED)
+    _arrow(ax, (X[1] + Wd[1], lo), (rail, lo), color=INK_MUTED)
+    _arrow(ax, (rail, BOT + 0.030), (X[2], BOT + 0.030), color=INK_MUTED)
+    _arrow(ax, (rail, hi), (X[3] + 0.030, BOT + BOX_H / 2), rad=-0.22,
+           color=INK_MUTED)
+    # gct also reaches the activity prior WITHOUT the mapper: that prior
+    # projects the raw code with a linear layer of its own. Routed under the
+    # row so it cannot be mistaken for the mapped path.
+    _arrow(ax, (X[0] + Wd[0] * 0.45, hi - 0.060),
+           (X[2] + 0.030, BOT - BOX_H / 2), rad=0.62, dashed=True)
+    ax.text(X[0] + 0.015, BOT - 0.262, "raw $g_r$, no mapper",
+            transform=ax.transAxes, fontsize=5.2, color=INK_MUTED,
+            ha="left", va="center", clip_on=False)
+
+    _arrow(ax, (X[2] + Wd[2], BOT), (X[3], BOT), color=blue, lw=1.0)
+    ax.text(X[2] + Wd[2] + 0.0125, BOT + 0.072, "$A$", transform=ax.transAxes,
+            ha="center", va="bottom", fontsize=6.2, color=blue, clip_on=False)
+    _arrow(ax, (X[3] + Wd[3], BOT), (X[4], BOT))
+
+    # The alphabet is what the motif prior draws its symbols from.
+    _arrow(ax, (X[4] + 0.020, TOP - BOX_H / 2), (X[3] + Wd[3] - 0.020,
+           BOT + BOX_H / 2), color=blue, dashed=True, rad=0.25)
+
+    # ---- the task mask, entering both priors ---------------------------
+    _box(ax, X[2], BOT - 0.255, X[3] + Wd[3] - X[2], "task $(q, M)$: free "
+         "generation, causal, noncausal, spatial",
+         accent=INK_MUTED, h=0.100)
+    for x in (X[2] + Wd[2] * 0.62, X[3] + Wd[3] * 0.45):
+        _arrow(ax, (x, BOT - 0.255 + 0.050), (x, BOT - BOX_H / 2),
+               color=INK_MUTED, dashed=True)
+
+    ax.text(0.0, 1.02, f"{prov['n_used']} recordings, "
+            f"{min(ch)}--{max(ch)} routed sites each",
+            transform=ax.transAxes, fontsize=5.6, color=INK_2, va="bottom")
+    ax.text(1.0, 1.02, "dashed: enters as conditioning",
+            transform=ax.transAxes, fontsize=5.6, color=INK_MUTED,
+            va="bottom", ha="right")

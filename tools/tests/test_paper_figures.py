@@ -47,3 +47,45 @@ def test_figures_are_byte_stable_across_runs():
     first = _hashes()
     _render()
     assert first == _hashes(), "figures are not reproducible run to run"
+
+
+def test_f1_shows_which_context_reaches_which_module():
+    """F1 exists to answer a question prose answers badly.
+
+    A reviewer asked for the dataflow: the blank branch leaving before the
+    quantiser, the ladder, the flattened alphabet, both conditioning codes with
+    their routes into the two priors, and the task mask. If any of those labels
+    disappears the figure has stopped doing its job, so they are asserted
+    against the rendered PDF's text rather than against the source.
+    """
+    _render()
+    text = subprocess.run(
+        ["pdftotext", str(OUT / "f1_pipeline.pdf"), "-"],
+        check=True, capture_output=True, text=True).stdout
+    flat = " ".join(text.split())
+    for label in ("clip", "patchify", "blank token", "residual ladder",
+                  "flatten", "alphabet", "recording", "Stage-1 mapper",
+                  "Stage-3 trunk", "activity prior", "motif prior", "decoder",
+                  "task", "free generation", "causal", "noncausal", "spatial"):
+        assert label in flat, f"F1 no longer labels {label!r}"
+    # The asymmetry corrected in this revision: the activity prior does NOT
+    # read the recording through the frozen mapper.
+    assert "no mapper" in flat, "F1 no longer shows the raw-code path"
+    # LaTeX escapes do not survive matplotlib's default text path; a literal
+    # backslash here means a percent sign was written as "\\%".
+    assert "\\%" not in flat, "an escaped per-cent leaked into the figure"
+
+
+def test_f1_is_tall_enough_to_be_a_diagram():
+    """The height is a page-budget decision and a legibility decision at once.
+
+    It was 1.55in when the figure was four text boxes. A dataflow with two rows
+    does not fit in that, and silently shrinking it back would make the figure
+    unreadable rather than making the paper shorter -- the prose it replaces
+    would have to come back.
+    """
+    import re
+    src = GEN.read_text()
+    line = next(l for l in src.splitlines() if '"f1_pipeline"' in l)
+    height = float(re.search(r"TEXT_W,\s*([0-9.]+)", line).group(1))
+    assert height >= 2.0, f"F1 rendered at {height}in; it needs two rows"
