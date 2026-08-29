@@ -1,0 +1,12 @@
+{
+  "tokens": 3558,
+  "K": 8,
+  "D": 64,
+  "r_norm": 2.4436349868774414,
+  "d_vertex_frac": 0.8268553614616394,
+  "d_hull_frac": 0.7672094702720642,
+  "d_affine_frac": 0.6611045598983765,
+  "extra_convexity_frac": 0.36618906259536743,
+  "dimensional_share_of_sq_error": 0.7406406402587891,
+  "child_basis_rank": 7.0
+}

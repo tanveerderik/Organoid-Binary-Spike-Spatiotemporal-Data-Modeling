@@ -1,0 +1,20 @@
+{
+  "n_tokens": 14101,
+  "diagnostics": {
+    "geometric_projection_mse": 0.06997075776259104,
+    "hard_vertex_mse": 0.07759675073126952,
+    "projection_gain_vs_hard": 0.007625992968678474,
+    "hull_expansion_fraction": 0.0,
+    "mean_residual_norm": 1.0238584657510121,
+    "alpha_mean_max": 0.7867512504259745,
+    "alpha_entropy": 0.7471399048964182
+  },
+  "clip_frac_mean": 0.7566190361976624,
+  "clip_frac_median": 0.7880769371986389,
+  "inside_pct": 0.0,
+  "badly_clipped_pct": 0.9349691511240338,
+  "captured_norm": 0.48110583424568176,
+  "boundary_rate": 0.9989362359046936,
+  "active_children": 3.309481620788574,
+  "residual_norm": 2.3493080139160156
+}

@@ -1,0 +1,26 @@
+{
+  "ckpt": "ckpts/vqvae_stage2a_v2_best.pt",
+  "n_eval": 40,
+  "arms": {
+    "alpha_true": {
+      "auprc": 0.3656742093418809,
+      "ctx_err": 0.38727501034736633,
+      "delta_vs_true": 0.0
+    },
+    "onehot_z2": {
+      "auprc": 0.3136281388876376,
+      "ctx_err": 0.382750540971756,
+      "delta_vs_true": -0.05204607045424331
+    },
+    "percode_mean": {
+      "auprc": 0.19311195595012226,
+      "ctx_err": 0.4031332731246948,
+      "delta_vs_true": -0.17256225339175862
+    },
+    "percode_draw": {
+      "auprc": 0.10962800541049925,
+      "ctx_err": 0.3981233239173889,
+      "delta_vs_true": -0.25604620393138167
+    }
+  }
+}

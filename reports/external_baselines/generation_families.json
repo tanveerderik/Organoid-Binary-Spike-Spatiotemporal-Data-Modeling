@@ -11,46 +11,46 @@
    "better": "low",
    "arms": {
     "Ours (4C+soft)": {
-     "random": 1.2601826386526227,
-     "local_only": 1.1964494613930583,
-     "global_only": 0.8643473070114851,
-     "global_partial_local": 0.6661313762888312,
-     "global_full_local": 0.6078025167807937
+     "random": 1.0623049895716397,
+     "local_only": 0.8473470002733251,
+     "global_only": 0.6737509618202845,
+     "global_partial_local": 0.6172429253764478,
+     "global_full_local": 0.5350046008825302
     },
     "MaskGIT-flat": {
-     "random": 1.398523623123765,
-     "local_only": 1.229783128015697,
-     "global_only": 0.922656612470746,
-     "global_partial_local": 0.8122431645169854,
-     "global_full_local": 0.7403469197452068
+     "random": 1.189206281336405,
+     "local_only": 0.9595384382005233,
+     "global_only": 0.8347270344534228,
+     "global_partial_local": 0.7528468565381129,
+     "global_full_local": 0.7361539976678014
     },
     "3D U-Net (det.)\u2020": {
-     "random": 1.2211741916835308,
-     "local_only": 1.1990484101697803,
-     "global_only": 1.4622962102293968,
-     "global_partial_local": 1.3432453162968159,
-     "global_full_local": 1.3636897783726454
+     "random": 1.074114484011486,
+     "local_only": 0.8414918119655288,
+     "global_only": 0.7710855287836871,
+     "global_partial_local": 0.6740369092819939,
+     "global_full_local": 0.6803372987816411
     },
     "3D CVAE": {
-     "random": 1.3400490395724773,
-     "local_only": 1.2956674601882696,
-     "global_only": 1.1224121041595936,
-     "global_partial_local": 1.0641690641641617,
-     "global_full_local": 1.0831467565149069
+     "random": 1.1388059132415334,
+     "local_only": 0.9098822848343935,
+     "global_only": 0.8372801110735931,
+     "global_partial_local": 0.7580752240286933,
+     "global_full_local": 0.7440952834903553
     },
     "Dich. Gaussian": {
-     "random": 0.910811148583889,
-     "local_only": 0.6327581219375134,
-     "global_only": 0.7484786622226238,
-     "global_partial_local": 0.6260502673685551,
-     "global_full_local": 0.6571479188278317
+     "random": 0.7242511190928012,
+     "local_only": 0.5183215705964941,
+     "global_only": 0.6008898662036037,
+     "global_partial_local": 0.529768750498799,
+     "global_full_local": 0.5136671215295792
     },
     "Coupled GLM": {
-     "random": 0.7104682605713606,
-     "local_only": 0.7044654339551926,
-     "global_only": 0.6854863753542304,
-     "global_partial_local": 0.6652378924190998,
-     "global_full_local": 0.6666085980832577
+     "random": 0.5447240853715541,
+     "local_only": 0.5583766436598206,
+     "global_only": 0.5560149040380259,
+     "global_partial_local": 0.564756636230749,
+     "global_full_local": 0.5609895580825413
     }
    }
   },
@@ -58,46 +58,46 @@
    "better": "high",
    "arms": {
     "Ours (4C+soft)": {
-     "random": 0.6570424415375324,
-     "local_only": 0.33984833796277947,
-     "global_only": 0.7383369497679921,
-     "global_partial_local": 0.7480609419038803,
-     "global_full_local": 0.7763674975892257
+     "random": 0.7182840452733278,
+     "local_only": 0.3081413930738831,
+     "global_only": 0.6945010712156555,
+     "global_partial_local": 0.7212324975437499,
+     "global_full_local": 0.6992410544073586
     },
     "MaskGIT-flat": {
-     "random": 0.4175156058085237,
-     "local_only": 0.20295437307402317,
-     "global_only": 0.5630132943602247,
-     "global_partial_local": 0.5493507986423716,
-     "global_full_local": 0.5490154586954757
+     "random": 0.5607929141485279,
+     "local_only": 0.25351063100941446,
+     "global_only": 0.5456542134468436,
+     "global_partial_local": 0.4971353976804398,
+     "global_full_local": 0.5428959578200029
     },
     "3D U-Net (det.)\u2020": {
-     "random": 0.4228407025242935,
-     "local_only": 0.26359956481809416,
-     "global_only": 0.26176055385581676,
-     "global_partial_local": 0.34771667717772714,
-     "global_full_local": 0.22319480388838198
+     "random": 0.5047100421893657,
+     "local_only": 0.32804347618230334,
+     "global_only": 0.504151726028998,
+     "global_partial_local": 0.5119646756012316,
+     "global_full_local": 0.5164877905042686
     },
     "3D CVAE": {
-     "random": 0.5563965275867466,
-     "local_only": 0.1960647845426513,
-     "global_only": 0.4181280923526518,
-     "global_partial_local": 0.44865395071405056,
-     "global_full_local": 0.33658038546978175
+     "random": 0.48721055884950254,
+     "local_only": 0.3363599252948823,
+     "global_only": 0.48849060302755487,
+     "global_partial_local": 0.47508087531467047,
+     "global_full_local": 0.4924684763931618
     },
     "Dich. Gaussian": {
-     "random": 0.25024403183295607,
-     "local_only": 0.49310021997844466,
-     "global_only": 0.45521845176910575,
-     "global_partial_local": 0.5280331636507084,
-     "global_full_local": 0.5313785650432173
+     "random": 0.17791709670908282,
+     "local_only": 0.5150393997203943,
+     "global_only": 0.5209691725988875,
+     "global_partial_local": 0.5415539828481731,
+     "global_full_local": 0.5472169321018173
     },
     "Coupled GLM": {
-     "random": 0.09436288675520936,
-     "local_only": 0.4399130726444238,
-     "global_only": 0.4911012419449394,
-     "global_partial_local": 0.5541977361478774,
-     "global_full_local": 0.45241598637161917
+     "random": 0.0056988854403808055,
+     "local_only": 0.4973049262467694,
+     "global_only": 0.5093905018289919,
+     "global_partial_local": 0.5039000033617119,
+     "global_full_local": 0.5012348403847731
     }
    }
   },
@@ -105,46 +105,46 @@
    "better": "high",
    "arms": {
     "Ours (4C+soft)": {
-     "random": 0.002912813062463323,
-     "local_only": 0.0010778724204617961,
-     "global_only": -0.01366628281103649,
-     "global_partial_local": 0.02033828621074929,
-     "global_full_local": 0.020430686519601116
+     "random": 0.0017930847321722815,
+     "local_only": -0.0012302176281713244,
+     "global_only": -0.005784140155585482,
+     "global_partial_local": 0.01040089439044578,
+     "global_full_local": 0.010050181914306455
     },
     "MaskGIT-flat": {
-     "random": 0.002392278090964657,
-     "local_only": 0.0008203187851696624,
-     "global_only": 0.005191917581218175,
-     "global_partial_local": -0.00016698866271372403,
-     "global_full_local": 0.003636209861607037
+     "random": -0.0007974542765957701,
+     "local_only": 0.0003478044391398809,
+     "global_only": -0.004024170738207183,
+     "global_partial_local": 0.0039032340291028367,
+     "global_full_local": 0.0027291473506478314
     },
     "3D U-Net (det.)\u2020": {
-     "random": 0.00014891641381041196,
-     "local_only": -0.00033378403862135975,
-     "global_only": -0.002720694128048262,
-     "global_partial_local": 0.013801271936916326,
-     "global_full_local": 0.0077139484983456685
+     "random": -0.001363548874252378,
+     "local_only": -0.00044076665331535536,
+     "global_only": 0.0009897484924324407,
+     "global_partial_local": 0.0046560806966507995,
+     "global_full_local": 0.0035201653356102813
     },
     "3D CVAE": {
-     "random": 0.001470128765660269,
-     "local_only": -0.0006977032440294295,
-     "global_only": -0.014983799346165838,
-     "global_partial_local": 0.012778002348925649,
-     "global_full_local": 0.019265808357309094
+     "random": -0.0009156164250440982,
+     "local_only": 0.001019480549339799,
+     "global_only": -0.001364674182676523,
+     "global_partial_local": -0.00027888866213224284,
+     "global_full_local": 0.005249789161298285
     },
     "Dich. Gaussian": {
-     "random": 0.009094538375567174,
-     "local_only": 0.008564099347445175,
-     "global_only": 0.015422392744902647,
-     "global_partial_local": 0.01379433414834108,
-     "global_full_local": 0.018625110476771622
+     "random": -0.0008501873612688504,
+     "local_only": 0.004869957918565704,
+     "global_only": 0.0018214153058295768,
+     "global_partial_local": 0.001437951130898063,
+     "global_full_local": 0.005780973528330513
     },
     "Coupled GLM": {
-     "random": -0.0012871969437664443,
-     "local_only": 2.6186908008263288e-05,
-     "global_only": -0.011426945298003255,
-     "global_partial_local": 0.006544351733581477,
-     "global_full_local": 0.027229772008697806
+     "random": 0.004838489849146588,
+     "local_only": -0.005246265707851028,
+     "global_only": 0.006638505188249599,
+     "global_partial_local": -0.002793299862388743,
+     "global_full_local": -0.00486780537122633
     }
    }
   },
@@ -152,46 +152,46 @@
    "better": "low",
    "arms": {
     "Ours (4C+soft)": {
-     "random": 0.24306719614886907,
-     "local_only": 0.23681779687204624,
-     "global_only": 0.2708977015600231,
-     "global_partial_local": 0.22008529942915483,
-     "global_full_local": 0.18786802584971843
+     "random": 0.24674100838601837,
+     "local_only": 0.2285057126055748,
+     "global_only": 0.25226503758451924,
+     "global_partial_local": 0.2145003278452196,
+     "global_full_local": 0.2242349580536889
     },
     "MaskGIT-flat": {
-     "random": 0.3059043376406322,
-     "local_only": 0.34633975222964375,
-     "global_only": 0.3516087780706026,
-     "global_partial_local": 0.39704748653207694,
-     "global_full_local": 0.4028051334521843
+     "random": 0.36839133941019636,
+     "local_only": 0.38075533008479684,
+     "global_only": 0.37037283941630567,
+     "global_partial_local": 0.384246214967004,
+     "global_full_local": 0.3661022705401817
     },
     "3D U-Net (det.)\u2020": {
-     "random": 0.07677455011279508,
-     "local_only": 0.1017940196608792,
-     "global_only": 0.07191644417231458,
-     "global_partial_local": 0.11099710796200601,
-     "global_full_local": 0.06203140327605877
+     "random": 0.0762383447878616,
+     "local_only": 0.10881026828348306,
+     "global_only": 0.09814322321115296,
+     "global_partial_local": 0.08813892791982957,
+     "global_full_local": 0.10250470775094751
     },
     "3D CVAE": {
-     "random": 0.42961297979826407,
-     "local_only": 0.34308983125874665,
-     "global_only": 0.17045235639759185,
-     "global_partial_local": 0.2046057044676644,
-     "global_full_local": 0.23935510153825992
+     "random": 0.3449850539347058,
+     "local_only": 0.41687158022248016,
+     "global_only": 0.3453618847377609,
+     "global_partial_local": 0.3311125271802629,
+     "global_full_local": 0.34840798220340413
     },
     "Dich. Gaussian": {
-     "random": 0.047479954442362714,
-     "local_only": 0.041518004121840923,
-     "global_only": 0.04435876642040415,
-     "global_partial_local": 0.04959043640799351,
-     "global_full_local": 0.03649156717961461
+     "random": 0.1454774089358913,
+     "local_only": 0.06606313415175272,
+     "global_only": 0.06805727576049925,
+     "global_partial_local": 0.061901323192228644,
+     "global_full_local": 0.06400593930777596
     },
     "Coupled GLM": {
-     "random": 0.08763320230307839,
-     "local_only": 0.0791179734099041,
-     "global_only": 0.07926302716425157,
-     "global_partial_local": 0.08197290918744203,
-     "global_full_local": 0.07935983175965297
+     "random": 0.031126162118485182,
+     "local_only": 0.0321049454426244,
+     "global_only": 0.038243558953668426,
+     "global_partial_local": 0.03344533286194613,
+     "global_full_local": 0.026774307353420568
     }
    }
   }

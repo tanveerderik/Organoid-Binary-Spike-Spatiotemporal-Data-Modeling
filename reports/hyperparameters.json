@@ -1,0 +1,135 @@
+{
+  "shared": {
+    "batch_size": 4,
+    "grad_accum_steps": 8,
+    "effective_batch": 32,
+    "prior_dropout": 0.1,
+    "precision": "CUDA autocast, FP16",
+    "seed": 0
+  },
+  "stages": [
+    {
+      "stage": "1",
+      "what": "Global-code mapper pretrain",
+      "trained": "global embedder + spatial-map head",
+      "optimizer": "AdamW",
+      "lr": 0.001,
+      "weight_decay": 0.0001,
+      "scheduler": "none",
+      "warmup_epochs": 0,
+      "epochs": 200,
+      "grad_clip": null,
+      "early_stop_patience": 20,
+      "select_on": "spatial-map loss",
+      "loss_terms": {
+        "lambda_sep": 0.0001
+      }
+    },
+    {
+      "stage": "2A",
+      "what": "Tokeniser (3-level residual VQ-VAE)",
+      "trained": "encoder, decoder, EMA codebooks",
+      "optimizer": "AdamW",
+      "lr": 0.001,
+      "weight_decay": 0.0001,
+      "scheduler": "cosine",
+      "eta_min": 1e-05,
+      "warmup_epochs": 0,
+      "epochs": 300,
+      "grad_clip": null,
+      "early_stop_patience": 40,
+      "select_on": "val exact AUPRC",
+      "loss_terms": {
+        "lambda_ctx": 2.8,
+        "lambda_ctx_field": 0.05,
+        "lambda_code_norm": 0.1,
+        "pos_weight": "100 to 1 over 100 epochs"
+      }
+    },
+    {
+      "stage": "3",
+      "what": "Local-code mapper (texton multinomial)",
+      "trained": "lct trunk + heads (tokeniser frozen)",
+      "optimizer": "AdamW",
+      "lr": 0.001,
+      "weight_decay": 0.01,
+      "scheduler": "cosine",
+      "eta_min": 1e-05,
+      "warmup_epochs": 0,
+      "epochs": 300,
+      "grad_clip": null,
+      "early_stop_patience": 40,
+      "select_on": "val multinomial NLL",
+      "loss_terms": {
+        "n_textons": 128,
+        "texton_basis": "z1",
+        "batches_per_epoch": 120
+      }
+    },
+    {
+      "stage": "4A",
+      "what": "Motif prior (MaskGIT over V=961)",
+      "trained": "motif prior (tokeniser and mappers frozen)",
+      "optimizer": "AdamW",
+      "lr": 0.0003,
+      "weight_decay": 0.01,
+      "scheduler": "warmup + cosine",
+      "warmup_epochs": 10,
+      "epochs": 600,
+      "grad_clip": 1.0,
+      "early_stop_patience": 150,
+      "select_on": "val MRR",
+      "loss_terms": {
+        "$(z_1,\\alpha)$ weights": [
+          1.0,
+          0.1
+        ],
+        "lambda_z1_neighbor_ce": 0.05,
+        "lambda_ctx": 0.25,
+        "lambda_adj": 0.25,
+        "lambda_spatial": 0.25,
+        "full_mask_prob": 0.15
+      }
+    },
+    {
+      "stage": "4B",
+      "what": "Activity prior (where, plus count head)",
+      "trained": "activity prior",
+      "optimizer": "AdamW",
+      "lr": 0.0002,
+      "weight_decay": 0.01,
+      "scheduler": "warmup + cosine",
+      "warmup_epochs": 5,
+      "epochs": 120,
+      "grad_clip": 1.0,
+      "early_stop_patience": 30,
+      "select_on": "val NLL",
+      "loss_terms": {
+        "lambda_bce": 1.0,
+        "pos_weight": 1.0,
+        "lambda_count": 0.065,
+        "lambda_spatial": 0.02,
+        "random_mask_prob": 0.5
+      }
+    },
+    {
+      "stage": "4C",
+      "what": "Adaptation of the motif prior to emitted maps",
+      "trained": "motif prior (activity prior frozen)",
+      "optimizer": "AdamW",
+      "lr": 3e-05,
+      "weight_decay": 0.01,
+      "scheduler": "warmup + cosine",
+      "warmup_epochs": 5,
+      "epochs": 120,
+      "grad_clip": 1.0,
+      "early_stop_patience": 40,
+      "select_on": "val MRR",
+      "loss_terms": {
+        "emitted-map ramp": "0 to 0.8 over 20 epochs",
+        "readout": "gumbel",
+        "soft_field": true
+      }
+    }
+  ]
+}

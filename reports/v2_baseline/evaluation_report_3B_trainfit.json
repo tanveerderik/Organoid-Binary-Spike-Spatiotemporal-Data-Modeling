@@ -1,0 +1,8 @@
+{
+  "model_per_clip": 0.3754193495491643,
+  "model_assay_mean": 0.4032098805951167,
+  "empirical_marginal": 0.6389749502420011,
+  "empirical_oracle_count": 0.6835061447459658,
+  "model_oracle_count": 0.399155562308894,
+  "cosine_assay_maps": 0.6062237620353699
+}

@@ -1,0 +1,390 @@
+{
+  "args": {
+    "seeds": 8,
+    "batches": 8,
+    "motif_steps": 12,
+    "base_seed": 20260820,
+    "split": "val",
+    "only": null,
+    "out": "reports/accept_4b_val_b8s8_ALL.json"
+  },
+  "candidates": {
+    "run1_best@66      (incumbent)": "ckpts/activity_prior_best_hard_metric_GUMBELRUN1.pt",
+    "run2_compsel_best": "ckpts/activity_prior_best_hard_metric_COMPSEL.pt",
+    "run2_compsel_last": "ckpts/activity_prior_best_hard_metric_last_COMPSEL.pt",
+    "run3_nll_best": "ckpts/activity_prior_best_hard_metric_NLLRUN3.pt",
+    "run3_nll_last": "ckpts/activity_prior_best_hard_metric_last_NLLRUN3.pt"
+  },
+  "runs": {
+    "run1_best@66      (incumbent)": [
+      {
+        "generation_metric": 0.791149433501091,
+        "generation_stat_error": 0.3636849439886344,
+        "generation_ks_avalanche": 0.17194607559341663,
+        "generation_ks_isi": 0.14259724670842866,
+        "decoded_spike_count_relative_error": 0.2089979313313961,
+        "hard_count_mae": 16.8125,
+        "decoded_spatial_support_violation": 0.46949023025135106
+      },
+      {
+        "generation_metric": 0.7897965981400733,
+        "generation_stat_error": 0.34951575441946897,
+        "generation_ks_avalanche": 0.20514883346741758,
+        "generation_ks_isi": 0.14836622208845163,
+        "decoded_spike_count_relative_error": 0.19688517972826958,
+        "hard_count_mae": 16.8125,
+        "decoded_spatial_support_violation": 0.4755093617517106
+      },
+      {
+        "generation_metric": 0.7991369026145907,
+        "generation_stat_error": 0.36632175944931844,
+        "generation_ks_avalanche": 0.11587130923827643,
+        "generation_ks_isi": 0.14843352931210824,
+        "decoded_spike_count_relative_error": 0.20168798230588436,
+        "hard_count_mae": 16.8125,
+        "decoded_spatial_support_violation": 0.4639635460027304
+      },
+      {
+        "generation_metric": 0.7921179210163789,
+        "generation_stat_error": 0.339417599529652,
+        "generation_ks_avalanche": 0.2166471865085991,
+        "generation_ks_isi": 0.14463732215047814,
+        "decoded_spike_count_relative_error": 0.1871533039957285,
+        "hard_count_mae": 16.8125,
+        "decoded_spatial_support_violation": 0.4659799381924174
+      },
+      {
+        "generation_metric": 0.8003188449248734,
+        "generation_stat_error": 0.3348791736857405,
+        "generation_ks_avalanche": 0.1384265649102866,
+        "generation_ks_isi": 0.14365511040828427,
+        "decoded_spike_count_relative_error": 0.218043340370059,
+        "hard_count_mae": 16.8125,
+        "decoded_spatial_support_violation": 0.4627467001230606
+      },
+      {
+        "generation_metric": 0.8001561709607349,
+        "generation_stat_error": 0.3438001688435745,
+        "generation_ks_avalanche": 0.16687737041719342,
+        "generation_ks_isi": 0.12954403032766032,
+        "decoded_spike_count_relative_error": 0.190338471904397,
+        "hard_count_mae": 16.8125,
+        "decoded_spatial_support_violation": 0.4637682933953524
+      },
+      {
+        "generation_metric": 0.8031011089760315,
+        "generation_stat_error": 0.3365345960380044,
+        "generation_ks_avalanche": 0.1363310212867735,
+        "generation_ks_isi": 0.13318240661409247,
+        "decoded_spike_count_relative_error": 0.20662742853164673,
+        "hard_count_mae": 16.8125,
+        "decoded_spatial_support_violation": 0.46002257758972476
+      },
+      {
+        "generation_metric": 0.788976091549528,
+        "generation_stat_error": 0.34157350009118687,
+        "generation_ks_avalanche": 0.22529498525073746,
+        "generation_ks_isi": 0.16312653883934836,
+        "decoded_spike_count_relative_error": 0.18759989738464355,
+        "hard_count_mae": 16.8125,
+        "decoded_spatial_support_violation": 0.46672867754406205
+      }
+    ],
+    "run2_compsel_best": [
+      {
+        "generation_metric": 0.7994876263558173,
+        "generation_stat_error": 0.34634300115809924,
+        "generation_ks_avalanche": 0.1098640189941722,
+        "generation_ks_isi": 0.14359337373309694,
+        "decoded_spike_count_relative_error": 0.2368815764784813,
+        "hard_count_mae": 16.40625,
+        "decoded_spatial_support_violation": 0.4582516629987478
+      },
+      {
+        "generation_metric": 0.7886927698086286,
+        "generation_stat_error": 0.3721174069266269,
+        "generation_ks_avalanche": 0.14415463437354448,
+        "generation_ks_isi": 0.1415629979779584,
+        "decoded_spike_count_relative_error": 0.24129479564726353,
+        "hard_count_mae": 16.40625,
+        "decoded_spatial_support_violation": 0.4708125831348814
+      },
+      {
+        "generation_metric": 0.796238366544609,
+        "generation_stat_error": 0.34515295622651937,
+        "generation_ks_avalanche": 0.14534003029578252,
+        "generation_ks_isi": 0.12564822119052854,
+        "decoded_spike_count_relative_error": 0.23277506697922945,
+        "hard_count_mae": 16.40625,
+        "decoded_spatial_support_violation": 0.4594640460810898
+      },
+      {
+        "generation_metric": 0.7891991162244594,
+        "generation_stat_error": 0.3562134859793196,
+        "generation_ks_avalanche": 0.18159579825886757,
+        "generation_ks_isi": 0.12887148451406194,
+        "decoded_spike_count_relative_error": 0.2301729265600443,
+        "hard_count_mae": 16.40625,
+        "decoded_spatial_support_violation": 0.4611506430447036
+      },
+      {
+        "generation_metric": 0.7974281246287337,
+        "generation_stat_error": 0.34374043663626636,
+        "generation_ks_avalanche": 0.13747213402688646,
+        "generation_ks_isi": 0.1299962871704864,
+        "decoded_spike_count_relative_error": 0.23594666458666325,
+        "hard_count_mae": 16.40625,
+        "decoded_spatial_support_violation": 0.4561335177464626
+      },
+      {
+        "generation_metric": 0.803838439288901,
+        "generation_stat_error": 0.3373397222065222,
+        "generation_ks_avalanche": 0.11126123083158818,
+        "generation_ks_isi": 0.12241945468737381,
+        "decoded_spike_count_relative_error": 0.23375795409083366,
+        "hard_count_mae": 16.40625,
+        "decoded_spatial_support_violation": 0.45814510805454306
+      },
+      {
+        "generation_metric": 0.7915288416103818,
+        "generation_stat_error": 0.35989407658252376,
+        "generation_ks_avalanche": 0.1601908185840708,
+        "generation_ks_isi": 0.12885995216582513,
+        "decoded_spike_count_relative_error": 0.23102430999279022,
+        "hard_count_mae": 16.40625,
+        "decoded_spatial_support_violation": 0.4570789578506532
+      },
+      {
+        "generation_metric": 0.795885450744567,
+        "generation_stat_error": 0.36456576846707345,
+        "generation_ks_avalanche": 0.11288411957354885,
+        "generation_ks_isi": 0.14847937843606934,
+        "decoded_spike_count_relative_error": 0.23272880539298058,
+        "hard_count_mae": 16.40625,
+        "decoded_spatial_support_violation": 0.45835418175220877
+      }
+    ],
+    "run2_compsel_last": [
+      {
+        "generation_metric": 0.8027440869870842,
+        "generation_stat_error": 0.35588124442864333,
+        "generation_ks_avalanche": 0.1479140328697851,
+        "generation_ks_isi": 0.11825497615591957,
+        "decoded_spike_count_relative_error": 0.20847598277032375,
+        "hard_count_mae": 12.6875,
+        "decoded_spatial_support_violation": 0.45511741241023473
+      },
+      {
+        "generation_metric": 0.7980591612931613,
+        "generation_stat_error": 0.37620472106925246,
+        "generation_ks_avalanche": 0.14674307268243147,
+        "generation_ks_isi": 0.1261722528973156,
+        "decoded_spike_count_relative_error": 0.20873362943530083,
+        "hard_count_mae": 12.6875,
+        "decoded_spatial_support_violation": 0.4630664137765872
+      },
+      {
+        "generation_metric": 0.8081673902208019,
+        "generation_stat_error": 0.36395458017614923,
+        "generation_ks_avalanche": 0.08849557522123896,
+        "generation_ks_isi": 0.13457029591750097,
+        "decoded_spike_count_relative_error": 0.21240155212581158,
+        "hard_count_mae": 12.6875,
+        "decoded_spatial_support_violation": 0.44853695834022883
+      },
+      {
+        "generation_metric": 0.8075383369727209,
+        "generation_stat_error": 0.35285239668239243,
+        "generation_ks_avalanche": 0.11206960660370341,
+        "generation_ks_isi": 0.12015609341713179,
+        "decoded_spike_count_relative_error": 0.21310957707464695,
+        "hard_count_mae": 12.6875,
+        "decoded_spatial_support_violation": 0.4548010052358411
+      },
+      {
+        "generation_metric": 0.7999173767098315,
+        "generation_stat_error": 0.35107450308158394,
+        "generation_ks_avalanche": 0.1563173942143229,
+        "generation_ks_isi": 0.12884172457713805,
+        "decoded_spike_count_relative_error": 0.21883804723620415,
+        "hard_count_mae": 12.6875,
+        "decoded_spatial_support_violation": 0.45254507529133603
+      },
+      {
+        "generation_metric": 0.8001138151832768,
+        "generation_stat_error": 0.38259198636051317,
+        "generation_ks_avalanche": 0.12511912865895164,
+        "generation_ks_isi": 0.11804428240679138,
+        "decoded_spike_count_relative_error": 0.21808559633791447,
+        "hard_count_mae": 12.6875,
+        "decoded_spatial_support_violation": 0.44329202265583123
+      },
+      {
+        "generation_metric": 0.8021889256480128,
+        "generation_stat_error": 0.3738635302898955,
+        "generation_ks_avalanche": 0.1259360108917631,
+        "generation_ks_isi": 0.12177624527010444,
+        "decoded_spike_count_relative_error": 0.2100293729454279,
+        "hard_count_mae": 12.6875,
+        "decoded_spatial_support_violation": 0.4521272239958623
+      },
+      {
+        "generation_metric": 0.8053409919927536,
+        "generation_stat_error": 0.35653658650730985,
+        "generation_ks_avalanche": 0.11138740583631973,
+        "generation_ks_isi": 0.14646059146259865,
+        "decoded_spike_count_relative_error": 0.20885754097253084,
+        "hard_count_mae": 12.6875,
+        "decoded_spatial_support_violation": 0.454113453167534
+      }
+    ],
+    "run3_nll_best": [
+      {
+        "generation_metric": 0.7937708076188456,
+        "generation_stat_error": 0.389155482818617,
+        "generation_ks_avalanche": 0.17312411690339852,
+        "generation_ks_isi": 0.12475299871129764,
+        "decoded_spike_count_relative_error": 0.2202902203425765,
+        "hard_count_mae": 8.1875,
+        "decoded_spatial_support_violation": 0.44934842796485897
+      },
+      {
+        "generation_metric": 0.8024639898580629,
+        "generation_stat_error": 0.36787748542911614,
+        "generation_ks_avalanche": 0.14024298785060746,
+        "generation_ks_isi": 0.13116119681967792,
+        "decoded_spike_count_relative_error": 0.21664436720311642,
+        "hard_count_mae": 8.1875,
+        "decoded_spatial_support_violation": 0.45347359804561915
+      },
+      {
+        "generation_metric": 0.8039355039943381,
+        "generation_stat_error": 0.38024407105071906,
+        "generation_ks_avalanche": 0.1259360108917631,
+        "generation_ks_isi": 0.10955996949298669,
+        "decoded_spike_count_relative_error": 0.22144196182489395,
+        "hard_count_mae": 8.1875,
+        "decoded_spatial_support_violation": 0.4463546665538776
+      },
+      {
+        "generation_metric": 0.8018241663941206,
+        "generation_stat_error": 0.39144527647603083,
+        "generation_ks_avalanche": 0.11430058749163385,
+        "generation_ks_isi": 0.12482265742054388,
+        "decoded_spike_count_relative_error": 0.22028577886521816,
+        "hard_count_mae": 8.1875,
+        "decoded_spatial_support_violation": 0.4490692492237692
+      },
+      {
+        "generation_metric": 0.8079774217324918,
+        "generation_stat_error": 0.3626441368715653,
+        "generation_ks_avalanche": 0.11295776674580904,
+        "generation_ks_isi": 0.11349453717855451,
+        "decoded_spike_count_relative_error": 0.22645046189427376,
+        "hard_count_mae": 8.1875,
+        "decoded_spatial_support_violation": 0.44746355839999885
+      },
+      {
+        "generation_metric": 0.804067739860263,
+        "generation_stat_error": 0.3963550211124026,
+        "generation_ks_avalanche": 0.10812161004852983,
+        "generation_ks_isi": 0.11463291743459869,
+        "decoded_spike_count_relative_error": 0.21721671894192696,
+        "hard_count_mae": 8.1875,
+        "decoded_spatial_support_violation": 0.44092063264083825
+      },
+      {
+        "generation_metric": 0.7980576101621293,
+        "generation_stat_error": 0.3869367404726116,
+        "generation_ks_avalanche": 0.1433057379389095,
+        "generation_ks_isi": 0.1158249472190957,
+        "decoded_spike_count_relative_error": 0.2307540811598301,
+        "hard_count_mae": 8.1875,
+        "decoded_spatial_support_violation": 0.4423517519002799
+      },
+      {
+        "generation_metric": 0.8067373709599509,
+        "generation_stat_error": 0.3674256228950447,
+        "generation_ks_avalanche": 0.10804692323523357,
+        "generation_ks_isi": 0.12883170243823322,
+        "decoded_spike_count_relative_error": 0.22197303734719753,
+        "hard_count_mae": 8.1875,
+        "decoded_spatial_support_violation": 0.4495946640184646
+      }
+    ],
+    "run3_nll_last": [
+      {
+        "generation_metric": 0.8040098152096834,
+        "generation_stat_error": 0.36875454938912544,
+        "generation_ks_avalanche": 0.13362831858407082,
+        "generation_ks_isi": 0.11989708404802746,
+        "decoded_spike_count_relative_error": 0.21814407780766487,
+        "hard_count_mae": 8.46875,
+        "decoded_spatial_support_violation": 0.45142957289131963
+      },
+      {
+        "generation_metric": 0.8078599438618722,
+        "generation_stat_error": 0.376442554599433,
+        "generation_ks_avalanche": 0.10029498525073749,
+        "generation_ks_isi": 0.12531691174508286,
+        "decoded_spike_count_relative_error": 0.21359805017709732,
+        "hard_count_mae": 8.46875,
+        "decoded_spatial_support_violation": 0.4510736099353464
+      },
+      {
+        "generation_metric": 0.8059653245141057,
+        "generation_stat_error": 0.3715986205540095,
+        "generation_ks_avalanche": 0.1252295875772249,
+        "generation_ks_isi": 0.10947456661405564,
+        "decoded_spike_count_relative_error": 0.21971026435494423,
+        "hard_count_mae": 8.46875,
+        "decoded_spatial_support_violation": 0.4426482386108816
+      },
+      {
+        "generation_metric": 0.8023477863675899,
+        "generation_stat_error": 0.4002012961953786,
+        "generation_ks_avalanche": 0.09372485921158491,
+        "generation_ks_isi": 0.13076713620635838,
+        "decoded_spike_count_relative_error": 0.22345763817429543,
+        "hard_count_mae": 8.46875,
+        "decoded_spatial_support_violation": 0.44559428611538276
+      },
+      {
+        "generation_metric": 0.8013441627530942,
+        "generation_stat_error": 0.37191381458199435,
+        "generation_ks_avalanche": 0.13513133867116167,
+        "generation_ks_isi": 0.12402462140240184,
+        "decoded_spike_count_relative_error": 0.2292842697352171,
+        "hard_count_mae": 8.46875,
+        "decoded_spatial_support_violation": 0.4458455709744434
+      },
+      {
+        "generation_metric": 0.8045954789367601,
+        "generation_stat_error": 0.4023295797560856,
+        "generation_ks_avalanche": 0.10005709391949755,
+        "generation_ks_isi": 0.10665645717576683,
+        "decoded_spike_count_relative_error": 0.21733028814196587,
+        "hard_count_mae": 8.46875,
+        "decoded_spatial_support_violation": 0.44361731495182294
+      },
+      {
+        "generation_metric": 0.8008431545794554,
+        "generation_stat_error": 0.3864160270841638,
+        "generation_ks_avalanche": 0.1259360108917631,
+        "generation_ks_isi": 0.11486157519491519,
+        "decoded_spike_count_relative_error": 0.23036006093025208,
+        "hard_count_mae": 8.46875,
+        "decoded_spatial_support_violation": 0.4438175678092943
+      },
+      {
+        "generation_metric": 0.8050738700184146,
+        "generation_stat_error": 0.3709072649881432,
+        "generation_ks_avalanche": 0.1123478982300885,
+        "generation_ks_isi": 0.13121539536633875,
+        "decoded_spike_count_relative_error": 0.22182851284742355,
+        "hard_count_mae": 8.46875,
+        "decoded_spatial_support_violation": 0.4505601289447067
+      }
+    ]
+  }
+}

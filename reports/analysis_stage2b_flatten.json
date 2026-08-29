@@ -1,0 +1,22 @@
+{
+  "F": 1024,
+  "distinct": 961,
+  "merged": 63,
+  "entries_seen_in_count_pass": 922,
+  "tokens": 66391,
+  "dup_rel_dist_thresh": 0.05,
+  "dup_criterion": "||ei-ej|| / (0.5*(||ei||+||ej||))  [Stage 2A duplicate_rel_dist_thresh]",
+  "collision_curve": {
+    "0.005": 0,
+    "0.01": 27,
+    "0.02": 107,
+    "0.05": 111,
+    "0.1": 113,
+    "0.2": 121
+  },
+  "nn_rel_min": 0.007118958048522472,
+  "nn_rel_median": 0.5432226061820984,
+  "usage_min": 0,
+  "usage_median": 33,
+  "usage_max": 514
+}

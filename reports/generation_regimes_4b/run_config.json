@@ -2,7 +2,7 @@
   "args": {
     "phase": "4b",
     "split": "test",
-    "batches": 8,
+    "batches": 70,
     "samples_per_clip": 4,
     "motif_steps": 12,
     "motif_temperature": 1.0,
@@ -10,6 +10,7 @@
     "activity_readout": "gumbel",
     "activity_readout_tau": 1.0,
     "activity_count_scale": 1.0,
+    "activity_field": "soft",
     "task_id": 0,
     "partial_local": "log_mean_firing_density,active_site_ratio",
     "bank": "ckpts/context_prior.pkl",
@@ -17,7 +18,7 @@
     "motif_ckpt": null,
     "out": "reports/generation_regimes_4b",
     "seed": 20260821,
-    "no_video": false,
+    "no_video": true,
     "regimes": "random,global_only,global_partial_local,global_full_local"
   },
   "partial_local_features": [
@@ -32,6 +33,6 @@
   },
   "free_generation": true,
   "activity_checkpoint": "ckpts/activity_prior_best_hard_metric.pt",
-  "motif_checkpoint": "ckpts/motif_prior_best.pt",
+  "motif_checkpoint": "ckpts/motif_prior_adapt_best.pt",
   "context_bank": "ckpts/context_prior.pkl"
 }

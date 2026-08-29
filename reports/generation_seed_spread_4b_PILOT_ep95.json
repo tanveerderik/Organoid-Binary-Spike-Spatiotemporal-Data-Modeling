@@ -1,0 +1,138 @@
+{
+  "config": {
+    "phase": "4b",
+    "split": "val",
+    "seeds": 8,
+    "batches": 4,
+    "motif_steps": 12,
+    "base_seed": 20260820,
+    "activity_ckpt": "/home/derik/.claude/jobs/602ce84e/tmp/pilot_best_ep95.pt",
+    "motif_ckpt": null,
+    "out": "reports/generation_seed_spread_4b_PILOT_ep95.json"
+  },
+  "runs": [
+    {
+      "generation_metric": 0.6837543079372524,
+      "generation_stat_error": 0.9760552001100092,
+      "generation_ks_avalanche": 0.22391084093211755,
+      "generation_ks_isi": 0.29304832374166445,
+      "decoded_spike_count_relative_error": 0.24621184915304184,
+      "hard_count_mae": 14.5,
+      "decoded_spatial_support_violation": 0.4839642562934171
+    },
+    {
+      "generation_metric": 0.6770557241563032,
+      "generation_stat_error": 1.0183291391916998,
+      "generation_ks_avalanche": 0.2375162831089883,
+      "generation_ks_isi": 0.3037941703305651,
+      "decoded_spike_count_relative_error": 0.24520253390073776,
+      "hard_count_mae": 14.5,
+      "decoded_spatial_support_violation": 0.4814710746978443
+    },
+    {
+      "generation_metric": 0.6805206408376123,
+      "generation_stat_error": 0.9795162811311043,
+      "generation_ks_avalanche": 0.24575663399474057,
+      "generation_ks_isi": 0.28898328309125787,
+      "decoded_spike_count_relative_error": 0.24822798743844032,
+      "hard_count_mae": 14.5,
+      "decoded_spatial_support_violation": 0.4814251528843888
+    },
+    {
+      "generation_metric": 0.6776914653374115,
+      "generation_stat_error": 1.0233115841600129,
+      "generation_ks_avalanche": 0.22315096251266464,
+      "generation_ks_isi": 0.2936338431741905,
+      "decoded_spike_count_relative_error": 0.2603161856532097,
+      "hard_count_mae": 14.5,
+      "decoded_spatial_support_violation": 0.481185295234974
+    },
+    {
+      "generation_metric": 0.6785627233083119,
+      "generation_stat_error": 1.0245481055941086,
+      "generation_ks_avalanche": 0.21570066030814383,
+      "generation_ks_isi": 0.3037073473825921,
+      "decoded_spike_count_relative_error": 0.2511288709938526,
+      "hard_count_mae": 14.5,
+      "decoded_spatial_support_violation": 0.4883730531435271
+    },
+    {
+      "generation_metric": 0.6852548015976178,
+      "generation_stat_error": 0.9985116992334822,
+      "generation_ks_avalanche": 0.21250648676699535,
+      "generation_ks_isi": 0.28722279500128056,
+      "decoded_spike_count_relative_error": 0.24048828333616257,
+      "hard_count_mae": 14.5,
+      "decoded_spatial_support_violation": 0.4819013781594502
+    },
+    {
+      "generation_metric": 0.6780585545435915,
+      "generation_stat_error": 1.01514695445065,
+      "generation_ks_avalanche": 0.2256753526177384,
+      "generation_ks_isi": 0.29167755422001573,
+      "decoded_spike_count_relative_error": 0.2591383121907711,
+      "hard_count_mae": 14.5,
+      "decoded_spatial_support_violation": 0.4849897284401453
+    },
+    {
+      "generation_metric": 0.6750765026319918,
+      "generation_stat_error": 1.0380411007893462,
+      "generation_ks_avalanche": 0.22624113475177304,
+      "generation_ks_isi": 0.30332553238256554,
+      "decoded_spike_count_relative_error": 0.2573884464800358,
+      "hard_count_mae": 14.5,
+      "decoded_spatial_support_violation": 0.4857949307151316
+    }
+  ],
+  "summary": {
+    "generation_metric": {
+      "mean": 0.6794968400437615,
+      "sd": 0.0034646659059908735,
+      "min": 0.6750765026319918,
+      "max": 0.6852548015976178,
+      "range": 0.010178298965625943
+    },
+    "generation_stat_error": {
+      "mean": 1.0091825080825516,
+      "sd": 0.022293996464029422,
+      "min": 0.9760552001100092,
+      "max": 1.0380411007893462,
+      "range": 0.06198590067933696
+    },
+    "generation_ks_avalanche": {
+      "mean": 0.2263072943741452,
+      "sd": 0.010842972473011876,
+      "min": 0.21250648676699535,
+      "max": 0.24575663399474057,
+      "range": 0.03325014722774522
+    },
+    "generation_ks_isi": {
+      "mean": 0.2956741061655165,
+      "sd": 0.006889270512089438,
+      "min": 0.28722279500128056,
+      "max": 0.3037941703305651,
+      "range": 0.016571375329284543
+    },
+    "decoded_spike_count_relative_error": {
+      "mean": 0.25101280864328146,
+      "sd": 0.007256211395149511,
+      "min": 0.24048828333616257,
+      "max": 0.2603161856532097,
+      "range": 0.01982790231704712
+    },
+    "hard_count_mae": {
+      "mean": 14.5,
+      "sd": 0.0,
+      "min": 14.5,
+      "max": 14.5,
+      "range": 0.0
+    },
+    "decoded_spatial_support_violation": {
+      "mean": 0.4836381086961098,
+      "sd": 0.0026085180504297318,
+      "min": 0.481185295234974,
+      "max": 0.4883730531435271,
+      "range": 0.007187757908553083
+    }
+  }
+}

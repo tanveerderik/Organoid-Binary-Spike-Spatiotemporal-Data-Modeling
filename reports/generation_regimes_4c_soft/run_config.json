@@ -2,7 +2,7 @@
   "args": {
     "phase": "4b",
     "split": "test",
-    "batches": 8,
+    "batches": 70,
     "samples_per_clip": 4,
     "motif_steps": 12,
     "motif_temperature": 1.0,
@@ -16,9 +16,9 @@
     "bank": "ckpts/context_prior.pkl",
     "activity_ckpt": null,
     "motif_ckpt": "ckpts/motif_prior_adapt_best.pt",
-    "out": "reports/generation_regimes_4d_soft",
+    "out": "reports/generation_regimes_4c_soft",
     "seed": 20260821,
-    "no_video": false,
+    "no_video": true,
     "regimes": "random,global_only,global_partial_local,global_full_local"
   },
   "partial_local_features": [

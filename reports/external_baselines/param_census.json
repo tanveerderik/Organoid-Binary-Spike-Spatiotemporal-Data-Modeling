@@ -1,0 +1,117 @@
+{
+ "arms": {
+  "pipeline": {
+   "shared": 8620946,
+   "per_assay": 0,
+   "n_assays": 0,
+   "parts": {
+    "VQ-VAE (stage 2A)": 4543714,
+    "motif prior": 2173301,
+    "activity prior": 1903931
+   },
+   "per_assay_note": "gct is a seeded random code (dataset.py:403-415), not storage"
+  },
+  "maskgit_flat": {
+   "shared": 13232961,
+   "per_assay": 0,
+   "n_assays": 0,
+   "fitted": 13232961,
+   "shared_maps": 0,
+   "parts": {
+    "tokenizer": 7555393,
+    "prior": 5677568
+   },
+   "per_assay_note": "same seeded random gct code as ours",
+   "budget": {
+    "epochs_run": null,
+    "best_epoch": null,
+    "early_stopped": null,
+    "n_train_clips": 480,
+    "best_val": null,
+    "val_slope_last5": null,
+    "fit_seconds": null
+   }
+  },
+  "unet3d": {
+   "shared": 9232833,
+   "per_assay": 0,
+   "n_assays": 0,
+   "fitted": 8372673,
+   "shared_maps": 860160,
+   "parts": {
+    "net": 8372673,
+    "spatial embedding (shared, all assays)": 860160
+   },
+   "per_assay_note": "same seeded random gct code as ours",
+   "budget": {
+    "epochs_run": 42,
+    "best_epoch": 32,
+    "early_stopped": true,
+    "n_train_clips": 480,
+    "best_val": 0.2310046711936593,
+    "val_slope_last5": -0.006580800594141084,
+    "fit_seconds": 3445.6802632808685
+   }
+  },
+  "cvae3d": {
+   "shared": 10220761,
+   "per_assay": 0,
+   "n_assays": 0,
+   "fitted": 9360601,
+   "shared_maps": 860160,
+   "parts": {
+    "net": 9360601,
+    "spatial embedding (shared, all assays)": 860160
+   },
+   "per_assay_note": "same seeded random gct code as ours",
+   "budget": {
+    "epochs_run": 31,
+    "best_epoch": 21,
+    "early_stopped": true,
+    "n_train_clips": 480,
+    "best_val": 0.32070174533873796,
+    "val_slope_last5": -8.158950755994265e-05,
+    "fit_seconds": 2840.216386079788
+   }
+  },
+  "dg": {
+   "shared": 26906,
+   "fitted": 26,
+   "shared_maps": 26880,
+   "per_assay": 26881,
+   "per_assay_total": 833311,
+   "n_assays": 31,
+   "parts": {
+    "site_p": 833280,
+    "global_site": 26880,
+    "rho_t": 9,
+    "rho_s": 7,
+    "rate_coef": 10,
+    "assay_lograte": 31
+   },
+   "per_assay_note": "one (H,W) site map per assay"
+  },
+  "glm": {
+   "shared": 58986,
+   "fitted": 5194,
+   "shared_maps": 53792,
+   "per_assay": 26880,
+   "per_assay_total": 833280,
+   "n_assays": 31,
+   "parts": {
+    "state_dict": 5194,
+    "site_logit": 833280,
+    "global_site": 26880,
+    "calib_corr": 32,
+    "calib_binid": 26880
+   },
+   "per_assay_note": "one (H,W) site map per assay"
+  }
+ },
+ "projection_assays": [
+  31,
+  100,
+  1000
+ ],
+ "caveat": "Zero per-assay storage is not zero memorisation: assay-specific information can live in shared weights. The checkable claim is that parameter count does not grow with the number of assays. gct is a SEEDED RANDOM code, so a new assay still needs training exposure -- this is not a zero-shot transfer claim."
+}

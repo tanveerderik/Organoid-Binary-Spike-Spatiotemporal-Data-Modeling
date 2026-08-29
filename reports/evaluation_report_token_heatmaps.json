@@ -1,0 +1,13 @@
+{
+  "n": 3558,
+  "temporal_entropy_decoder": 1.698763132095337,
+  "temporal_entropy_truth": 0.3121119439601898,
+  "temporal_flat_ceiling": 1.791759469228055,
+  "spatial_entropy_decoder": 3.1920855045318604,
+  "spatial_entropy_truth": 0.27939373254776,
+  "spatial_flat_ceiling": 5.3471075307174685,
+  "temporal_peak_decoder": 0.26458585262298584,
+  "temporal_peak_truth": 0.8107296228408813,
+  "corr_temporal": 0.39421547342514485,
+  "corr_spatial": 0.6597138505510114
+}
