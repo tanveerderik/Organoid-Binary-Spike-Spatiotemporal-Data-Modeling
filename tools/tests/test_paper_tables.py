@@ -178,3 +178,26 @@ def test_cvae_collapse_table_records_the_countermeasures():
             f"{name} no longer collapses; Appendix N's argument is now wrong")
         assert f"{d['final_val_kl_per_dim']:.4f}" in t, name
     assert t.count(" yes ") == 2, "a fit is missing from the table"
+
+
+def test_site_level_oracle_is_not_described_as_a_tie():
+    """At site level the FLAT alphabet scores higher, not equal.
+
+    An earlier draft called the two references "close" (0.2296 against 0.2607,
+    13% apart in the peer's favour) while framing the sentence as our
+    advantage being uneven. A reviewer who divides sees the peer win that axis,
+    so the text has to concede it in the same breath.
+    """
+    import json
+    ours = json.loads((ROOT / "reports" / "external_baselines"
+                       / "task_eval_pipeline.json").read_text())
+    flat = json.loads((ROOT / "reports" / "external_baselines"
+                       / "task_eval_maskgit_flat.json").read_text())
+    a = ours["tasks"]["recon"]["arms"]["oracle"]["site_mean"]
+    b = flat["tasks"]["recon"]["arms"]["oracle"]["site_mean"]
+    tex = " ".join((ROOT / "paper" / "sections"
+                    / "05_experiments.tex").read_text().split())
+    if a < b:
+        assert "slightly \\emph{lower}" in tex or "lower" in tex, (
+            "ours is lower at site level and the paper does not say so")
+        assert "are close" not in tex, "the site-level tie framing is back"

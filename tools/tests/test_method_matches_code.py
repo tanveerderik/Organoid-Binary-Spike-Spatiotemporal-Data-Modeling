@@ -11,6 +11,7 @@ no import, so no torch -- and fail if the manuscript disagrees.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -73,9 +74,12 @@ def test_global_code_dim_is_the_dataset_codebook_width(method):
     `global_ctx_dim`, wired from main.py's `dim_assay_for_emb`.
     """
     n = _module_const(ROOT / "main.py", "dim_assay_for_emb")
-    assert f"${n}$-dimensional" in method, (
-        f"Method does not state the global code as ${n}$-dimensional")
-    assert "$32$-dimensional $\\pm1$" not in method, (
+    # Match the fact, not one phrasing of it: "$64$-D" and "$64$-dimensional"
+    # are both fine, and an earlier version of this test failed a correct
+    # manuscript because it pinned the wording.
+    assert re.search(rf"\${n}\$-(?:D\b|dimensional)", method), (
+        f"Method does not state the global code as {n}-dimensional")
+    assert not re.search(r"\$32\$-(?:D\b|dimensional)\s*\$?\\pm1", method), (
         "the 32-dimensional claim is back; 32 is global_emb_dim, not the code")
 
 
@@ -126,7 +130,8 @@ def test_regions_are_described_as_roi_occupancy_not_as_a_count_target(method):
     term and the count head is one categorical over the whole ROI.
     """
     assert "how-much-activity is predicted at a coarser scale" not in method
-    assert "16 regions" in method or "$16$ regions" in method
+    assert re.search(r"\$16\$ (?:\w+ )?regions", method), (
+        "Method no longer mentions the 16 regions")
     prior = (ROOT / "model" / "prior.py").read_text()
     assert "roi_occupancy_proj" in prior, (
         "the ROI-occupancy path is gone; Method 4.4 needs re-reading")
