@@ -1,0 +1,7 @@
+{
+  "intercept": -1.5078325984380918,
+  "slope": 0.9885678862058705,
+  "train_clips": 240,
+  "val_clips": 80,
+  "ckpt": "/home/derik/.claude/jobs/602ce84e/tmp/pilot_ep16_snapshot.pt"
+}

@@ -1,0 +1,18 @@
+{
+    "samples": 279,
+    "target_count_mean": 51.32616487455197,
+    "target_count_mad": 33.03048521987128,
+    "mae": {
+        "model": 11.90801721661749,
+        "constant_global": 27.298206714746346,
+        "constant_per_assay": 10.022102704788407,
+        "density_global": 10.76889745104315,
+        "density_per_assay": 5.860874188018008
+    },
+    "model_beats": {
+        "constant_global": true,
+        "constant_per_assay": false,
+        "density_global": false,
+        "density_per_assay": false
+    }
+}

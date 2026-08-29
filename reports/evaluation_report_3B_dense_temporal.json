@@ -1,0 +1,20 @@
+{
+  "split": "temporal",
+  "test_exact_f1": 0.6065043053848064,
+  "best_val": 0.6142171340925626,
+  "epochs": 60,
+  "regimes": {
+    "pure prior (all masked)": {
+      "dense": 0.64500582948849,
+      "detr": 0.396530427149214
+    },
+    "causal (half given)": {
+      "dense": 0.6280407545866722,
+      "detr": 0.3935052468194752
+    },
+    "noncausal (span masked)": {
+      "dense": 0.6460492688543383,
+      "detr": 0.4041906574518978
+    }
+  }
+}

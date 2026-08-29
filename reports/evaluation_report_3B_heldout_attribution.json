@@ -1,0 +1,6 @@
+{
+  "global marginal (from 25 train assays)": 0.2835625441395851,
+  "ridge <- local_ctx only": 0.36825378079436816,
+  "ridge <- global_ctx only": 0.28900865438838547,
+  "ridge <- local + global": 0.32853677743181386
+}

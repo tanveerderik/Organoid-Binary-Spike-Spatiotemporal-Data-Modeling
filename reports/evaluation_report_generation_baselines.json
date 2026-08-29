@@ -1,0 +1,30 @@
+{
+    "batches": 70,
+    "results": {
+        "model": {
+            "count_relative_error": 0.45327391400933265,
+            "context_mae": 0.1606386292193617,
+            "local_field_error": 2.4535372614860536,
+            "short_gap_mae": 0.1240062804626567,
+            "generated_spike_count": 91.31190477098737,
+            "target_spike_count": 156.3952380997794
+        },
+        "surrogate": {
+            "count_relative_error": 0.08677186916715332,
+            "context_mae": 0.06072565269257341,
+            "local_field_error": 1.2444842857973917,
+            "short_gap_mae": 0.025185584875621964,
+            "generated_spike_count": 157.8369047709874,
+            "target_spike_count": 156.3952380997794
+        },
+        "swapped_context": {
+            "count_relative_error": 0.453501765110663,
+            "context_mae": 0.1649382530578545,
+            "local_field_error": 2.448667892387935,
+            "short_gap_mae": 0.12148849301572356,
+            "generated_spike_count": 94.49761905670167,
+            "target_spike_count": 156.3952380997794
+        }
+    },
+    "note": "context_mae for 'swapped_context' is measured against the SUPPLIED (rolled) context, so a low value means the generator tracks the requested descriptor rather than the assay average."
+}

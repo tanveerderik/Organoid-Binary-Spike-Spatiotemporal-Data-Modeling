@@ -1,0 +1,8 @@
+{
+  "kmeans_seed_capture": 0.7046592249556042,
+  "refined_capture": 0.9797639536543795,
+  "delta": 0.27510472869877534,
+  "n_residuals": 78305,
+  "seed_file": "ckpts/z2_kmeans_seed_1B_64ch.pt",
+  "ablation_ckpt": "ckpts/vqvae_stage1b_64ch_kmeansonly.pt"
+}

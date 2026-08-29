@@ -1,0 +1,138 @@
+{
+  "config": {
+    "phase": "4c",
+    "split": "val",
+    "seeds": 8,
+    "batches": 4,
+    "motif_steps": 12,
+    "base_seed": 20260820,
+    "activity_ckpt": null,
+    "motif_ckpt": null,
+    "out": null
+  },
+  "runs": [
+    {
+      "generation_metric": 0.7020413349205393,
+      "generation_stat_error": 0.7226578078563467,
+      "generation_ks_avalanche": 0.23763137657011024,
+      "generation_ks_isi": 0.2440707771794952,
+      "decoded_spike_count_relative_error": 0.3007338270545006,
+      "hard_count_mae": 18.9375,
+      "decoded_spatial_support_violation": 0.4801166390614486
+    },
+    {
+      "generation_metric": 0.6978118594806675,
+      "generation_stat_error": 0.7919278175790487,
+      "generation_ks_avalanche": 0.2135539795114263,
+      "generation_ks_isi": 0.26612665573547534,
+      "decoded_spike_count_relative_error": 0.28333641216158867,
+      "hard_count_mae": 18.9375,
+      "decoded_spatial_support_violation": 0.48447046993557974
+    },
+    {
+      "generation_metric": 0.7043716223758043,
+      "generation_stat_error": 0.7665411970813528,
+      "generation_ks_avalanche": 0.19592198581560283,
+      "generation_ks_isi": 0.2485494566218457,
+      "decoded_spike_count_relative_error": 0.28535499423742294,
+      "hard_count_mae": 18.9375,
+      "decoded_spatial_support_violation": 0.490626904466042
+    },
+    {
+      "generation_metric": 0.6968568621715568,
+      "generation_stat_error": 0.7682116898988183,
+      "generation_ks_avalanche": 0.2457187337830825,
+      "generation_ks_isi": 0.24557266379987985,
+      "decoded_spike_count_relative_error": 0.28987496346235275,
+      "hard_count_mae": 18.9375,
+      "decoded_spatial_support_violation": 0.4781417864558319
+    },
+    {
+      "generation_metric": 0.6997196830594589,
+      "generation_stat_error": 0.7445545966565695,
+      "generation_ks_avalanche": 0.2401215805471124,
+      "generation_ks_isi": 0.25286249331193156,
+      "decoded_spike_count_relative_error": 0.28863266855478287,
+      "hard_count_mae": 18.9375,
+      "decoded_spatial_support_violation": 0.485039348918185
+    },
+    {
+      "generation_metric": 0.6941635544470437,
+      "generation_stat_error": 0.8077828531735057,
+      "generation_ks_avalanche": 0.22778473091364204,
+      "generation_ks_isi": 0.25045206559201283,
+      "decoded_spike_count_relative_error": 0.2923448234796524,
+      "hard_count_mae": 18.9375,
+      "decoded_spatial_support_violation": 0.48202467654060976
+    },
+    {
+      "generation_metric": 0.7011559134049632,
+      "generation_stat_error": 0.7600821741620302,
+      "generation_ks_avalanche": 0.22940534642662302,
+      "generation_ks_isi": 0.243958959035263,
+      "decoded_spike_count_relative_error": 0.28494131937623024,
+      "hard_count_mae": 18.9375,
+      "decoded_spatial_support_violation": 0.47829677281573946
+    },
+    {
+      "generation_metric": 0.6950381392518022,
+      "generation_stat_error": 0.7722312284919636,
+      "generation_ks_avalanche": 0.2457187337830825,
+      "generation_ks_isi": 0.26030601679641063,
+      "decoded_spike_count_relative_error": 0.2900186851620674,
+      "hard_count_mae": 18.9375,
+      "decoded_spatial_support_violation": 0.47827404159866793
+    }
+  ],
+  "summary": {
+    "generation_metric": {
+      "mean": 0.6988948711389795,
+      "sd": 0.003551132587212835,
+      "min": 0.6941635544470437,
+      "max": 0.7043716223758043,
+      "range": 0.010208067928760611
+    },
+    "generation_stat_error": {
+      "mean": 0.7667486706124544,
+      "sd": 0.026270729948748028,
+      "min": 0.7226578078563467,
+      "max": 0.8077828531735057,
+      "range": 0.08512504531715903
+    },
+    "generation_ks_avalanche": {
+      "mean": 0.22948205841883523,
+      "sd": 0.01727814080367453,
+      "min": 0.19592198581560283,
+      "max": 0.2457187337830825,
+      "range": 0.04979674796747968
+    },
+    "generation_ks_isi": {
+      "mean": 0.2514873860090393,
+      "sd": 0.008020847324969686,
+      "min": 0.243958959035263,
+      "max": 0.26612665573547534,
+      "range": 0.022167696700212347
+    },
+    "decoded_spike_count_relative_error": {
+      "mean": 0.28940471168607473,
+      "sd": 0.005494589606319226,
+      "min": 0.28333641216158867,
+      "max": 0.3007338270545006,
+      "range": 0.01739741489291191
+    },
+    "hard_count_mae": {
+      "mean": 18.9375,
+      "sd": 0.0,
+      "min": 18.9375,
+      "max": 18.9375,
+      "range": 0.0
+    },
+    "decoded_spatial_support_violation": {
+      "mean": 0.48212382997401304,
+      "sd": 0.004402463596202247,
+      "min": 0.4781417864558319,
+      "max": 0.490626904466042,
+      "range": 0.012485118010210128
+    }
+  }
+}

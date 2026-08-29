@@ -1,0 +1,395 @@
+{
+  "config": {
+    "seeds": 4,
+    "batches": 4,
+    "motif_steps": 12,
+    "base_seed": 20260820,
+    "activity_ckpt": "/home/derik/.claude/jobs/602ce84e/tmp/pilot_best_ep48.pt",
+    "taus": "1.0,0.5",
+    "out": "reports/stage4b_stochastic_readout_PILOT.json"
+  },
+  "runs": {
+    "topk": [
+      {
+        "generation_metric": 0.6814622972078368,
+        "generation_distribution_match": 0.5216867735812645,
+        "generation_stat_error": 0.9168590246887435,
+        "generation_ks_avalanche": 0.2258156028368794,
+        "generation_ks_isi": 0.28861834178598456,
+        "decoded_spike_count_relative_error": 0.27798887714743614,
+        "decoded_spatial_support_violation": 0.48292143113674224,
+        "hard_exact_f1": 0.5997778600518326,
+        "hard_predicted_count_mean": 82.8125,
+        "hard_target_count_mean": 86.0
+      },
+      {
+        "generation_metric": 0.6804764656309158,
+        "generation_distribution_match": 0.5131881339804344,
+        "generation_stat_error": 0.9486031219071904,
+        "generation_ks_avalanche": 0.20226581928709586,
+        "generation_ks_isi": 0.29411847168581384,
+        "decoded_spike_count_relative_error": 0.28465088456869125,
+        "decoded_spatial_support_violation": 0.47217256811050523,
+        "hard_exact_f1": 0.5997778600518326,
+        "hard_predicted_count_mean": 82.8125,
+        "hard_target_count_mean": 86.0
+      },
+      {
+        "generation_metric": 0.6857109444236749,
+        "generation_distribution_match": 0.522974713351119,
+        "generation_stat_error": 0.9121383395235246,
+        "generation_ks_avalanche": 0.20330969267139476,
+        "generation_ks_isi": 0.2912769652459566,
+        "decoded_spike_count_relative_error": 0.27367516979575157,
+        "decoded_spatial_support_violation": 0.48424815289580697,
+        "hard_exact_f1": 0.5997778600518326,
+        "hard_predicted_count_mean": 82.8125,
+        "hard_target_count_mean": 86.0
+      },
+      {
+        "generation_metric": 0.6861217318576454,
+        "generation_distribution_match": 0.521075883757561,
+        "generation_stat_error": 0.919106278319467,
+        "generation_ks_avalanche": 0.19057750759878422,
+        "generation_ks_isi": 0.2869353648848031,
+        "decoded_spike_count_relative_error": 0.28327998518943787,
+        "decoded_spatial_support_violation": 0.47642794052546805,
+        "hard_exact_f1": 0.5997778600518326,
+        "hard_predicted_count_mean": 82.8125,
+        "hard_target_count_mean": 86.0
+      }
+    ],
+    "gumbel:1.0": [
+      {
+        "generation_metric": 0.7545151061487367,
+        "generation_distribution_match": 0.6837073196818774,
+        "generation_stat_error": 0.4626141496704916,
+        "generation_ks_avalanche": 0.22200447928331468,
+        "generation_ks_isi": 0.1378226312132459,
+        "decoded_spike_count_relative_error": 0.27198413759469986,
+        "decoded_spatial_support_violation": 0.506897380960244,
+        "hard_exact_f1": 0.46871529063309886,
+        "hard_predicted_count_mean": 82.8125,
+        "hard_target_count_mean": 86.0
+      },
+      {
+        "generation_metric": 0.7454472906220179,
+        "generation_distribution_match": 0.6544395036229712,
+        "generation_stat_error": 0.5280251183860526,
+        "generation_ks_avalanche": 0.22038350407144736,
+        "generation_ks_isi": 0.14849003801010818,
+        "decoded_spike_count_relative_error": 0.26225265860557556,
+        "decoded_spatial_support_violation": 0.5052386321112377,
+        "hard_exact_f1": 0.4509440947797112,
+        "hard_predicted_count_mean": 82.8125,
+        "hard_target_count_mean": 86.0
+      },
+      {
+        "generation_metric": 0.748642380147402,
+        "generation_distribution_match": 0.6754746182506953,
+        "generation_stat_error": 0.48044052726916886,
+        "generation_ks_avalanche": 0.22038350407144736,
+        "generation_ks_isi": 0.15687251837458815,
+        "decoded_spike_count_relative_error": 0.28019745647907257,
+        "decoded_spatial_support_violation": 0.5190775484196414,
+        "hard_exact_f1": 0.4635320251758608,
+        "hard_predicted_count_mean": 82.8125,
+        "hard_target_count_mean": 86.0
+      },
+      {
+        "generation_metric": 0.735815042539063,
+        "generation_distribution_match": 0.6266108197624356,
+        "generation_stat_error": 0.5958869021430654,
+        "generation_ks_avalanche": 0.2142232585252113,
+        "generation_ks_isi": 0.15470981451889532,
+        "decoded_spike_count_relative_error": 0.25786643475294113,
+        "decoded_spatial_support_violation": 0.5216061980420044,
+        "hard_exact_f1": 0.4509440947797112,
+        "hard_predicted_count_mean": 82.8125,
+        "hard_target_count_mean": 86.0
+      }
+    ],
+    "gumbel:0.5": [
+      {
+        "generation_metric": 0.7151233786054534,
+        "generation_distribution_match": 0.5784146784244869,
+        "generation_stat_error": 0.7288634561001237,
+        "generation_ks_avalanche": 0.20425531914893624,
+        "generation_ks_isi": 0.19621566791510614,
+        "decoded_spike_count_relative_error": 0.27276625484228134,
+        "decoded_spatial_support_violation": 0.49002946963504534,
+        "hard_exact_f1": 0.542761940022214,
+        "hard_predicted_count_mean": 82.8125,
+        "hard_target_count_mean": 86.0
+      },
+      {
+        "generation_metric": 0.7174694723793431,
+        "generation_distribution_match": 0.592018028045519,
+        "generation_stat_error": 0.689137750249579,
+        "generation_ks_avalanche": 0.21379133555498592,
+        "generation_ks_isi": 0.21333672415653282,
+        "decoded_spike_count_relative_error": 0.268608707934618,
+        "decoded_spatial_support_violation": 0.4845925024206089,
+        "hard_exact_f1": 0.53387634209552,
+        "hard_predicted_count_mean": 82.8125,
+        "hard_target_count_mean": 86.0
+      },
+      {
+        "generation_metric": 0.7081097430238534,
+        "generation_distribution_match": 0.5817159024697887,
+        "generation_stat_error": 0.7190521967068536,
+        "generation_ks_avalanche": 0.2150055991041433,
+        "generation_ks_isi": 0.22120588700743793,
+        "decoded_spike_count_relative_error": 0.2969723604619503,
+        "decoded_spatial_support_violation": 0.4986743163973476,
+        "hard_exact_f1": 0.5368382080710847,
+        "hard_predicted_count_mean": 82.8125,
+        "hard_target_count_mean": 86.0
+      },
+      {
+        "generation_metric": 0.7131785163266839,
+        "generation_distribution_match": 0.5807261364937302,
+        "generation_stat_error": 0.7219820792598277,
+        "generation_ks_avalanche": 0.22659574468085097,
+        "generation_ks_isi": 0.20128979879445175,
+        "decoded_spike_count_relative_error": 0.26920225843787193,
+        "decoded_spatial_support_violation": 0.48827641585252113,
+        "hard_exact_f1": 0.542761940022214,
+        "hard_predicted_count_mean": 82.8125,
+        "hard_target_count_mean": 86.0
+      }
+    ],
+    "oracle": [
+      {
+        "generation_metric": 0.7345145004879352,
+        "generation_distribution_match": 0.5919961237067879,
+        "generation_stat_error": 0.6892002497220641,
+        "generation_ks_avalanche": 0.19287095882840566,
+        "generation_ks_isi": 0.17989330563686157,
+        "decoded_spike_count_relative_error": 0.2530059218406677,
+        "decoded_spatial_support_violation": 0.49842109710594806,
+        "hard_exact_f1": 1.0,
+        "hard_predicted_count_mean": 86.0,
+        "hard_target_count_mean": 86.0
+      },
+      {
+        "generation_metric": 0.7244382651585457,
+        "generation_distribution_match": 0.5591663261465724,
+        "generation_stat_error": 0.7883766479490638,
+        "generation_ks_avalanche": 0.18022528160200246,
+        "generation_ks_isi": 0.19389890787775788,
+        "decoded_spike_count_relative_error": 0.24789626896381378,
+        "decoded_spatial_support_violation": 0.49815221458822795,
+        "hard_exact_f1": 1.0,
+        "hard_predicted_count_mean": 86.0,
+        "hard_target_count_mean": 86.0
+      },
+      {
+        "generation_metric": 0.7363846226466506,
+        "generation_distribution_match": 0.5957863022375771,
+        "generation_stat_error": 0.6784541642604563,
+        "generation_ks_avalanche": 0.17956157317859445,
+        "generation_ks_isi": 0.20639287098024028,
+        "decoded_spike_count_relative_error": 0.24189076572656631,
+        "decoded_spatial_support_violation": 0.5080427558783589,
+        "hard_exact_f1": 1.0,
+        "hard_predicted_count_mean": 86.0,
+        "hard_target_count_mean": 86.0
+      },
+      {
+        "generation_metric": 0.7367134850836554,
+        "generation_distribution_match": 0.5975168800840076,
+        "generation_stat_error": 0.6735928863790516,
+        "generation_ks_avalanche": 0.18358662613981758,
+        "generation_ks_isi": 0.1941711032876734,
+        "decoded_spike_count_relative_error": 0.2498081438243389,
+        "decoded_spatial_support_violation": 0.5042551451083055,
+        "hard_exact_f1": 1.0,
+        "hard_predicted_count_mean": 86.0,
+        "hard_target_count_mean": 86.0
+      }
+    ]
+  },
+  "summary": {
+    "generation_metric": {
+      "topk": [
+        0.6834428597800182,
+        0.00288921476698176
+      ],
+      "gumbel:1.0": [
+        0.746104954864305,
+        0.007820570942735536
+      ],
+      "gumbel:0.5": [
+        0.7134702775838335,
+        0.003981070099023881
+      ],
+      "oracle": [
+        0.7330127183441967,
+        0.0057977584784973425
+      ]
+    },
+    "generation_distribution_match": {
+      "topk": [
+        0.5197313761675948,
+        0.00443337847511087
+      ],
+      "gumbel:1.0": [
+        0.6600580653294948,
+        0.025477073399882734
+      ],
+      "gumbel:0.5": [
+        0.5832186863583813,
+        0.006027107393532013
+      ],
+      "oracle": [
+        0.5861164080437362,
+        0.018114042315316794
+      ]
+    },
+    "generation_stat_error": {
+      "topk": [
+        0.9241766911097313,
+        0.016541158344452106
+      ],
+      "gumbel:1.0": [
+        0.5167416743671945,
+        0.059550665820643486
+      ],
+      "gumbel:0.5": [
+        0.714758870579096,
+        0.017568803151649773
+      ],
+      "oracle": [
+        0.707405987077659,
+        0.05437288116302653
+      ]
+    },
+    "generation_ks_avalanche": {
+      "topk": [
+        0.20549215559853856,
+        0.014727090944119399
+      ],
+      "gumbel:1.0": [
+        0.21924868648785517,
+        0.003436322745576031
+      ],
+      "gumbel:0.5": [
+        0.2149119996222291,
+        0.009153130359233336
+      ],
+      "oracle": [
+        0.18406110993720504,
+        0.00613182904792697
+      ]
+    },
+    "generation_ks_isi": {
+      "topk": [
+        0.2902372859006395,
+        0.0031447415729180025
+      ],
+      "gumbel:1.0": [
+        0.1494737505292094,
+        0.008541553398317947
+      ],
+      "gumbel:0.5": [
+        0.20801201946838216,
+        0.011354481955181961
+      ],
+      "oracle": [
+        0.19358904694563328,
+        0.010831220972856541
+      ]
+    },
+    "decoded_spike_count_relative_error": {
+      "topk": [
+        0.2798987291753292,
+        0.005046322067776424
+      ],
+      "gumbel:1.0": [
+        0.2680751718580723,
+        0.01000582782548667
+      ],
+      "gumbel:0.5": [
+        0.2768873954191804,
+        0.013515270589378743
+      ],
+      "oracle": [
+        0.24815027508884668,
+        0.0046751759571386775
+      ]
+    },
+    "decoded_spatial_support_violation": {
+      "topk": [
+        0.47894252316713065,
+        0.005660884288369664
+      ],
+      "gumbel:1.0": [
+        0.5132049398832819,
+        0.008332987234626632
+      ],
+      "gumbel:0.5": [
+        0.4903931760763808,
+        0.0059676364974499884
+      ],
+      "oracle": [
+        0.50221780317021,
+        0.004796694128294336
+      ]
+    },
+    "hard_exact_f1": {
+      "topk": [
+        0.5997778600518326,
+        0.0
+      ],
+      "gumbel:1.0": [
+        0.4585338763420955,
+        0.00901576872409177
+      ],
+      "gumbel:0.5": [
+        0.5390596075527582,
+        0.004442798963346977
+      ],
+      "oracle": [
+        1.0,
+        0.0
+      ]
+    },
+    "hard_predicted_count_mean": {
+      "topk": [
+        82.8125,
+        0.0
+      ],
+      "gumbel:1.0": [
+        82.8125,
+        0.0
+      ],
+      "gumbel:0.5": [
+        82.8125,
+        0.0
+      ],
+      "oracle": [
+        86.0,
+        0.0
+      ]
+    },
+    "hard_target_count_mean": {
+      "topk": [
+        86.0,
+        0.0
+      ],
+      "gumbel:1.0": [
+        86.0,
+        0.0
+      ],
+      "gumbel:0.5": [
+        86.0,
+        0.0
+      ],
+      "oracle": [
+        86.0,
+        0.0
+      ]
+    }
+  }
+}

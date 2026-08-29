@@ -1,0 +1,211 @@
+{
+ "n_clips": 48,
+ "shape": [
+  48,
+  120,
+  224
+ ],
+ "voxel_rate": 0.00016221142141148448,
+ "shipped_patch": [
+  6,
+  15,
+  14
+ ],
+ "rows": [
+  {
+   "patch": [
+    24,
+    15,
+    14
+   ],
+   "voxels_per_patch": 5040,
+   "n_tokens": 256,
+   "blank_frac": 0.7958984375,
+   "active_tokens": 52.25,
+   "spikes_per_active": 4.005582332611084,
+   "spikes_sd": 3.7729709148406982,
+   "capture_k32": 0.06002032943815583,
+   "is_shipped": false
+  },
+  {
+   "patch": [
+    12,
+    30,
+    14
+   ],
+   "voxels_per_patch": 5040,
+   "n_tokens": 256,
+   "blank_frac": 0.7600911259651184,
+   "active_tokens": 61.41666793823242,
+   "spikes_per_active": 3.4077341556549072,
+   "spikes_sd": 3.37398099899292,
+   "capture_k32": 0.06165540458307506,
+   "is_shipped": false
+  },
+  {
+   "patch": [
+    6,
+    30,
+    28
+   ],
+   "voxels_per_patch": 5040,
+   "n_tokens": 256,
+   "blank_frac": 0.730712890625,
+   "active_tokens": 68.9375,
+   "spikes_per_active": 3.0359625816345215,
+   "spikes_sd": 3.0791022777557373,
+   "capture_k32": 0.06986410556780331,
+   "is_shipped": false
+  },
+  {
+   "patch": [
+    12,
+    15,
+    14
+   ],
+   "voxels_per_patch": 2520,
+   "n_tokens": 512,
+   "blank_frac": 0.845458984375,
+   "active_tokens": 79.125,
+   "spikes_per_active": 2.645076274871826,
+   "spikes_sd": 2.320600986480713,
+   "capture_k32": 0.06067259470917097,
+   "is_shipped": false
+  },
+  {
+   "patch": [
+    6,
+    30,
+    14
+   ],
+   "voxels_per_patch": 2520,
+   "n_tokens": 512,
+   "blank_frac": 0.8184814453125,
+   "active_tokens": 92.9375,
+   "spikes_per_active": 2.2519614696502686,
+   "spikes_sd": 2.0456008911132812,
+   "capture_k32": 0.06754561883773957,
+   "is_shipped": false
+  },
+  {
+   "patch": [
+    24,
+    15,
+    7
+   ],
+   "voxels_per_patch": 2520,
+   "n_tokens": 512,
+   "blank_frac": 0.8643798828125,
+   "active_tokens": 69.4375,
+   "spikes_per_active": 3.014101505279541,
+   "spikes_sd": 2.710099458694458,
+   "capture_k32": 0.055930799772672124,
+   "is_shipped": false
+  },
+  {
+   "patch": [
+    6,
+    15,
+    14
+   ],
+   "voxels_per_patch": 1260,
+   "n_tokens": 1024,
+   "blank_frac": 0.8890584111213684,
+   "active_tokens": 113.60416412353516,
+   "spikes_per_active": 1.842288613319397,
+   "spikes_sd": 1.4327917098999023,
+   "capture_k32": 0.08658580007100058,
+   "is_shipped": true
+  },
+  {
+   "patch": [
+    3,
+    15,
+    14
+   ],
+   "voxels_per_patch": 630,
+   "n_tokens": 2048,
+   "blank_frac": 0.927276611328125,
+   "active_tokens": 148.9375,
+   "spikes_per_active": 1.4052314758300781,
+   "spikes_sd": 0.8745487332344055,
+   "capture_k32": 0.13847273343198774,
+   "is_shipped": false
+  },
+  {
+   "patch": [
+    6,
+    15,
+    7
+   ],
+   "voxels_per_patch": 630,
+   "n_tokens": 2048,
+   "blank_frac": 0.93438720703125,
+   "active_tokens": 134.375,
+   "spikes_per_active": 1.5575194358825684,
+   "spikes_sd": 1.0534749031066895,
+   "capture_k32": 0.10598086315725763,
+   "is_shipped": false
+  },
+  {
+   "patch": [
+    3,
+    15,
+    7
+   ],
+   "voxels_per_patch": 315,
+   "n_tokens": 4096,
+   "blank_frac": 0.95928955078125,
+   "active_tokens": 166.75,
+   "spikes_per_active": 1.255122423171997,
+   "spikes_sd": 0.6375559568405151,
+   "capture_k32": 0.18093176786169451,
+   "is_shipped": false
+  },
+  {
+   "patch": [
+    6,
+    10,
+    7
+   ],
+   "voxels_per_patch": 420,
+   "n_tokens": 3072,
+   "blank_frac": 0.9533488154411316,
+   "active_tokens": 143.3125,
+   "spikes_per_active": 1.4603866338729858,
+   "spikes_sd": 0.9136103391647339,
+   "capture_k32": 0.12593616715836864,
+   "is_shipped": false
+  },
+  {
+   "patch": [
+    3,
+    10,
+    7
+   ],
+   "voxels_per_patch": 210,
+   "n_tokens": 6144,
+   "blank_frac": 0.9717000126838684,
+   "active_tokens": 173.875,
+   "spikes_per_active": 1.2036904096603394,
+   "spikes_sd": 0.54927659034729,
+   "capture_k32": 0.22813058749262705,
+   "is_shipped": false
+  },
+  {
+   "patch": [
+    2,
+    8,
+    7
+   ],
+   "voxels_per_patch": 112,
+   "n_tokens": 11520,
+   "blank_frac": 0.9835593700408936,
+   "active_tokens": 189.3958282470703,
+   "spikes_per_active": 1.1050488948822021,
+   "spikes_sd": 0.37739747762680054,
+   "capture_k32": 0.3798880238047926,
+   "is_shipped": false
+  }
+ ]
+}

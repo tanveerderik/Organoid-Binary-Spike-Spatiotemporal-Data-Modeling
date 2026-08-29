@@ -1,0 +1,10 @@
+{
+  "n_pairs": 46,
+  "ctx_swap_rel_l1": 1.0069578403364057,
+  "ctx_swap_jaccard": 0.35280619024328885,
+  "ain_blank_rel_l1": 0.7265239077082416,
+  "ain_blank_jaccard": 0.6305161814955575,
+  "assay_map_pair_cos_mean": 0.23989661037921906,
+  "assay_map_pair_cos_min": 0.0,
+  "n_assays": 31
+}

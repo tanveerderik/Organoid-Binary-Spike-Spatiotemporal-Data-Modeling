@@ -7,14 +7,15 @@
   "extra": {},
   "protocol": {
     "split": "test",
-    "batches": 8,
+    "batches": 70,
     "samples_per_clip": 4,
     "seed": 20260821,
     "regimes": [
       "random",
       "global_only",
       "global_partial_local",
-      "global_full_local"
+      "global_full_local",
+      "local_only"
     ]
   },
   "regime_definitions": {
@@ -31,7 +32,7 @@
       "global_full_local": "gct and lct both pinned to the held-out clip"
     }
   },
-  "rate_calibrated_batches": 128,
+  "rate_calibrated_batches": 1400,
   "volume_shape": [
     48,
     120,
@@ -42,26 +43,35 @@
     "reference": "reports/generation_regimes_4c_soft",
     "regimes": {
       "random": {
-        "reference_n": 128,
-        "baseline_n": 128,
-        "matched": 128
+        "reference_n": 1116,
+        "baseline_n": 1116,
+        "matched": 1116
       },
       "global_only": {
-        "reference_n": 128,
-        "baseline_n": 128,
-        "matched": 128
+        "reference_n": 1116,
+        "baseline_n": 1116,
+        "matched": 1116
       },
       "global_partial_local": {
-        "reference_n": 128,
-        "baseline_n": 128,
-        "matched": 128
+        "reference_n": 1116,
+        "baseline_n": 1116,
+        "matched": 1116
       },
       "global_full_local": {
-        "reference_n": 128,
-        "baseline_n": 128,
-        "matched": 128
+        "reference_n": 1116,
+        "baseline_n": 1116,
+        "matched": 1116
+      },
+      "local_only": {
+        "reference_n": 0,
+        "baseline_n": 1116,
+        "matched": null,
+        "skipped": "regime absent from the reference set"
       }
     },
+    "not_in_reference": [
+      "local_only"
+    ],
     "ok": true,
     "problems": []
   }
