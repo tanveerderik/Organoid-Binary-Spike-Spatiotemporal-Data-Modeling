@@ -84,10 +84,14 @@ def draw(fig) -> None:
         Line2D([], [], ls="none", marker="o", ms=5.5, color=INK_2,
                label="full context"),
     ]
+    # Two bands above the panels, and they must not share one. The legend hangs
+    # DOWN from its anchor while the annotation grows UP from its baseline, so
+    # anchoring the legend at 1.24 and the text at 1.13 overlapped them in the
+    # middle. Annotation on top, legend beneath it, with a gap between.
     fig.legend(handles=handles, loc="upper center", ncol=2,
-               bbox_to_anchor=(0.5, 1.24), handletextpad=0.4,
+               bbox_to_anchor=(0.5, 1.16), handletextpad=0.4,
                columnspacing=1.4, labelcolor=INK_2)
-    fig.text(0.5, 1.13, "rightward is better in every panel; the connector is "
+    fig.text(0.5, 1.21, "rightward is better in every panel; the connector is "
                         "that arm's conditioning gain", ha="center",
              va="bottom", fontsize=6.5, color=INK_2)
     fig.subplots_adjust(wspace=0.42)
