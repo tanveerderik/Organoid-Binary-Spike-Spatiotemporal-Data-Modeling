@@ -16,6 +16,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2].parent))
 from MAGVIT_project.tools import extract_hparams as EH  # noqa: E402
 
 
+@pytest.fixture(scope="module")
+def hparams():
+    """The payload as `main()` would write it, without touching the file."""
+    return {"stages": EH.stages(), "objectives": EH.objectives(),
+            "disabled": EH.disabled()}
+
+
 def test_every_shipped_stage_is_present():
     stages = {s["stage"] for s in EH.stages()}
     assert stages == {"1", "2A", "3", "4A", "4B", "4C"}
@@ -70,3 +77,68 @@ def test_grad_clip_is_reported_as_absent_not_as_zero():
     by_stage = {s["stage"]: s for s in EH.stages()}
     assert by_stage["2A"]["grad_clip"] is None
     assert by_stage["4A"]["grad_clip"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# The objective decomposition. Two coefficients here cannot be read off the
+# obvious source line, and both were wrong in an earlier hand-written pass.
+# ---------------------------------------------------------------------------
+
+def _objectives(payload):
+    return {o["stage"]: {t["term"]: t["coeff"] for t in o["terms"]}
+            for o in payload["objectives"]}
+
+
+def test_stage2a_context_weight_follows_the_runtime_rebind(hparams):
+    """lambda_ctx is 2.8, not the 0.1 the call site statically reads.
+
+    `run_stage2a` rebinds the module global through `globals()[...]` before
+    calling `fit_vqvae`, so a static read of `STAGE2_LAMBDA_CTX` is 28x low.
+    If this ever reports 0.1, the extractor stopped following the rebind.
+    """
+    assert _objectives(hparams)["2A"]["context"] == 2.8
+
+
+def test_stage4b_lambdas_come_from_the_maskgit_dict(hparams):
+    """Stage 4B has two config dicts and only one of them is read by the loss.
+
+    STAGE4B_HYPERPARAMETERS carries lambda_count=1.0, lambda_adj_t=0.0 and
+    lambda_adj_s=0.0, none of which the run uses; the loss reads
+    STAGE4B_MASKGIT_HYPERPARAMETERS. Quoting the first dict would report a
+    count weight 15x too high and claim the co-activation terms were off.
+    """
+    b = _objectives(hparams)["4B"]
+    assert b["count"] == 0.065, "lambda_count came from the wrong dict"
+    assert b["temporal co-activation"] == 0.1
+    assert b["spatial co-activation"] == 0.1
+
+
+def test_activity_bce_is_not_class_balanced(hparams):
+    """pos_weight is 1.0 by design; the Method's failure-mode argument
+    depends on it, so a change here invalidates that paragraph."""
+    terms = {t["term"]: t for o in hparams["objectives"] if o["stage"] == "4B"
+             for t in o["terms"]}
+    assert "positive weight 1.0" in terms["per-cell BCE"]["constrains"]
+
+
+def test_every_objective_term_has_a_coefficient_and_a_purpose(hparams):
+    for o in hparams["objectives"]:
+        assert o["terms"], o["stage"]
+        for t in o["terms"]:
+            assert t["coeff"] not in (None, ""), (o["stage"], t["term"])
+            assert len(t["constrains"]) > 20, (o["stage"], t["term"])
+
+
+def test_disabled_terms_are_declared(hparams):
+    """A reader finding these in the release should not have to work out
+    whether they ran."""
+    what = " ".join(x["what"] for x in hparams["disabled"])
+    assert "token-profile entropy" in what
+    assert "loss_weights" in what
+
+
+def test_stage_table_does_not_advertise_the_dead_alpha_weight(hparams):
+    """model/prior.py reads loss_weights[0] only; the second element weighted
+    a head that no longer exists."""
+    for st in hparams["stages"]:
+        assert not any("alpha" in k for k in st["loss_terms"]), st["stage"]
