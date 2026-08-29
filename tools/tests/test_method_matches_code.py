@@ -151,5 +151,9 @@ def test_paper_does_not_present_the_tokeniser_as_convolution_free(method):
     assert "convolutional stem" in method, (
         "Section 4.1 does not say the tokeniser has a convolutional stem")
     limits = _flat(LIMITS.read_text())
-    assert "all-convolutional core" in limits or "convolutional core" in limits, (
-        "Limitations still implies no convolution is present at all")
+    assert "fully convolutional" in limits, (
+        "Limitations no longer says the matched peer's tokeniser is "
+        "convolutional; without that the paper reads as though no "
+        "convolutional tokeniser was measured at all")
+    assert "not a controlled comparison" in limits, (
+        "Limitations no longer says what the peer confounds")

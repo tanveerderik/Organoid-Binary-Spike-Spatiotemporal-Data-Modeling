@@ -135,3 +135,26 @@ def test_appendix_floats_are_not_pinned_to_here_only():
     src = (ROOT / "paper" / "sections" / "99_appendix.tex").read_text()
     assert "\\begin{table}[h]" not in src, (
         "an appendix table is pinned [h]; floats will cascade to the end again")
+
+
+def test_unet_spatial_map_numbers_are_the_current_ones():
+    """Two different figures for the same quantity were in the appendix.
+
+    `app:baselines` quoted 0.2126/0.0351 -- the v1 U-Net run -- while
+    `app:limits` quoted 0.2757/0.0552 from the shipped diagnose artifacts.
+    check_paper_numbers.py could not catch it: it verifies that a number exists
+    somewhere under reports/, not that it is the number for this quantity.
+    """
+    import json
+    pos = json.loads((ROOT / "reports" / "external_baselines"
+                      / "diagnose_unet3d.json").read_text())
+    nopos = json.loads((ROOT / "reports" / "external_baselines"
+                        / "diagnose_unet3d_nopos.json").read_text())
+    full = "global_full_local"
+    a = pos["context_and_space"]["regimes"][full]["map_r_own_clip"]
+    b = nopos["context_and_space"]["regimes"][full]["map_r_own_clip"]
+    tex = " ".join((ROOT / "paper" / "sections" / "99_appendix.tex").read_text().split())
+    assert f"{a:.4f}" in tex, f"appendix does not quote map_r with pos ({a:.4f})"
+    assert f"{b:.4f}" in tex, f"appendix does not quote map_r without pos ({b:.4f})"
+    for stale in ("0.2126", "0.0351"):
+        assert stale not in tex, f"the v1 U-Net value {stale} is back"
