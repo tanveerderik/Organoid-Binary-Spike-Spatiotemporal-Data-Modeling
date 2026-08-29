@@ -124,3 +124,14 @@ def test_stage_chronology_lists_every_stage_with_its_handoff():
     # columns; they must still be present somewhere in the file.
     for metric in ("MRR", "NLL", "AUPRC"):
         assert metric in t, f"selection metric {metric} dropped from the table"
+
+
+def test_appendix_floats_are_not_pinned_to_here_only():
+    """`[h]` alone cascades: once one float cannot be placed, every float after
+    it defers too, and the tables end up in a block at the end of the document
+    while their sections read as headings with nothing under them. That is what
+    the appendix did -- eleven of seventeen tables landed four to nine pages
+    after the text discussing them. `[htbp]` lets a float take a page top."""
+    src = (ROOT / "paper" / "sections" / "99_appendix.tex").read_text()
+    assert "\\begin{table}[h]" not in src, (
+        "an appendix table is pinned [h]; floats will cascade to the end again")
