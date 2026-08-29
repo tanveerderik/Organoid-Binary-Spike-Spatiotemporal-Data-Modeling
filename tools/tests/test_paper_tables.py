@@ -104,3 +104,23 @@ def test_motif_reuse_table_never_shows_the_size_confounded_jaccard():
     for k in ("mean_within_organoid", "mean_within_slice", "mean_cross_prep"):
         assert f"{jr[k]:.4f}" in t
     assert f"{jr['null_mean']:.4f}" in t
+
+
+def test_stage_chronology_lists_every_stage_with_its_handoff():
+    """Section 4.5 leans on this table instead of narrating the chronology.
+
+    A stage missing here would read as a stage the paper does not have, so the
+    generator raises rather than emitting a short table -- this asserts the
+    rendered result as well.
+    """
+    t = _t("t1_stages.tex")
+    for stage in ("1", "2A", "3", "4A", "4B", "4C"):
+        assert f"\n{stage} &" in t, f"stage {stage} missing from the chronology"
+    # Each row must say what the stage hands the next one; a chronology
+    # without the hand-off does not show that nothing is trained jointly.
+    assert t.count("frozen") >= 3
+    assert "the activity field 4B" in t, "4C's input distribution is not stated"
+    # The selection metrics moved to a footnote when the table went to four
+    # columns; they must still be present somewhere in the file.
+    for metric in ("MRR", "NLL", "AUPRC"):
+        assert metric in t, f"selection metric {metric} dropped from the table"
