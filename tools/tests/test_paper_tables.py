@@ -158,3 +158,23 @@ def test_unet_spatial_map_numbers_are_the_current_ones():
     assert f"{b:.4f}" in tex, f"appendix does not quote map_r without pos ({b:.4f})"
     for stale in ("0.2126", "0.0351"):
         assert stale not in tex, f"the v1 U-Net value {stale} is back"
+
+
+def test_cvae_collapse_table_records_the_countermeasures():
+    """A reviewer's first reading of "the latent collapses" is that the arm was
+    under-tuned so that it would. The table has to carry both what was done
+    against collapse and the outcome, read from the fit reports.
+    """
+    import json
+    t = _t("a_cvae_collapse.tex")
+    for measure in ("conditional", "free bits", "warm-up", "per channel"):
+        assert measure in t, f"anti-collapse measure {measure!r} not stated"
+    # Both fits, and both must still be collapsing -- if one stops, the
+    # appendix's argument changes and the prose has to be re-read.
+    for name in ("cvae3d", "cvae3d_nopos"):
+        d = json.loads(
+            (ROOT / "ckpts" / "external_baselines" / f"{name}.fit.json").read_text())
+        assert d["latent_collapsed"], (
+            f"{name} no longer collapses; Appendix N's argument is now wrong")
+        assert f"{d['final_val_kl_per_dim']:.4f}" in t, name
+    assert t.count(" yes ") == 2, "a fit is missing from the table"
