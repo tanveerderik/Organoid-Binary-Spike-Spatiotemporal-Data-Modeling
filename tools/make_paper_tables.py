@@ -641,6 +641,60 @@ def app_pooled_marginals() -> None:
            "reports/external_baselines/comparison.json")
 
 
+# The supervision target and the frozen hand-off are properties of the design,
+# not of a run, so they are named here; the stage list, what each stage trains
+# and how it is selected all come from the extractor, so a renamed or dropped
+# stage breaks this table instead of leaving a stale row in the paper.
+_STAGE_ROLE = {
+    "1":  ("the recording's running union of active sites",
+           "frozen code-to-support mapper"),
+    "2A": ("the clip itself, reconstructed through the quantiser",
+           "frozen motif alphabet, $V=961$"),
+    "3":  ("the clip's texton usage histogram",
+           "frozen nine-scalar-to-code mapper"),
+    "4A": ("true motifs, given the \\emph{true} activity field",
+           "motif generator"),
+    "4B": ("the true activity field and its total count",
+           "activity generator"),
+    "4C": ("true motifs, given the activity field 4B \\emph{emits}",
+           "the prior used at inference"),
+}
+
+
+def stage_chronology() -> None:
+    """The four-stage sequence, one row per stage.
+
+    Section 4.5 leans on this table instead of narrating the chronology, so it
+    has to be complete: a stage silently missing here would read as a stage the
+    paper does not have.
+    """
+    d = json.loads(Path("reports/hyperparameters.json").read_text())
+    missing = [s["stage"] for s in d["stages"] if s["stage"] not in _STAGE_ROLE]
+    if missing:
+        raise SystemExit(f"stage_chronology: no role text for {missing}; the "
+                         "pipeline gained a stage and this table would omit it")
+    rows, sel = [], []
+    for st in d["stages"]:
+        target, out = _STAGE_ROLE[st["stage"]]
+        rows.append(f"{st['stage']} & {_esc(st['trained'])} & {target} & "
+                    f"{out} \\\\")
+        sel.append(f"{st['stage']} on {_esc(st['select_on'])}")
+    # Four prose columns at 5.5in is already tight; the selection metric moves
+    # to a footnote so the remaining columns get enough width not to wrap into
+    # a table twice as tall as it needs to be.
+    rag = ">{\\raggedright\\arraybackslash}"
+    body = ("\\begin{tabular}{@{}l " + rag + "p{0.24\\textwidth} " + rag
+            + "p{0.30\\textwidth} " + rag + "p{0.26\\textwidth}@{}}\n"
+            "\\toprule\n"
+            "stage & what it trains & supervision target & "
+            "frozen output used later \\\\\n\\midrule\n"
+            + "\n".join(rows) + "\n\\bottomrule\n\\end{tabular}\n\n"
+            "\\vspace{0.3em}\n\n"
+            "{\\footnotesize Checkpoint selection: "
+            + "; ".join(sel) + ".}")
+    _write("t1_stages.tex", body, "reports/hyperparameters.json")
+
+
 def app_objectives() -> None:
     """Every loss term of every stage, with its coefficient and its job.
 
@@ -663,7 +717,8 @@ def app_objectives() -> None:
     off = "; ".join(f"{_esc(x['where'])}, {_esc(x['what'])} ({_esc(x['why'])})"
                     for x in d["disabled"])
     body = (
-        "\\begin{tabular}{@{}l l p{0.52\\textwidth}@{}}\n\\toprule\n"
+        "\\begin{tabular}{@{}>{\\raggedright\\arraybackslash}p{0.24\\textwidth} "
+        "l >{\\raggedright\\arraybackslash}p{0.44\\textwidth}@{}}\n\\toprule\n"
         "term & coefficient & what it constrains \\\\\n\\midrule\n"
         + "\n".join(rows[:-1])
         + "\n\\bottomrule\n\\end{tabular}\n\n\\vspace{0.4em}\n\n"
@@ -718,6 +773,7 @@ def main() -> int:
     preproc_macros()
     eval_macros()
     data_provenance()
+    stage_chronology()
     scalability()
     task_completion()
     generation()

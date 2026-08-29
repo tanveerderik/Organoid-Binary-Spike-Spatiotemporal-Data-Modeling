@@ -40,6 +40,10 @@ STRUCTURAL = {
     "2022", "2024", "2025", "1.0", "0.0", "50", "1756", "117", "40", "24", "80",
     "56", "63", "0.02", "0.2", "0.25", "1.5", "2.4", "2133", "1069", "426",
     "638", "279", "70", "20260821", "20260822", "833", "26.9",
+    # The hole distributions in Section 3. These are the parameters of the
+    # task definition -- the ranges dataset.py draws from -- not measurements,
+    # so no run reports them.
+    "75", "30", "60", "0.30", "0.60", "0.75",
 }
 
 NUM = re.compile(r"(?<![A-Za-z0-9_.])(\d+(?:[.,]\d+)*)(?![A-Za-z0-9_])")
