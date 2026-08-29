@@ -2,14 +2,24 @@
 """Assert the scientific body fits the ICLR page limit.
 
 The body is Sections 1-7. The Ethics, Reproducibility and Use-of-AI statements
-sit between the Conclusion and the References; `paper/main.tex` records that they
-do NOT count toward the limit.
+sit between the Conclusion and the References and do NOT count toward the limit.
 
-    !! UNVERIFIED against the official ICLR 2027 call for papers as of
-    !! 2026-08-29. If the CFP counts all non-reference prose, lower LIMIT by the
-    !! number of pages the statements occupy and re-run. The difference is large:
-    !! under the current rule the body is over by four typeset lines; under the
-    !! other one it is over by roughly a page.
+Verified 2026-08-29 against the ICLR 2027 Author Guidelines
+(https://iclr.cc/Conferences/2027/AuthorGuidelines), which state:
+
+  * "The main text should be 9 pages or fewer" at submission. The limit rises to
+    10 pages for the rebuttal phase and the camera ready; this gate enforces the
+    submission limit, which is the binding one.
+  * "The list of references does not count towards the page limit, and unlimited
+    additional pages are allowed for the bibliography/references."
+  * "Authors may use as many pages of appendices (after the bibliography) as
+    they wish."
+  * "The optional ethics statement will not count toward the page limit, but
+    should not be more than 1 page."
+  * "This optional reproducibility statement is not part of the main text and
+    therefore will not count toward the page limit."
+  * On the AI use statement: "This section does not count toward the page
+    limit."
 
 Counting by hand from a rendered PDF is what produced the earlier, wrong claim
 that the paper already fitted in nine pages. This is the only measurement that
