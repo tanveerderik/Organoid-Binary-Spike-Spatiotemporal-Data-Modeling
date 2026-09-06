@@ -53,10 +53,15 @@ DEFAULT_METRICS = ("stat_error", "ks_avalanche", "ks_isi", "rel_rate",
                    "rel_isi_mean", "rel_avalanche_mean", "rel_burst_rate")
 
 DEFAULT_SETS = {
-    # pipeline
+    # pipeline. Three arms, not four: the old "4B" row was generated without an
+    # explicit --motif-ckpt, so it inherited whatever CKPTS["motif_prior_ship"]
+    # pointed at and came out bit-identical to the ship arm. What it was meant
+    # to isolate -- "whether 4C's placement calibration was applied" -- is not
+    # recoverable from the run logs and is indistinguishable from 4A+soft at the
+    # current checkpoint state. reports/generation_regimes_4b is left on disk;
+    # it is simply no longer scored as a distinct configuration.
     "4C+soft (ship)": "reports/generation_regimes_4c_soft",
     "4A+soft":        "reports/generation_regimes_4a_soft",
-    "4B":             "reports/generation_regimes_4b",
     "4C+hard":        "reports/generation_regimes_4c_hard",
     # external
     "DG (Macke'09)":  "reports/external_baselines/dg",

@@ -48,6 +48,27 @@ def _clean(d: Dict[str, Any]) -> Dict[str, Any]:
 class GenerationWriter:
     """Accumulates samples across regimes and writes the tree on close()."""
 
+    @staticmethod
+    def _pack(v: torch.Tensor) -> torch.Tensor:
+        """Hold volumes as bool, not float32.
+
+        These are spike indicators, so a bool carries the whole value at a
+        quarter of the memory. It matters at full test coverage: 279 clips x 4
+        reps x 4 regimes of (48,120,224) float32 is 23 GB of accumulator plus a
+        cat copy, which OOMs a 31 GB machine. The 8-batch budget this class was
+        written against only ever held 2.8 GB, so the ceiling was invisible.
+
+        Raises rather than clamps if a volume is not 0/1: silently rounding a
+        count to a flag would change every statistic downstream.
+        """
+        if v.dtype != torch.bool:
+            mx = float(v.max()) if v.numel() else 0.0
+            if mx > 1.0:
+                raise ValueError(
+                    f"volume is not binary (max {mx}); GenerationWriter stores "
+                    "spike indicators as bool and would silently clamp it")
+        return v.to(torch.bool)
+
     def __init__(self, root: str | Path, fps: int = 30):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -60,7 +81,7 @@ class GenerationWriter:
     # ------------------------------------------------------------------
     def add_real(self, vols: torch.Tensor) -> None:
         """Real clips, used once to build the reference statistics."""
-        self.real_vols.append(vols.detach().cpu())
+        self.real_vols.append(self._pack(vols.detach().cpu()))
 
     def add_batch(
         self,
@@ -78,7 +99,7 @@ class GenerationWriter:
         (rdir / "videos").mkdir(parents=True, exist_ok=True)
         (rdir / "stats").mkdir(parents=True, exist_ok=True)
         v = vols.detach().cpu()
-        self.per_regime.setdefault(regime, []).append(v)
+        self.per_regime.setdefault(regime, []).append(self._pack(v))
 
         for i in range(v.shape[0]):
             n = self._counter.get(regime, 0)
@@ -130,11 +151,17 @@ class GenerationWriter:
             )
 
         summary: Dict[str, Any] = {}
-        for regime, chunks in self.per_regime.items():
+        for regime in list(self.per_regime):
+            chunks = self.per_regime[regime]
             allv = torch.cat(chunks)
+            # Free the per-regime bool store before materialising the float
+            # view, so peak is one regime's float and not the whole run's.
+            chunks.clear()
+            n_samples = int(allv.shape[0])
             gs = mea_statistics(allv)
+            del allv
             entry: Dict[str, Any] = {
-                "n_samples": int(allv.shape[0]),
+                "n_samples": n_samples,
                 "stats": _clean(gs),
             }
             if real_stats is not None:

@@ -193,29 +193,63 @@ def _burst_stats(vol: torch.Tensor, thresh_frac: float = 0.25) -> Dict[str, floa
             "burst_mean_duration": float(np.mean(runs)) if runs else 0.0}
 
 
-def mea_statistics(vols: torch.Tensor, lags: int = 7) -> Dict[str, float]:
-    """Battery over a batch of (B,T,H,W) binary volumes."""
-    v = vols.float()
-    out: Dict[str, float] = {"rate": float(v.mean())}
+def mea_statistics(vols: torch.Tensor, lags: int = 7,
+                   chunk: int = 64) -> Dict[str, float]:
+    """Battery over a batch of (B,T,H,W) binary volumes.
 
-    for k in range(1, lags + 1):
-        if v.shape[1] <= k:
-            continue
-        a, b = v[:, k:], v[:, :-k]
-        den = float(b.sum())
-        out[f"persist{k}"] = float((a * b).sum() / den) if den > 0 else float("nan")
+    Chunked over the batch axis, because every term is separable along it:
+    `rate`, `persist{k}` and `spatial_coact` are ratios of sums whose operands
+    never cross a sample boundary (the shifts are temporal and spatial, dim 0 is
+    untouched), and the avalanche/ISI/burst terms are already computed per
+    sample. Accumulating the numerators and denominators is therefore the same
+    quantity as summing the whole batch at once, up to float addition order.
 
-    num = den = 0.0
-    for dh, dw in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-        num += float((torch.roll(v, shifts=(dh, dw), dims=(2, 3)) * v).sum())
-        den += float(v.sum())
-    out["spatial_coact"] = num / den if den > 0 else float("nan")
+    It has to be chunked. At full test coverage one regime is 1116 volumes of
+    (48,120,224); as float32 that is 5.4 GB, and forming `a * b` for each of 7
+    lags plus two rolled products for each of 4 directions peaked at 16.4 GB --
+    enough to OOM a 31 GB machine once the other regimes' stores and the CUDA
+    context are resident. The 8-batch budget this was written against only ever
+    passed 32 samples, so the ceiling never showed.
 
+    `vols` may be bool: each chunk is cast as it is consumed, so no caller has
+    to materialise the whole float view.
+    """
+    B, T = int(vols.shape[0]), int(vols.shape[1])
+    total = 0.0
+    n_elem = 0
+    p_num = {k: 0.0 for k in range(1, lags + 1)}
+    p_den = {k: 0.0 for k in range(1, lags + 1)}
+    s_num = s_den = 0.0
     av, isi, br, bd = [], [], [], []
-    for i in range(v.shape[0]):
-        av.append(_avalanche_sizes(v[i]))
-        isi.append(_isi(v[i]))
-        b = _burst_stats(v[i]); br.append(b["burst_rate"]); bd.append(b["burst_mean_duration"])
+
+    for start in range(0, B, max(1, int(chunk))):
+        v = vols[start:start + max(1, int(chunk))].float()
+        total += float(v.sum())
+        n_elem += int(v.numel())
+
+        for k in range(1, lags + 1):
+            if T <= k:
+                continue
+            a, b = v[:, k:], v[:, :-k]
+            p_num[k] += float((a * b).sum())
+            p_den[k] += float(b.sum())
+
+        for dh, dw in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            s_num += float((torch.roll(v, shifts=(dh, dw), dims=(2, 3)) * v).sum())
+            s_den += float(v.sum())
+
+        for i in range(v.shape[0]):
+            av.append(_avalanche_sizes(v[i]))
+            isi.append(_isi(v[i]))
+            b = _burst_stats(v[i]); br.append(b["burst_rate"]); bd.append(b["burst_mean_duration"])
+        del v
+
+    out: Dict[str, float] = {"rate": total / n_elem if n_elem else float("nan")}
+    for k in range(1, lags + 1):
+        if T <= k:
+            continue
+        out[f"persist{k}"] = p_num[k] / p_den[k] if p_den[k] > 0 else float("nan")
+    out["spatial_coact"] = s_num / s_den if s_den > 0 else float("nan")
     av = np.concatenate([a for a in av if a.size]) if any(a.size for a in av) else np.zeros(1)
     isi = np.concatenate([a for a in isi if a.size]) if any(a.size for a in isi) else np.zeros(1)
     out.update({
