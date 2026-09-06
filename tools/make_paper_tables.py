@@ -808,11 +808,16 @@ def app_hyperparameters() -> None:
         kv = ", ".join(f"{_term(k)} {_val(v)}" for k, v in st["loss_terms"].items())
         terms.append(f"\\textbf{{{st['stage']}}} {kv}")
     sh = d["shared"]
+    # The \resizebox belongs HERE, around the tabular alone. Wrapping the whole
+    # file scales the note too, and worse, an LR box lays the tabular and the
+    # minipage out side by side: the note rendered as a squeezed right-hand
+    # column at about four points instead of as a note under the table.
     body = (
+        "\\resizebox{\\textwidth}{!}{%\n"
         "\\begin{tabular}{l l r r l r r r r l}\n\\toprule\n"
         "stage & what & lr & wd & schedule & warm & ep. & clip & pat. & "
         "selected on \\\\\n\\midrule\n" + "\n".join(rows)
-        + "\n\\bottomrule\n\\end{tabular}\n\n\\vspace{0.6em}\n\n"
+        + "\n\\bottomrule\n\\end{tabular}}\n\n\\vspace{0.6em}\n\n"
         "\\begin{minipage}{\\textwidth}\\footnotesize\n"
         f"Shared across every stage: batch size {sh['batch_size']} with "
         f"{sh['grad_accum_steps']} accumulation steps, i.e.\\ an effective batch "

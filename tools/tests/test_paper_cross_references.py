@@ -86,3 +86,23 @@ def test_no_code_identifiers_in_prose():
         f"code identifiers in prose: {sorted(found - allowed)}"
     assert r"\begin{verbatim}" not in text, \
         "command recipe in the manuscript; point at the release README instead"
+
+
+def test_note_bearing_tables_are_not_wrapped_in_resizebox():
+    """\\resizebox is an LR box: it lays a tabular and a following minipage out
+    side by side and scales both.
+
+    Table S5 rendered its note as a squeezed right-hand column at about four
+    points because the appendix wrapped the whole \\input. A generated table
+    that carries its own note must be \\input plainly; if the tabular needs
+    scaling, the generator scopes \\resizebox to the tabular alone.
+    """
+    tables = PAPER / "tables"
+    if not tables.is_dir():
+        return
+    noted = {p.name for p in tables.glob("*.tex") if "minipage" in p.read_text()}
+    body = "".join(p.read_text() for p in SECTIONS)
+    bad = [n for n in sorted(noted)
+           if re.search(r"\\resizebox\{[^}]*\}\{[^}]*\}\{\\input\{tables/"
+                        + re.escape(n.replace(".tex", "")) + r"\.tex\}\}", body)]
+    assert not bad, f"note-bearing tables wrapped in resizebox: {bad}"
