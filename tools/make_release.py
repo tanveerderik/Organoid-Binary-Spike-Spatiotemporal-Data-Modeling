@@ -49,7 +49,23 @@ DOCS = ["README.md", "LICENSE", ".gitignore",
 DIAGNOSTICS_DIR = Path("reports/external_baselines")
 CHECKPOINT = Path("ckpts/vqvae_stage2a_best.pt")
 
-SKIP_DIR = {"__pycache__", ".git", ".pytest_cache", ".ipynb_checkpoints"}
+# `daps/` is an adaptation of this pipeline to a different corpus and a
+# different rig. It is unpublished, unreviewed, not referenced by the paper,
+# and its plan names the collaborating lab and the culture line, so it has no
+# business in a double-blind supplement even though the sweep below would
+# happily pick up its .py files.
+# The release tooling never ships. `make_release.py` carries the SCRUB list,
+# which is literally the author's surname, the drive name and the remote URL in
+# plain text, and `test_make_release.py` asserts against the same strings. The
+# verifier cannot catch either, because it skips any line containing
+# "anonymised" or "PROJECT_ROOT" and every one of those lines does. A scrubber
+# that exports its own patterns hands a reviewer the identity it removed
+# everywhere else.
+SKIP_FILE = {Path("tools/make_release.py"),
+             Path("tools/tests/test_make_release.py")}
+
+SKIP_DIR = {"__pycache__", ".git", ".pytest_cache", ".ipynb_checkpoints",
+            "daps", "daps_scratch"}
 
 
 # Identity that must not reach a reviewer. Each entry is (regex, replacement).
@@ -69,6 +85,17 @@ SCRUB = [
     (re.compile(r"\btanveerderik\b", re.I), "anonymised"),
     (re.compile(r"\bderik\b", re.I), "anonymised"),
 ]
+
+# The subset of SCRUB that can never legitimately appear in an export, in any
+# context, exempted or not.
+# Deliberately WITHOUT word boundaries. The rewriting rules in SCRUB use \b so
+# they do not mangle unrelated words, but that is exactly what let the leak
+# through: the exported line read `re.compile(r"\btanveerderik\b", ...)`, and
+# the `b` of the escape sits against the `t`, so a \b-anchored search does not
+# match its own source. A verifier must find the name anywhere, in any context.
+NAME_RULES = [re.compile(r"tanveerderik", re.I),
+              re.compile(r"derik", re.I),
+              re.compile(r"Seagate[ _]?Desktop[ _]?Drive", re.I)]
 
 # Only text is rewritten. A .pt is a tensor archive and a regex over it would
 # corrupt the file while appearing to succeed.
@@ -111,6 +138,15 @@ def verify_anonymous(dest: Path) -> list[str]:
         except UnicodeDecodeError:
             continue
         for i, line in enumerate(lines, 1):
+            # The name rules carry NO exemption. A scrubbed line never contains
+            # the raw surname or drive name, so any match is a real leak. The
+            # blanket "skip lines mentioning anonymised/PROJECT_ROOT" exemption
+            # below is what let tools/make_release.py export its own SCRUB list
+            # -- every one of those lines names the author AND says
+            # "anonymised", so the checker waved all of them through.
+            if any(pat.search(line) for pat in NAME_RULES):
+                bad.append(f"{f.relative_to(dest)}:{i}: {line.strip()[:100]}")
+                continue
             for pat, _ in SCRUB:
                 if pat.search(line) and "anonymised" not in line.lower() \
                         and "PROJECT_ROOT" not in line \
@@ -144,6 +180,8 @@ def main() -> int:
 
     total = n_py = 0
     for src in sorted(ROOT.rglob("*.py")):
+        if src.relative_to(ROOT) in SKIP_FILE:
+            continue
         if any(p in SKIP_DIR for p in src.relative_to(ROOT).parts):
             continue
         total += _copy(src.relative_to(ROOT), dest)
@@ -172,6 +210,21 @@ def main() -> int:
     (dest / "RELEASE.md").write_text(f"""# Release export
 
 Built by `tools/make_release.py` from the working repository.
+
+## Running it
+
+The code imports itself as the package `MAGVIT_project`, so **this directory
+must be named `MAGVIT_project`** and its parent must be on `PYTHONPATH`.
+Unpacked anywhere else, every intra-package import fails:
+
+```
+mv <this directory> MAGVIT_project
+cd ..
+PYTHONPATH="$PWD" python -m pytest MAGVIT_project/tools/tests -q
+```
+
+The manuscript is not in this export. Tests that check the LaTeX source skip
+themselves when it is absent, rather than failing.
 
 ## Contents
 
