@@ -59,6 +59,37 @@ PALETTE = {
     "real":         INK,
 }
 
+# ---------------------------------------------------------------------------
+# Voxel panels (appendix figures F5/F6). These draw a CONTINUOUS field with
+# three CATEGORICAL marks on top, which is the opposite budget from the charts
+# above: the field is the reference and the marks are the content. So the field
+# gets no chroma at all -- a grey ramp truncated well short of white -- and the
+# three marks get fully saturated, maximally separated hues.
+#
+# An earlier draft used magma for the field and the violet null hue for the
+# third mark; violet on near-black was invisible. White was legible but, being
+# the highest-luminance thing on the page, made the error class the most
+# salient mark in rows where errors outnumber hits, and it disappeared against
+# the page in the legend. Blue / red / yellow separate by hue AND by luminance,
+# so red-vs-yellow survives protan and deutan, where a blue/orange/green triple
+# would not.
+#
+# Every mark is stroked in INK. The field peaks exactly where the spikes are,
+# so the brightest ground sits under the densest marks; an outline is what
+# makes a glyph readable at any field value rather than only on a dark one.
+FIELD_RAMP = ["#000000", "#b0b0b0"]
+VOXEL = {"hit": "#4da3ff", "missed": "#f4442e", "hallucinated": "#ffd400"}
+VOXEL_MARKER = {"hit": "o", "missed": "X", "hallucinated": "P"}
+OBSERVED_WASH = "#5d6b7d"    # cool, so it reads apart from the grey field
+
+# Reference row of the voxel strip (free generation, which observes nothing).
+# The strip is drawn on the PAGE, not on a dark panel, and every other row is
+# ink, so this has to separate from black on white. PALETTE["null"] is the
+# right role but the wrong value here: at #4a3aa7 it reads as just another
+# black line. Crimson clears black on white and sits far enough from the
+# panels' `missed` red (#f4442e) that the figure carries no confusable pair.
+VOXEL_REFERENCE = "#c2185b"
+
 # Marker shape carries identity wherever colour is subordinate.
 MARKER = {"pipeline": "o", "maskgit_flat": "s", "unet3d": "^", "cvae3d": "v",
           "dg": "D", "glm": "P", "null": "|", "null_unseen": "|"}
