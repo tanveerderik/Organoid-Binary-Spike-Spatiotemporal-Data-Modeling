@@ -45,3 +45,21 @@ paper/
 # Derived caches. Not reports -- these were sitting in reports/ at 117MB with
 # no code referencing them at all. Regenerable, so never tracked.
 ckpts/cache/
+
+# ---------------------------------------------------------------------------
+# Checkpoints. The SHIPPED ones are already tracked and named in
+# ckpts/CHECKPOINTS.md; everything else in here is a pilot, a smoke run, a seed
+# replicate or a pre-rename snapshot, and .git was deliberately shrunk from
+# 1.2G to 371M once already. So the directory is ignored wholesale: files that
+# are already tracked stay tracked, and promoting a NEW checkpoint to shipped
+# is a deliberate `git add -f` plus a row in CHECKPOINTS.md.
+ckpts/*
+!ckpts/CHECKPOINTS.md
+
+# Scratch and local backups. daps_scratch/ alone is 5.2GB of intermediates.
+daps_scratch/
+paper_BACKUP_*/
+reports_prefix_budget_backup_*/
+
+# Built bundles. Regenerate with tools/make_release.py or from paper/.
+*.zip
