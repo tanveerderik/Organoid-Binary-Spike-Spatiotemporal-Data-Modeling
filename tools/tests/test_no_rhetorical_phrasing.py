@@ -14,12 +14,23 @@ get a per-file ceiling, set a little above the current count so ordinary
 editing does not trip them and a drift back toward the old voice does.
 """
 import re
+
+import pytest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SECTIONS = sorted((ROOT / "paper" / "sections").glob("*.tex"))
 BODY = [p for p in SECTIONS if p.name[0] == "0" and p.name[:2] <= "07"]
 APPENDIX = [p for p in SECTIONS if p.name.startswith("99")]
+
+# The manuscript is not part of the anonymous code release: paper/ is drafting
+# material and ships separately as the submission PDF. A reviewer running this
+# suite from the release should see a skip and not a wall of failures, so an
+# ABSENT manuscript skips while a PRESENT but empty one still fails loudly.
+_HAS_PAPER = (ROOT / "paper" / "sections").is_dir()
+pytestmark = pytest.mark.skipif(
+    not _HAS_PAPER, reason="manuscript not present (paper/ ships separately)")
+
 
 # Quoted by the reviewer, or removed for the same reason. "Beating uniform is
 # worth nothing" was in an earlier PDF and is already gone; pinned anyway.

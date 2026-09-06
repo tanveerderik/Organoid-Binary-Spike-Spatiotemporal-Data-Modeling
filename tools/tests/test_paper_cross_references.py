@@ -6,11 +6,22 @@ counter with the main text. All three have been introduced by editing at least
 once, so they are checked here rather than remembered.
 """
 import re
+
+import pytest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 PAPER = ROOT / "paper"
 SECTIONS = sorted((PAPER / "sections").glob("*.tex"))
+
+# The manuscript is not part of the anonymous code release: paper/ is drafting
+# material and ships separately as the submission PDF. A reviewer running this
+# suite from the release should see a skip and not a wall of failures, so an
+# ABSENT manuscript skips while a PRESENT but empty one still fails loudly.
+_HAS_PAPER = (ROOT / "paper" / "sections").is_dir()
+pytestmark = pytest.mark.skipif(
+    not _HAS_PAPER, reason="manuscript not present (paper/ ships separately)")
+
 
 
 def _all_prose() -> str:

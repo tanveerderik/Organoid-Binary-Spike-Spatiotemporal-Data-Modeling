@@ -67,3 +67,29 @@ def test_every_rule_is_case_insensitive_or_deliberately_not():
     for pat, _ in SCRUB:
         if "derik" in pat.pattern.lower() or "seagate" in pat.pattern.lower():
             assert pat.flags & re.I, f"name rule is case-sensitive: {pat.pattern}"
+
+
+def test_release_tooling_is_not_exported():
+    """The scrubber must not ship: it carries the identity list verbatim.
+
+    `make_release.py` holds the surname, the drive name and the remote URL as
+    literal regex sources, and this test file asserts against the same strings.
+    Both were exported once. The built-in verifier could not see it, because it
+    waves through any line containing "anonymised" or "PROJECT_ROOT" and every
+    one of those lines contains both the name and the word.
+    """
+    import MAGVIT_project.tools.make_release as MR
+    from pathlib import Path
+    assert Path("tools/make_release.py") in MR.SKIP_FILE
+    assert Path("tools/tests/test_make_release.py") in MR.SKIP_FILE
+
+
+def test_name_rules_have_no_exemption():
+    """Any match of a name rule is a leak, in every context."""
+    import MAGVIT_project.tools.make_release as MR
+    for probe in ("TanveerDerik", "derik", "Seagate Desktop Drive"):
+        assert any(p.search(probe) for p in MR.NAME_RULES), probe
+    # And the words the general verifier exempts must not rescue a real name.
+    leak = '(re.compile(r"\\btanveerderik\\b", re.I), "anonymised"),'
+    assert any(p.search(leak) for p in MR.NAME_RULES), \
+        "a line naming the author is exempted when it also says 'anonymised'"
