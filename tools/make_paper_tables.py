@@ -285,9 +285,9 @@ def task_completion() -> None:
         per_arm[(r["family"], r["task"], r["arm"])] = r
 
     blocks = []
-    for fam, famlbl in (("site AP", "Site AP $\\uparrow$ --- which electrode"),
+    for fam, famlbl in (("site AP", "Site AP $\\uparrow$: which electrode"),
                         ("voxel AP",
-                         "Voxel AP $\\uparrow$ --- which electrode \\emph{and} frame")):
+                         "Voxel AP $\\uparrow$: which electrode \\emph{and} frame")):
         blocks.append(f"\\multicolumn{{5}}{{l}}{{\\textit{{{famlbl}}}}} \\\\")
         blocks.append("Ours & " + " & ".join(
             f"{ours[(fam, t)]:.4f}" for t in TASKS) + " \\\\")

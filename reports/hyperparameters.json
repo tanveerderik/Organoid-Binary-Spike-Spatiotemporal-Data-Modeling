@@ -49,7 +49,7 @@
     {
       "stage": "3",
       "what": "Local-code mapper (texton multinomial)",
-      "trained": "lct trunk + heads (tokeniser frozen)",
+      "trained": "lct trunk + heads (tokenizer frozen)",
       "optimizer": "AdamW",
       "lr": 0.001,
       "weight_decay": 0.01,
@@ -69,7 +69,7 @@
     {
       "stage": "4A",
       "what": "Motif prior (MaskGIT over V=961)",
-      "trained": "motif prior (tokeniser and mappers frozen)",
+      "trained": "motif prior (tokenizer and mappers frozen)",
       "optimizer": "AdamW",
       "lr": 0.0003,
       "weight_decay": 0.01,
@@ -259,7 +259,7 @@
         {
           "term": "context",
           "coeff": 0.25,
-          "constrains": "soft-decode the motif logits through the frozen tokeniser; the result's nine moments must match the clip"
+          "constrains": "soft-decode the motif logits through the frozen tokenizer; the result's nine moments must match the clip"
         },
         {
           "term": "context field",

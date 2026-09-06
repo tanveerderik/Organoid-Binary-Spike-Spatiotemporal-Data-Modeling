@@ -247,7 +247,7 @@ def stages() -> list[dict[str, Any]]:
         {
             "stage": "3",
             "what": "Local-code mapper (texton multinomial)",
-            "trained": "lct trunk + heads (tokeniser frozen)",
+            "trained": "lct trunk + heads (tokenizer frozen)",
             "optimizer": "AdamW",
             "lr": _require(s3_opt, "lr", "stage 3"),
             "weight_decay": _require(s3_opt, "weight_decay", "stage 3"),
@@ -267,7 +267,7 @@ def stages() -> list[dict[str, Any]]:
         {
             "stage": "4A",
             "what": "Motif prior (MaskGIT over V=961)",
-            "trained": "motif prior (tokeniser and mappers frozen)",
+            "trained": "motif prior (tokenizer and mappers frozen)",
             "optimizer": "AdamW",
             "lr": _require(s4a_opt, "lr", "stage 4A"),
             "weight_decay": _require(s4a_opt, "weight_decay", "stage 4A"),
@@ -534,7 +534,7 @@ def objectives() -> list[dict[str, Any]]:
                       "target's neighbourhood, not just its mode"),
                 _term("context", _require(s4a, "lambda_ctx", "stage 4A"),
                       "soft-decode the motif logits through the frozen "
-                      "tokeniser; the result's nine moments must match the clip"),
+                      "tokenizer; the result's nine moments must match the clip"),
                 _term("context field",
                       _require(s4a, "lambda_ctx_field", "stage 4A"),
                       "the same moment match evaluated per patch, so a clip "

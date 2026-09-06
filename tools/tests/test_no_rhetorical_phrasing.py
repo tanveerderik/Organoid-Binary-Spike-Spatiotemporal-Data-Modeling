@@ -132,6 +132,22 @@ def _prose(p: Path) -> str:
     return _COMMENT.sub("", p.read_text())
 
 
+def test_no_em_dashes_in_generated_tables():
+    """The section files are not the only prose the reader sees.
+
+    Two AP table headers rendered an em dash for months because this suite only
+    looked at paper/sections. Generated tables carry captions and column heads
+    and are held to the same rule; fix the generator, not the .tex.
+    """
+    tables = ROOT / "paper" / "tables"
+    if not tables.is_dir():
+        return
+    hits = {p.name: len(_EMDASH.findall(p.read_text()))
+            for p in sorted(tables.glob("*.tex"))}
+    hits = {k: v for k, v in hits.items() if v}
+    assert not hits, f"em dashes in generated tables: {hits}"
+
+
 def test_no_em_dashes():
     """Em dashes read as machine-written and STE has no use for them.
 
