@@ -355,9 +355,26 @@ def _dump_clips(store, mode, bi, assays, x, roi_vox, src, gen_hard, own_vol,
     store["_shape"] = np.asarray(list(x.shape[-3:]), np.int32)
     if have >= n_want:
         return
+    # One clip per RECORDING, not the first `n_want` clips seen.
+    #
+    # The test loader is a DeterministicSubset and is not shuffled, so taking
+    # clips in loop order takes an ordered PREFIX: an earlier dump of 24 clips
+    # drew all 24 from a single recording, and raising --batches does not help
+    # because the quota fills in the first couple of batches either way. A
+    # supplement panel built from that would show one recording while claiming
+    # the protocol that covers 31.
+    #
+    # Scoring is untouched -- this only decides which already-scored volumes
+    # are persisted. Every mode walks the same batch order, so the modes still
+    # agree on which underlying clips they keep, which is what lets a figure
+    # show one clip under all four settings.
+    seen = store.setdefault("_assays", {}).setdefault(mode, [])
     for b in range(x.shape[0]):
         if have >= n_want:
             break
+        if int(assays[b]) in seen:
+            continue
+        seen.append(int(assays[b]))
         tag = f"{mode}/clip{have:02d}"
         store[f"{tag}/assay"] = np.asarray([assays[b]], np.int32)
         for nm, vol in (("real", (x[b, 0] > 0.5)),
@@ -947,6 +964,7 @@ def main():
 
     if args.dump:
         n = dump_store.pop("_count")
+        dump_store.pop("_assays", None)
         # Provenance travels WITH the volumes. A figure built from these has to
         # be able to name the protocol that produced them, and a loose npz in a
         # folder cannot be traced back once the shell history is gone.

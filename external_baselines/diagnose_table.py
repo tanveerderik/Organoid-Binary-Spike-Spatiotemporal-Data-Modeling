@@ -1893,10 +1893,26 @@ def main() -> int:
             "better, \u2193 lower is better, \u2248REAL means the target is "
             "the real value itself, so both over- and under-shooting are "
             "failures. Rows with no arrow are descriptive.\n")
-    budgets = ("Two eval budgets, not interchangeable: the task axis uses 12 "
-               "batches (48 clips), seed 20260822; everything else uses 8 "
-               "batches (32 clips), seed 20260821. Identical clips for every "
-               "model within a budget. Never carry a number between them.\n")
+    # Read the protocol off the reports rather than restating it. A hard-coded
+    # sentence here survived a change of budget once already, and a header that
+    # misdescribes the clip set is worse than no header.
+    def _budget(path, label, default_seed):
+        try:
+            d = json.loads((DIR / path).read_text())
+        except FileNotFoundError:
+            return f"{label}: report missing"
+        mc = d.get("mc")
+        return (f"{label}: {d['batches']} batches"
+                + (f", {mc} MC samples" if mc else "")
+                + f", seed {d.get('seed', default_seed)}")
+
+    budgets = ("Pinned evaluation protocol. "
+               + _budget("task_eval_pipeline.json", "task axis", 20260822)
+               + "; " + _budget("diagnose_pipeline.json", "everything else",
+                                20260821)
+               + ". The test loader is not shuffled, so a batch count is a "
+                 "prefix of the split and every model within a budget sees "
+                 "identical clips. Never carry a number between budgets.\n")
 
     headline = ("# Interpretable diagnostics\n\n" + budgets + "\n" + conv
                 + "\nFull test listings, conditioning ladders and provenance "

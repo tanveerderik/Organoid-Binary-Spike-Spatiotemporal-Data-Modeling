@@ -4,7 +4,7 @@ The deliverable is a comparative table, so every row of it has to be produced
 the same way. That is enforced here rather than left to the operator:
 
   * `REFERENCE_PROTOCOL` mirrors the defaults `analysis/generate_regimes.py` was
-    run with to produce `reports/generation_regimes_*` -- 8 test batches, 4
+    run with to produce `reports/generation_regimes_*` -- 70 test batches, 4
     samples per clip, seed 20260821, the same context bank and the same pinned
     partial-local features. Baselines do not get their own protocol.
   * The sampling loop replicates that script's ordering exactly (batch, then
@@ -35,9 +35,15 @@ from MAGVIT_project.inference.generation_output import GenerationWriter
 # Must match analysis/generate_regimes.py's defaults. If that script's defaults
 # change, the existing generation_regimes_* sets become incomparable to new
 # baseline runs and both must be regenerated -- hence a single constant.
+#
+# 70, not 8. The test loader is unshuffled, so a batch count is a PREFIX of the
+# split rather than a sample of it: at 8 batches these sets covered 32 clips
+# from 4 of the 31 recordings. 70 batches is the whole test split. Every set
+# under reports/generation_regimes_* and every baseline scored set was
+# regenerated together when this changed.
 REFERENCE_PROTOCOL: Dict[str, Any] = {
     "split": "test",
-    "batches": 8,
+    "batches": 70,
     "samples_per_clip": 4,
     "seed": 20260821,
     "bank": "ckpts/context_prior.pkl",
@@ -112,10 +118,28 @@ def verify_against_reference(
     ref = json.loads(ref_p.read_text())
     got = json.loads((Path(out_root) / "manifest.json").read_text())
 
-    report: Dict[str, Any] = {"checked": True, "reference": str(reference), "regimes": {}}
+    report: Dict[str, Any] = {"checked": True, "reference": str(reference),
+                              "regimes": {}, "not_in_reference": []}
     problems = []
     for regime in REGIMES:
         a, b = _clip_keys(ref, regime), _clip_keys(got, regime)
+
+        # `local_only` is off the ladder -- a control, not a rung between the
+        # others -- so `analysis/generate_regimes.py` does not produce it and no
+        # pipeline set has it to align against. Requiring it here would fail
+        # every baseline run made after it was added (be56772), and
+        # `compare_table.py` joins on its own four-rung REGIMES, so this rung is
+        # never compared anyway. Record the skip rather than pass silently: an
+        # empty reference is the ONLY licence to skip, and a regime the
+        # reference does have is still checked to the sample.
+        if not a:
+            report["not_in_reference"].append(regime)
+            report["regimes"][regime] = {
+                "reference_n": 0, "baseline_n": len(b), "matched": None,
+                "skipped": "regime absent from the reference set",
+            }
+            continue
+
         n = min(len(a), len(b))
         same = sum(1 for i in range(n) if a[i] == b[i])
         report["regimes"][regime] = {
