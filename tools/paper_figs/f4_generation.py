@@ -33,7 +33,7 @@ ORDER = [("pipeline", "Ours"), ("maskgit_flat", "MaskGIT-flat"),
          ("dg", "$\\mathit{ref}$ DG"), ("glm", "$\\mathit{ref}$ GLM")]
 # Titles are shortened to fit four panels across one column width; the full
 # family names and their definitions live in the caption and in Section 5.
-SHORT = {"A. Conditional accuracy": "A. Cond. accuracy",
+SHORT = {"A. Conditional accuracy": "A. Descriptor error ($z$)",
          "B. Adherence": "B. Adherence",
          "C. Spatial placement, lookup-proof": "C. Spatial place.",
          "D. Marginal realism": "D. Marg. realism"}

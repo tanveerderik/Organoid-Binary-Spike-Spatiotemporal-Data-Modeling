@@ -61,7 +61,7 @@ def test_task_completion_has_both_metrics_all_arms_and_the_null():
 
 def test_generation_table_has_four_families_six_arms_and_per_arm_nulls():
     t = _t("t3_generation_families.tex")
-    for fam in ("Conditional accuracy", "Adherence", "Spatial placement",
+    for fam in ("Descriptor error", "Adherence", "Spatial placement",
                 "Marginal realism"):
         assert fam in t, f"family {fam} missing from T3"
     # Four families x six arms, each carrying its own bracketed null.
