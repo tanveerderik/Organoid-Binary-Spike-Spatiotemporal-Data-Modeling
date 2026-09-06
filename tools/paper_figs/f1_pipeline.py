@@ -46,7 +46,8 @@ def _load():
     return pre, prov, flat, ship, hp
 
 
-def _box(ax, x, y, w, label, sub=None, accent=INK_2, h=BOX_H, fill="none"):
+def _box(ax, x, y, w, label, sub=None, accent=INK_2, h=BOX_H, fill="none",
+         fs=6.1):
     """A rounded node. `sub` is the one quantity that node is constrained by."""
     # clip_on=False throughout: these are axes-fraction patches on an axis
     # with no data, and the default clip crops the rounded corner of anything
@@ -58,10 +59,10 @@ def _box(ax, x, y, w, label, sub=None, accent=INK_2, h=BOX_H, fill="none"):
                                 clip_on=False))
     dy = 0.022 if sub else 0.0
     ax.text(x + w / 2, y + dy, label, transform=ax.transAxes, ha="center",
-            va="center", fontsize=6.4, color=INK, zorder=3, clip_on=False)
+            va="center", fontsize=fs, color=INK, zorder=3, clip_on=False)
     if sub:
         ax.text(x + w / 2, y - 0.030, sub, transform=ax.transAxes,
-                ha="center", va="center", fontsize=5.3, color=INK_2, zorder=3,
+                ha="center", va="center", fontsize=4.8, color=INK_2, zorder=3,
                 clip_on=False)
 
 
@@ -92,8 +93,13 @@ def draw(fig) -> None:
     # Text outside $...$ is NOT LaTeX here -- matplotlib's default path renders
     # "\%" literally -- so per-cent signs are bare and anything symbolic goes
     # through mathtext.
-    X = [0.000, 0.205, 0.395, 0.620, 0.830]
-    Wd = [0.170, 0.150, 0.190, 0.160, 0.170]
+    # Column 0 is inset from the canvas edge: its sub-labels ("seeded, per
+    # recording") are wider than the box, are centred on it, and at x=0 the
+    # overhang fell off the saved figure and printed clipped. Widths are set
+    # by the widest LABEL in each column, not shared, so no text overruns its
+    # own border at this font size.
+    X = [0.018, 0.215, 0.414, 0.628, 0.832]
+    Wd = [0.172, 0.174, 0.188, 0.176, 0.168]
 
     # ---- top row: tokeniser -------------------------------------------
     _box(ax, X[0], TOP, Wd[0], "clip $X$", f"${T}{{\\times}}{H}{{\\times}}{W}$")
@@ -120,7 +126,7 @@ def draw(fig) -> None:
 
     # ---- bottom row: conditioning and the two priors --------------------
     hi, lo = BOT + 0.088, BOT - 0.108
-    _box(ax, X[0], hi, Wd[0], "$g_r$: recording", "seeded, per recording",
+    _box(ax, X[0], hi, Wd[0], "$g_r$: recording", "one per recording",
          h=0.120)
     _box(ax, X[0], lo, Wd[0], "$\\ell(X)$: clip", "$9$ scalars, unlearned",
          h=0.120)
@@ -139,7 +145,7 @@ def draw(fig) -> None:
     # Both mapped codes condition both priors. Drawn as a rail rather than as
     # four curves: the four-curve version crossed twice and made the one
     # asymmetry that matters -- the dashed raw-code path below -- unreadable.
-    rail = X[1] + Wd[1] + 0.028
+    rail = (X[1] + Wd[1] + X[2]) / 2
     ax.plot([rail, rail], [lo, hi], transform=ax.transAxes, color=INK_MUTED,
             lw=0.8, zorder=1, clip_on=False)
     _arrow(ax, (X[1] + Wd[1], hi), (rail, hi), color=INK_MUTED)
@@ -152,13 +158,13 @@ def draw(fig) -> None:
     # row so it cannot be mistaken for the mapped path.
     _arrow(ax, (X[0] + Wd[0] * 0.45, hi - 0.060),
            (X[2] + 0.030, BOT - BOX_H / 2), rad=0.62, dashed=True)
-    ax.text(X[0] + 0.015, BOT - 0.262, "raw $g_r$, no mapper",
+    ax.text(X[0], BOT - 0.272, "raw $g_r$, no mapper",
             transform=ax.transAxes, fontsize=5.2, color=INK_MUTED,
             ha="left", va="center", clip_on=False)
 
     _arrow(ax, (X[2] + Wd[2], BOT), (X[3], BOT), color=blue, lw=1.0)
-    ax.text(X[2] + Wd[2] + 0.0125, BOT + 0.072, "$A$", transform=ax.transAxes,
-            ha="center", va="bottom", fontsize=6.2, color=blue, clip_on=False)
+    ax.text(X[2] + Wd[2] + 0.0125, BOT - 0.098, "$A$", transform=ax.transAxes,
+            ha="center", va="top", fontsize=6.2, color=blue, clip_on=False)
     _arrow(ax, (X[3] + Wd[3], BOT), (X[4], BOT))
 
     # The alphabet is what the motif prior draws its symbols from.
@@ -166,15 +172,16 @@ def draw(fig) -> None:
            BOT + BOX_H / 2), color=blue, dashed=True, rad=0.25)
 
     # ---- the task mask, entering both priors ---------------------------
-    _box(ax, X[2], BOT - 0.255, X[3] + Wd[3] - X[2], "task $(q, M)$: free "
-         "generation, causal, noncausal, spatial",
-         accent=INK_MUTED, h=0.100)
+    task_x = X[1] + Wd[1]
+    _box(ax, task_x, BOT - 0.255, X[4] - 0.008 - task_x,
+         "task $(q, M)$: free generation, causal, noncausal, spatial",
+         accent=INK_MUTED, h=0.100, fs=4.8)
     for x in (X[2] + Wd[2] * 0.62, X[3] + Wd[3] * 0.45):
         _arrow(ax, (x, BOT - 0.255 + 0.050), (x, BOT - BOX_H / 2),
                color=INK_MUTED, dashed=True)
 
     ax.text(0.0, 1.02, f"{prov['n_used']} recordings, "
-            f"{min(ch)}--{max(ch)} routed sites each",
+            f"{min(ch)} to {max(ch)} routed sites each",
             transform=ax.transAxes, fontsize=5.6, color=INK_2, va="bottom")
     ax.text(1.0, 1.02, "dashed: enters as conditioning",
             transform=ax.transAxes, fontsize=5.6, color=INK_MUTED,

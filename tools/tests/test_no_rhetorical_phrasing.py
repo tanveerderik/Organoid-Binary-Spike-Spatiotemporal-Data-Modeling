@@ -107,3 +107,50 @@ def test_pseudo_cleft_density():
         assert n <= PSEUDO_CLEFT[name], (
             f"{name}: {n} pseudo-cleft constructions, ceiling "
             f"{PSEUDO_CLEFT[name]}")
+
+
+# Simplified-English guards. The manuscript targets ASD-STE100 direction: plain
+# punctuation, short sentences, no constructions that read as machine prose.
+_COMMENT = re.compile(r"^%.*$", re.M)
+_EMDASH = re.compile(r"(?<!-)---(?!-)")
+
+
+def _prose(p: Path) -> str:
+    """File text with comment lines dropped: the section separators are rules
+    of forty hyphens and would otherwise register as em dashes."""
+    return _COMMENT.sub("", p.read_text())
+
+
+def test_no_em_dashes():
+    """Em dashes read as machine-written and STE has no use for them.
+
+    Every one was replaced with a comma, colon, parenthesis or a sentence
+    break, chosen per site. En dashes stay: `1.4--2.6` and `841--1020` are
+    numeric ranges and correct as they are.
+    """
+    hits = {f.name: len(_EMDASH.findall(_prose(f))) for f in SECTIONS}
+    hits = {k: v for k, v in hits.items() if v}
+    assert not hits, f"em dashes are back: {hits}"
+
+
+def test_no_unicode_dashes_or_ellipsis():
+    """A literal em dash, en dash or ellipsis character means text arrived by
+    paste rather than through LaTeX, and prints wrong under pdflatex."""
+    bad = {f.name: [c for c in "—–…" if c in _prose(f)]
+           for f in SECTIONS}
+    bad = {k: v for k, v in bad.items() if v}
+    assert not bad, f"unicode punctuation in source: {bad}"
+
+
+def test_no_filler_vocabulary():
+    """Words that signal generated prose. Technical uses are not on the list:
+    "harness" stays because the evaluation harness is a real object here."""
+    filler = ["delve", "leverage", "crucial", "pivotal", "testament",
+              "seamless", "showcase", "underscore", "intricate", "myriad",
+              "plethora", "nuanced", "in today's", "deep dive",
+              "it is worth noting"]
+    hits = []
+    for f in SECTIONS:
+        low = " ".join(_prose(f).split()).lower()
+        hits += [f"{f.name}: {w!r}" for w in filler if w in low]
+    assert not hits, "filler vocabulary:\n  " + "\n  ".join(hits)

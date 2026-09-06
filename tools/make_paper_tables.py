@@ -28,13 +28,26 @@ ARMS = [("pipeline", "Ours"), ("maskgit_flat", "MaskGIT-flat"),
 
 
 def _esc(s: str) -> str:
-    return str(s).replace("_", "\\_").replace("%", "\\%").replace("&", "\\&")
+    # The dagger arrives as a literal U+2020 in the diagnostics labels. Times
+    # has no glyph for it, so it silently vanished from the ladder table under
+    # XeTeX and would need inputenc to survive pdflatex at all. Emit the
+    # control sequence instead, matching how the other tables spell it.
+    return (str(s).replace("_", "\\_").replace("%", "\\%")
+            .replace("&", "\\&").replace("\u2020", "$^\\dagger$"))
+
+
+# Family A is a z-scored error, not a rate: it is unbounded above, lower is
+# better, and 1.0 is the error of an unrelated clip. "Accuracy" invites the
+# opposite reading on every count, so the paper renames it at the presentation
+# layer. The JSON key stays as diagnose_table emits it -- renaming the artifact
+# would orphan every diagnostics.md already written against it.
+DISPLAY = {"A. Conditional accuracy": "A. Descriptor error ($z$)"}
 
 
 def _esc_title(t: str) -> str:
     """Family titles carry a leading 'A. ' etc. and no LaTeX-special chars,
     but they do contain hyphens that must not become en-dashes in a table."""
-    return t.replace("lookup-proof", "lookup\\nobreakdash-proof")
+    return DISPLAY.get(t, t).replace("lookup-proof", "lookup\\nobreakdash-proof")
 
 
 def _write(name: str, body: str, source: str) -> None:
