@@ -9,6 +9,11 @@ checks anonymity, and nothing checks that a cited human's name is their name.
 An audit on 2026-09-18 found four such defects among 36 entries, every one of
 them in a list that had been typed out rather than fetched.
 
+The upstream fix is `tools/fetch_bib.py`, which imports an entry from its DOI
+or arXiv id so there is nothing to mistype. This script is the net under it,
+for entries already in the file and for the cases where a publisher's own
+record is wrong.
+
 Sources, in the order they are tried:
 
   arXiv id   -> export.arxiv.org/api/query, falling back to scraping
