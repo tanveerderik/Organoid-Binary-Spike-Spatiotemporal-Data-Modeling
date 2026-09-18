@@ -3,14 +3,14 @@
   "n_entries": 36,
   "n_checked": 32,
   "n_ok": 32,
-  "n_full_scope": 18,
-  "n_authors_only": 14,
+  "n_full_scope": 19,
+  "n_authors_only": 13,
   "n_mismatch": 0,
   "n_unverified": 4,
   "entries": [
     {
       "key": "dandi000732",
-      "hash": "36a8eb01f5050137",
+      "hash": "24efdca10b3ac3be",
       "status": "unverified",
       "source": "title-search",
       "reason": "no record found by title search"
@@ -193,10 +193,10 @@
     },
     {
       "key": "ye2021ndt",
-      "hash": "5799a9ee9fa7cfb0",
+      "hash": "7eeb74a9509ef144",
       "status": "ok",
-      "source": "crossref-search",
-      "scope": "authors",
+      "source": "crossref",
+      "scope": "full",
       "problems": []
     },
     {
