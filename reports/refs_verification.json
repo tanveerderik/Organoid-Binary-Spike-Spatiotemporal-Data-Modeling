@@ -1,0 +1,296 @@
+{
+  "bib": "paper/refs.bib",
+  "n_entries": 36,
+  "n_checked": 32,
+  "n_ok": 32,
+  "n_full_scope": 18,
+  "n_authors_only": 14,
+  "n_mismatch": 0,
+  "n_unverified": 4,
+  "entries": [
+    {
+      "key": "dandi000732",
+      "hash": "36a8eb01f5050137",
+      "status": "unverified",
+      "source": "title-search",
+      "reason": "no record found by title search"
+    },
+    {
+      "key": "vandermolen2026preconfigured",
+      "hash": "c53c4fc2a44d5518",
+      "status": "ok",
+      "source": "crossref",
+      "scope": "full",
+      "problems": []
+    },
+    {
+      "key": "dandi001132",
+      "hash": "752be8c747a3523b",
+      "status": "ok",
+      "source": "datacite",
+      "scope": "full",
+      "problems": []
+    },
+    {
+      "key": "andrews2024hippocampal",
+      "hash": "688983d9d47aca3a",
+      "status": "ok",
+      "source": "crossref",
+      "scope": "full",
+      "problems": []
+    },
+    {
+      "key": "vandenoord2017vqvae",
+      "hash": "d9847792d1a2cec5",
+      "status": "ok",
+      "source": "arxiv-html-search",
+      "scope": "authors",
+      "problems": []
+    },
+    {
+      "key": "chang2022maskgit",
+      "hash": "371d540e18d22f3e",
+      "status": "ok",
+      "source": "crossref-search",
+      "scope": "authors",
+      "problems": []
+    },
+    {
+      "key": "yu2023magvit",
+      "hash": "20348ba879b1daa5",
+      "status": "ok",
+      "source": "crossref-search",
+      "scope": "authors",
+      "problems": []
+    },
+    {
+      "key": "macke2009dg",
+      "hash": "85435287f628ee81",
+      "status": "ok",
+      "source": "crossref-search",
+      "scope": "authors",
+      "problems": []
+    },
+    {
+      "key": "pillow2008glm",
+      "hash": "769284351b46b4f1",
+      "status": "ok",
+      "source": "crossref-search",
+      "scope": "authors",
+      "problems": []
+    },
+    {
+      "key": "kagan2022dishbrain",
+      "hash": "b3e4c5955aedc56e",
+      "status": "ok",
+      "source": "crossref",
+      "scope": "full",
+      "problems": []
+    },
+    {
+      "key": "smirnova2023oi",
+      "hash": "bfe8a5202eda4051",
+      "status": "ok",
+      "source": "crossref",
+      "scope": "full",
+      "problems": []
+    },
+    {
+      "key": "sharf2022organoids",
+      "hash": "90e78b2a5eab0e8f",
+      "status": "ok",
+      "source": "crossref",
+      "scope": "full",
+      "problems": []
+    },
+    {
+      "key": "trujillo2019oscillations",
+      "hash": "41a0e44957d5cede",
+      "status": "ok",
+      "source": "crossref",
+      "scope": "full",
+      "problems": []
+    },
+    {
+      "key": "ballini2014hdmea",
+      "hash": "e3041c8ee583f480",
+      "status": "ok",
+      "source": "crossref",
+      "scope": "full",
+      "problems": []
+    },
+    {
+      "key": "beggs2003avalanches",
+      "hash": "eb5f577030e48e6e",
+      "status": "ok",
+      "source": "crossref",
+      "scope": "full",
+      "problems": []
+    },
+    {
+      "key": "buccino2020spikeinterface",
+      "hash": "d679175f21b67f34",
+      "status": "ok",
+      "source": "crossref",
+      "scope": "full",
+      "problems": []
+    },
+    {
+      "key": "razavi2019vqvae2",
+      "hash": "a0ab3e71841ec316",
+      "status": "ok",
+      "source": "arxiv-html-search",
+      "scope": "authors",
+      "problems": []
+    },
+    {
+      "key": "esser2021vqgan",
+      "hash": "89bb4050db285afe",
+      "status": "ok",
+      "source": "crossref-search",
+      "scope": "authors",
+      "problems": []
+    },
+    {
+      "key": "lee2022rqvae",
+      "hash": "2ae10515ec77e176",
+      "status": "ok",
+      "source": "crossref-search",
+      "scope": "authors",
+      "problems": []
+    },
+    {
+      "key": "zeghidour2022soundstream",
+      "hash": "7078d79ae2488ecf",
+      "status": "ok",
+      "source": "crossref",
+      "scope": "full",
+      "problems": []
+    },
+    {
+      "key": "yu2024magvit2",
+      "hash": "f4871911a5e906ef",
+      "status": "ok",
+      "source": "arxiv-html-search",
+      "scope": "authors",
+      "problems": []
+    },
+    {
+      "key": "pandarinath2018lfads",
+      "hash": "d1a1c386bf88407f",
+      "status": "ok",
+      "source": "crossref",
+      "scope": "full",
+      "problems": []
+    },
+    {
+      "key": "truccolo2005pointprocess",
+      "hash": "f54e2f9d6ad3d659",
+      "status": "ok",
+      "source": "crossref",
+      "scope": "full",
+      "problems": []
+    },
+    {
+      "key": "ye2021ndt",
+      "hash": "5799a9ee9fa7cfb0",
+      "status": "ok",
+      "source": "crossref-search",
+      "scope": "authors",
+      "problems": []
+    },
+    {
+      "key": "davis2006prcurves",
+      "hash": "8f87b22543015ab7",
+      "status": "ok",
+      "source": "crossref-search",
+      "scope": "authors",
+      "problems": []
+    },
+    {
+      "key": "elkan2001costsensitive",
+      "hash": "21fa5cb66d7a30e9",
+      "status": "unverified",
+      "source": "title-search",
+      "reason": "no record found by title search"
+    },
+    {
+      "key": "benjamini1995fdr",
+      "hash": "9ed998fdea0836a6",
+      "status": "ok",
+      "source": "crossref-search",
+      "scope": "authors",
+      "problems": []
+    },
+    {
+      "key": "kapoor2024ldns",
+      "hash": "5bfb277b55f79a25",
+      "status": "ok",
+      "source": "crossref-search",
+      "scope": "authors",
+      "problems": []
+    },
+    {
+      "key": "molano2018spikegan",
+      "hash": "db48bad6030b265b",
+      "status": "ok",
+      "source": "arxiv-html-search",
+      "scope": "authors",
+      "problems": []
+    },
+    {
+      "key": "sohn2015cvae",
+      "hash": "0eea888cb052f266",
+      "status": "unverified",
+      "source": "title-search",
+      "reason": "no record found by title search"
+    },
+    {
+      "key": "kingma2016iaf",
+      "hash": "05b94eb024e9a332",
+      "status": "unverified",
+      "source": "title-search",
+      "reason": "no record found by title search"
+    },
+    {
+      "key": "patel2025neuroai",
+      "hash": "d511163c81991600",
+      "status": "ok",
+      "source": "arxiv-abs",
+      "scope": "full",
+      "problems": []
+    },
+    {
+      "key": "robbins2026goaldirected",
+      "hash": "3cc252b3177c4dc6",
+      "status": "ok",
+      "source": "crossref",
+      "scope": "full",
+      "problems": []
+    },
+    {
+      "key": "minnick2026spikeprophecy",
+      "hash": "5832621249d7ffc6",
+      "status": "ok",
+      "source": "arxiv-abs",
+      "scope": "full",
+      "problems": []
+    },
+    {
+      "key": "minnick2026implicit",
+      "hash": "fd41316d411292db",
+      "status": "ok",
+      "source": "arxiv-abs",
+      "scope": "full",
+      "problems": []
+    },
+    {
+      "key": "wu2026generative",
+      "hash": "1fada50cc3276a86",
+      "status": "ok",
+      "source": "crossref",
+      "scope": "full",
+      "problems": []
+    }
+  ]
+}
