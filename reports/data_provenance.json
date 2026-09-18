@@ -6,9 +6,9 @@
    "preparation": "human brain organoid slice",
    "experiment_description": "Intrinsic activity in human brain organoid slice",
    "lab": "Kosik Lab, UCSB",
-   "cohort_note": "source study reports 8 different organoids (4 whole, 4 sliced) from two independent laboratories using different cell lines and protocols",
+   "cohort_note": "source study (Sharf et al. 2022) reports 6 sliced organoids, L1-L6 by array number, all from the single iPSC line F12442.4 and one consenting tissue donor",
    "recording_to_preparation_map": "NOT RECOVERABLE from the archive",
-   "published_accession": "001603 (Nature Neuroscience version); 000732 is the preprint deposit and is what we use"
+   "published_accession": "000732 is the deposit used here and no longer resolves in the archive; 001603 is the later compilation that incorporates this material alongside recordings from other studies"
   },
   "001132": {
    "preparation": "human ex vivo hippocampal slice (neurosurgical resection)",
@@ -23,7 +23,7 @@
   "human brain organoid slice": 18,
   "human ex vivo hippocampal slice (neurosurgical resection)": 13
  },
- "biological_n_note": "Assay count is a RECORDING count, not a preparation count. The organoid recordings come from a cohort of at most 8 organoids and the archive does not say which recording came from which; the slice recordings come from 2 neurosurgical patients. No split in this work is cross-preparation.",
+ "biological_n_note": "Assay count is a RECORDING count, not a preparation count. The organoid recordings come from a cohort of at most 6 organoids and the archive does not say which recording came from which; the slice recordings come from 2 slice preparations, one per neurosurgical patient. Three organoid recordings are byte-identical duplicates of three others, so the corpus holds 28 distinct recordings under 31 indices. No split in this work is cross-preparation.",
  "array_note": "MaxWell Biosystems HD-MEA: 26,400 sites at 17.5 um pitch, of which 1,024 can be recorded simultaneously (source study). The model canvas is the array footprint 120x220 padded to 120x224 = 26,880.",
  "used": [
   {

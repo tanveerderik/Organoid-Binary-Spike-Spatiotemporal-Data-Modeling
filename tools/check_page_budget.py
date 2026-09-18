@@ -113,9 +113,27 @@ def body_end_page(pdf_text: str) -> int:
 
 
 def _compile(outdir: Path) -> Path:
+    """Compile a throwaway copy of the paper, in Times.
+
+    Tectonic runs XeTeX, whose default TU encoding has no shape for Times, so a
+    straight compile of the submitted source silently falls back to Latin
+    Modern and overstates the page count by about a page. The fix is T1
+    fontenc, which must NOT enter the submitted file (Overleaf runs pdflatex),
+    so it is injected into a copy and the copy is what gets measured.
+    """
     tectonic = shutil.which("tectonic") or "/home/derik/.local/bin/tectonic"
+    src = outdir / "src"
+    shutil.copytree(PAPER, src)
+    main = src / "main.tex"
+    text = main.read_text(encoding="utf-8")
+    marker = "\\usepackage{iclr2027_conference,times}"
+    if marker not in text:
+        raise ValueError("main.tex no longer loads the ICLR class the way this "
+                         "gate expects; the font injection needs re-reading")
+    main.write_text(text.replace(marker, "\\usepackage[T1]{fontenc}\n" + marker),
+                    encoding="utf-8")
     subprocess.run([tectonic, "-X", "compile", "main.tex", "--outdir", str(outdir)],
-                   cwd=PAPER, check=True, capture_output=True)
+                   cwd=src, check=True, capture_output=True)
     return outdir / "main.pdf"
 
 

@@ -145,7 +145,7 @@ def legend(fig, n, observed=False, reference=None):
 
 
 QUANTITIES = [
-    ("map_r_gt", "map_r_pred", None, "spatial map $r$\nvs recording map"),
+    ("map_r_gt", "map_r_pred", None, "spatial map $r$\nvs assay map"),
     ("ref_logmean", None, "d_logmean", "log mean rate"),
     ("ref_active", None, "d_active", "active-site ratio"),
     ("ref_trend", None, "d_trend", "temporal trend"),

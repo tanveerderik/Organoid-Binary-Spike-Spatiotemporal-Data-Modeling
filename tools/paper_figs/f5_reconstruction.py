@@ -55,7 +55,7 @@ def draw(fig):
                               color=INK, labelpad=3)
         sitemap(fig.add_subplot(gs[i, nw]), npz[f"recon/{i}/sitemap"],
                 f"$r$ {r['map_r_pred']:.2f} / {r['map_r_gt']:.2f}",
-                "recording\nsite map" if i == 0 else None)
+                "assay\nsite map" if i == 0 else None)
     strip(fig, gs[len(picked), :], rows,
           list(zip(TAGS, picked)), QUANTITIES)
     cax = fig.add_axes([0.878, 0.40, 0.012, 0.52])

@@ -15,6 +15,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from MAGVIT_project.tools.tests._release_guard import needs_paper, needs_reports
+
+# The release omits the manuscript and the report artifacts;
+# absent material skips, present-but-wrong still fails.
+pytestmark = [needs_paper, needs_reports]
+
+
 ROOT = Path(__file__).resolve().parents[2]
 PANELS = ROOT / "reports" / "qualitative_panels.json"
 NPZ = ROOT / "reports" / "qualitative_panels.npz"

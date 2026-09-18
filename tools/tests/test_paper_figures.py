@@ -13,6 +13,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+from MAGVIT_project.tools.tests._release_guard import needs_paper, needs_reports
+
+# The release omits the manuscript and the report artifacts;
+# absent material skips, present-but-wrong still fails.
+pytestmark = [needs_paper, needs_reports]
+
+
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "reports" / "paper_figures"
 GEN = ROOT / "tools" / "make_paper_figures.py"
@@ -64,12 +71,12 @@ def test_f1_shows_which_context_reaches_which_module():
         check=True, capture_output=True, text=True).stdout
     flat = " ".join(text.split())
     for label in ("clip", "patchify", "blank token", "residual ladder",
-                  "flatten", "alphabet", "recording", "Stage-1 mapper",
+                  "flatten", "alphabet", "assay", "Stage-1 mapper",
                   "Stage-3 trunk", "activity prior", "motif prior", "decoder",
                   "task", "free generation", "causal", "noncausal", "spatial"):
         assert label in flat, f"F1 no longer labels {label!r}"
     # The asymmetry corrected in this revision: the activity prior does NOT
-    # read the recording through the frozen mapper.
+    # read the assay code through the frozen mapper.
     assert "no mapper" in flat, "F1 no longer shows the raw-code path"
     # LaTeX escapes do not survive matplotlib's default text path; a literal
     # backslash here means a percent sign was written as "\\%".

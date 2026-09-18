@@ -126,7 +126,7 @@ def draw(fig) -> None:
 
     # ---- bottom row: conditioning and the two priors --------------------
     hi, lo = BOT + 0.088, BOT - 0.108
-    _box(ax, X[0], hi, Wd[0], "$g_r$: recording", "one per recording",
+    _box(ax, X[0], hi, Wd[0], "$g_r$: assay", "one per assay",
          h=0.120)
     _box(ax, X[0], lo, Wd[0], "$\\ell(X)$: clip", "$9$ scalars, unlearned",
          h=0.120)
@@ -180,7 +180,7 @@ def draw(fig) -> None:
         _arrow(ax, (x, BOT - 0.255 + 0.050), (x, BOT - BOX_H / 2),
                color=INK_MUTED, dashed=True)
 
-    ax.text(0.0, 1.02, f"{prov['n_used']} recordings, "
+    ax.text(0.0, 1.02, f"{prov['n_used']} assays, "
             f"{min(ch)} to {max(ch)} routed sites each",
             transform=ax.transAxes, fontsize=5.6, color=INK_2, va="bottom")
     ax.text(1.0, 1.02, "dashed: enters as conditioning",

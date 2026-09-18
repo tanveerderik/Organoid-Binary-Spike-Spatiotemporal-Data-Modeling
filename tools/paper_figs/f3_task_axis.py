@@ -111,7 +111,7 @@ def draw(fig) -> None:
                for (k, lab), f in zip(ARMS, (True, True, False, False))]
     handles.append(Line2D([], [], ls="none", marker="|", ms=11, mew=1.6,
                           color=PALETTE["null"],
-                          label="null: recording site map"))
+                          label="null: per-assay site map"))
     # Anchored in inches above the axes, not as a figure fraction: the figure
     # height is a page-budget knob and a fractional anchor slides down onto the
     # panels as the figure shrinks. The asterisk is explained in the caption,

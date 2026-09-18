@@ -77,11 +77,30 @@ def test_release_tooling_is_not_exported():
     Both were exported once. The built-in verifier could not see it, because it
     waves through any line containing "anonymised" or "PROJECT_ROOT" and every
     one of those lines contains both the name and the word.
+
+    Matched on basename, because agent workspaces under `.superpowers/` keep
+    verbatim snapshots of the tree: a rule keyed on the single path
+    `tools/make_release.py` skipped the original and exported every snapshot
+    copy of it, which is how 28 identifying lines reached a build.
     """
     import MAGVIT_project.tools.make_release as MR
-    from pathlib import Path
-    assert Path("tools/make_release.py") in MR.SKIP_FILE
-    assert Path("tools/tests/test_make_release.py") in MR.SKIP_FILE
+    assert "make_release.py" in MR.SKIP_BASENAME
+    assert "test_make_release.py" in MR.SKIP_BASENAME
+    assert ".superpowers" in MR.SKIP_DIR
+    # Builds the non-anonymous preprint and names a co-author in --help.
+    assert "make_preprint.py" in MR.SKIP_BASENAME
+    assert "make_source_bundles.py" in MR.SKIP_BASENAME
+
+
+def test_name_rules_cover_every_author():
+    """Not just the first author: the verifier missed a co-author's surname."""
+    import MAGVIT_project.tools.make_release as MR
+    for probe in ("Mostajo-Radji", "mostajo", "azamm@rpi.edu",
+                  "wangg6@rpi.edu", "Rensselaer Polytechnic Institute",
+                  # The README title line: a public repo slug is a one-search
+                  # deanonymization, and the remote-URL rule does not match it.
+                  "# Organoid-Binary-Spike-Spatiotemporal-Data-Modeling"):
+        assert any(p.search(probe) for p in MR.NAME_RULES), probe
 
 
 def test_name_rules_have_no_exemption():

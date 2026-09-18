@@ -61,11 +61,23 @@ CHECKPOINT = Path("ckpts/vqvae_stage2a_best.pt")
 # "anonymised" or "PROJECT_ROOT" and every one of those lines does. A scrubber
 # that exports its own patterns hands a reviewer the identity it removed
 # everywhere else.
-SKIP_FILE = {Path("tools/make_release.py"),
-             Path("tools/tests/test_make_release.py")}
+# Matched on BASENAME, not on the one path under tools/. Agent workspaces keep
+# verbatim snapshots of the repo (see .superpowers below), so the same two
+# files reappear at other paths; a relative-path rule skipped the originals and
+# exported every copy.
+SKIP_BASENAME = {"make_release.py", "test_make_release.py",
+                 # Builds the NON-anonymous preprint; its options name a
+                 # co-author, so it is release tooling too.
+                 "make_preprint.py",
+                 # Builds the two shippable source bundles, one of which is
+                 # the non-anonymous arXiv package.
+                 "make_source_bundles.py"}
 
+# `.superpowers/` is agent scratch: git-ignored plan workspaces that hold whole
+# snapshot copies of the tree. Nothing in it belongs in a release, and its
+# copies of the release tooling carry the author's surname verbatim.
 SKIP_DIR = {"__pycache__", ".git", ".pytest_cache", ".ipynb_checkpoints",
-            "daps", "daps_scratch"}
+            "daps", "daps_scratch", ".superpowers"}
 
 
 # Identity that must not reach a reviewer. Each entry is (regex, replacement).
@@ -82,6 +94,11 @@ SCRUB = [
     (re.compile(r"Seagate[ _]?Desktop[ _]?Drive", re.I), "PROJECT_ROOT"),
     # Case-insensitive: the LICENSE carries the name as `TanveerDerik`, and a
     # case-sensitive rule passed the build while leaving it in the export.
+    # The bare repository slug, not just the remote URL. It is the title line of
+    # README.md, and the repo is public, so the exact string finds the owner on
+    # GitHub in one search -- the URL rule above never saw it.
+    (re.compile(r"Organoid-Binary-Spike-Spatiotemporal-Data-Modeling", re.I),
+     "Anonymized-Spike-Volume-Modeling"),
     (re.compile(r"\btanveerderik\b", re.I), "anonymised"),
     (re.compile(r"\bderik\b", re.I), "anonymised"),
 ]
@@ -93,9 +110,19 @@ SCRUB = [
 # through: the exported line read `re.compile(r"\btanveerderik\b", ...)`, and
 # the `b` of the escape sits against the `t`, so a \b-anchored search does not
 # match its own source. A verifier must find the name anywhere, in any context.
+# Co-author surnames, institution and account names are here as VERIFY-only
+# rules: they have no SCRUB entry, so a hit fails the build loudly instead of
+# being silently rewritten. `make_preprint.py` named a co-author in its
+# `--help` text and the old rules, which knew only the first author, waved it
+# through.
 NAME_RULES = [re.compile(r"tanveerderik", re.I),
               re.compile(r"derik", re.I),
-              re.compile(r"Seagate[ _]?Desktop[ _]?Drive", re.I)]
+              re.compile(r"Seagate[ _]?Desktop[ _]?Drive", re.I),
+              re.compile(r"mostajo", re.I),
+              re.compile(r"azamm", re.I),
+              re.compile(r"wangg6", re.I),
+              re.compile(r"rensselaer", re.I),
+              re.compile(r"Organoid-Binary-Spike", re.I)]
 
 # Only text is rewritten. A .pt is a tensor archive and a regex over it would
 # corrupt the file while appearing to succeed.
@@ -180,7 +207,7 @@ def main() -> int:
 
     total = n_py = 0
     for src in sorted(ROOT.rglob("*.py")):
-        if src.relative_to(ROOT) in SKIP_FILE:
+        if src.name in SKIP_BASENAME:
             continue
         if any(p in SKIP_DIR for p in src.relative_to(ROOT).parts):
             continue

@@ -85,7 +85,19 @@ def preproc_macros() -> None:
          f"\\newcommand{{\\SpikesPerClip}}{{{d['mean_spikes_per_clip']:.0f}}}",
          f"\\newcommand{{\\NTrain}}{{{d['split_counts']['train']}}}",
          f"\\newcommand{{\\NVal}}{{{d['split_counts']['val']}}}",
-         f"\\newcommand{{\\NTest}}{{{d['split_counts']['test']}}}"]
+         f"\\newcommand{{\\NTest}}{{{d['split_counts']['test']}}}",
+         # Windowed activity, not wall-clock recording: how much signal the
+         # model is actually fitted on. One window is `window_ms` long and a
+         # clip is a shorter span drawn inside it, so the window figure is the
+         # honest one for "hours of training data".
+         f"\\newcommand{{\\WindowedMin}}"
+         f"{{{d['n_windows'] * d['window_ms'] / 60000:.0f}}}",
+         f"\\newcommand{{\\TrainMin}}"
+         f"{{{d['split_counts']['train'] * d['window_ms'] / 60000:.1f}}}",
+         f"\\newcommand{{\\ValMin}}"
+         f"{{{d['split_counts']['val'] * d['window_ms'] / 60000:.1f}}}",
+         f"\\newcommand{{\\TestMin}}"
+         f"{{{d['split_counts']['test'] * d['window_ms'] / 60000:.1f}}}"]
     _write("preproc_macros.tex", "\n".join(m), "reports/preproc_stats.json")
 
 
@@ -143,17 +155,29 @@ def eval_macros() -> None:
 def data_provenance() -> None:
     """The 31 recordings, their source, and what the archive does not say."""
     d = json.loads(Path("reports/data_provenance.json").read_text())
+
+    # Recordings whose stored signal is byte-identical to another recording's.
+    # The routing hash cannot show this -- two recordings of one organoid share
+    # a routing configuration whether or not they are the same recording -- so
+    # the marker comes from the signal fingerprint instead.
+    fp_path = Path("reports/recording_fingerprints.json")
+    duplicated: set[str] = set()
+    if fp_path.exists():
+        for group in json.loads(fp_path.read_text())["duplicate_signal_groups"]:
+            duplicated.update(f.replace(".nwb", "") for f in group)
+
     rows = []
     for r in d["used"]:
         prep = "organoid" if r["dandiset"] == "000732" else "slice"
+        dup = "$\\dagger$" if r["assay_name"] in duplicated else ""
         rows.append(
-            f"{r['assay_idx']} & {_esc(r['assay_name'].replace('_ecephys', ''))} & "
+            f"{r['assay_idx']} & {_esc(r['assay_name'].replace('_ecephys', ''))}{dup} & "
             f"{r['dandiset']} & {prep} & {_esc(r.get('subject_id', '--'))} & "
             f"{_esc(r.get('age', '--'))} & {_esc(r.get('sex', '--'))} & "
             f"{r.get('n_routed_channels', 0)} & {r.get('duration_s', 0):.0f} & "
             f"\\texttt{{{r.get('electrode_config_md5', '--')}}} \\\\")
     body = ("\\begin{tabular}{r l l l l l c r r l}\n\\toprule\n"
-            "idx & recording & dandiset & prep. & subject & age & sex & "
+            "idx & assay & dandiset & prep. & subject & age & sex & "
             "chan. & dur.\\,(s) & routing \\\\\n\\midrule\n"
             + "\n".join(rows) + "\n\\bottomrule\n\\end{tabular}")
     _write("data_provenance.tex", body, "reports/data_provenance.json")
@@ -172,6 +196,27 @@ def data_provenance() -> None:
     ch = [r["n_routed_channels"] for r in d["used"]]
     macros.append(f"\\newcommand{{\\ChanMin}}{{{min(ch)}}}")
     macros.append(f"\\newcommand{{\\ChanMax}}{{{max(ch)}}}")
+    # How much recording the corpus is, which the recording count does not say:
+    # the files run from 127 s to 1940 s, so 31 recordings is not 31 of anything
+    # comparable. Summed from the same durations the provenance table prints.
+    hrs = {}
+    for r in d["used"]:
+        tag = "Organoid" if "organoid" in r["preparation"] else "Slice"
+        hrs[tag] = hrs.get(tag, 0.0) + r["duration_s"]
+    macros.append(f"\\newcommand{{\\CorpusHours}}{{{sum(hrs.values()) / 3600:.1f}}}")
+    durs = [r["duration_s"] for r in d["used"]]
+    macros.append(f"\\newcommand{{\\DurMinS}}{{{min(durs):,.0f}}}")
+    macros.append(f"\\newcommand{{\\DurMaxS}}{{{max(durs):,.0f}}}")
+    for tag, s in hrs.items():
+        macros.append(f"\\newcommand{{\\{tag}Hours}}{{{s / 3600:.1f}}}")
+    # Also in minutes, because the text has to put the recorded duration beside
+    # the retained burst duration and the training split, and those are already
+    # minutes. Rounded to the minute the parts sum to the total exactly, which
+    # they do not at one decimal place in hours (1.6 + 1.1 reads as 2.7 against
+    # a total of 2.8).
+    macros.append(f"\\newcommand{{\\CorpusMin}}{{{sum(hrs.values()) / 60:.0f}}}")
+    for tag, s in hrs.items():
+        macros.append(f"\\newcommand{{\\{tag}Min}}{{{s / 60:.0f}}}")
     _write("data_macros.tex", "\n".join(macros), "reports/data_provenance.json")
 
 
@@ -188,8 +233,8 @@ def scalability() -> None:
                     f"\\textbf{{{v['per_assay']:,}}} & "
                     f"{v['per_assay'] * 1000:,} \\\\")
     body = ("\\begin{tabular}{l r r r r}\n\\toprule\n"
-            "arm & fitted (shared) & shared maps & per recording & "
-            "at 1000 recordings \\\\\n\\midrule\n"
+            "arm & fitted (shared) & shared maps & per assay & "
+            "at 1000 assays \\\\\n\\midrule\n"
             + "\n".join(rows) + "\n\\bottomrule\n\\end{tabular}")
     _write("t1_scalability.tex", body,
            "reports/external_baselines/param_census.json")
@@ -269,7 +314,7 @@ def task_completion() -> None:
     # that recording's TRAIN clips and held constant in time -- no model, no
     # completion, no clip-specific information at all. Every learned arm loses
     # to it. `marginal_xa` withholds the clip's own recording, and the distance
-    # between the two rows is how much of the first is memorisation.
+    # between the two rows is how much of the first is memorization.
     nulls = json.loads((EB / "task_eval_nulls.json").read_text())["tasks"]
     TASKS = ["recon", "causal", "noncausal", "spatial"]
     ARMLBL = {"MaskGIT-flat": "MaskGIT-flat",
@@ -299,9 +344,9 @@ def task_completion() -> None:
                              else f"{r['arm_value']:.4f}{MARK[r['verdict']]}")
             blocks.append(f"{lbl} & " + " & ".join(cells) + " \\\\")
         fld = "site_ap" if fam == "site AP" else "ap"
-        for nk, nlbl in (("marginal", "\\emph{null} recording site map, seen"),
+        for nk, nlbl in (("marginal", "\\emph{null} assay site map, seen"),
                          ("marginal_xa",
-                          "\\emph{null} recording site map, unseen")):
+                          "\\emph{null} assay site map, unseen")):
             blocks.append(f"{nlbl} & " + " & ".join(
                 f"{nulls[t]['arms'][nk][fld]:.4f}" for t in TASKS) + " \\\\")
         blocks.append("\\midrule")
@@ -331,9 +376,9 @@ def stage_prior_ladder() -> None:
     rows = []
     for pre, lbl in (("null_uniform_z1", "uniform"),
                      ("null_global_z1", "global marginal"),
-                     ("null_assay_z1", "per-recording marginal"),
+                     ("null_assay_z1", "per-assay marginal"),
                      ("null_assay_position_z1",
-                      "per-recording $\\times$ position")):
+                      "per-assay $\\times$ position")):
         rows.append(f"{lbl} & {d[pre+'_acc']:.4f} & {d[pre+'_top5_acc']:.4f} & "
                     f"{d[pre+'_median_rank']:.0f} & {d[pre+'_mrr']:.4f} & "
                     f"{d[pre+'_ce']:.4f} \\\\")
@@ -364,11 +409,11 @@ def motif_reuse() -> None:
     e, jr = d["entropy"], d["jaccard_rarefied"]
     rows = [
         f"alphabet entries in use & {d['vocab_global']} of {d['V']} \\\\",
-        f"used by $\\geq 5$ recordings, rarefied & "
+        f"used by $\\geq 5$ assays, rarefied & "
         f"{d['shared_core']['used_by_ge_k_rarefied']['5']:.0f} \\\\",
         "\\midrule",
         f"$H(\\mathrm{{code}})$ & {e['H_code_mm']:.4f} nats \\\\",
-        f"$H(\\mathrm{{code}} \\mid \\mathrm{{recording}})$ & "
+        f"$H(\\mathrm{{code}} \\mid \\mathrm{{assay}})$ & "
         f"{e['H_code_given_recording_mm']:.4f} nats \\\\",
         f"\\textbf{{retained fraction}} & "
         f"\\textbf{{{e['reuse_ratio_mm']:.4f}}} \\\\",
@@ -564,7 +609,7 @@ def app_withheld_map() -> None:
                     f"{a['map_pearson_r']:.4f} & {b['map_pearson_r']:.4f} "
                     f"\\\\")
     body = ("\\begin{tabular}{l r r r r r r}\n\\toprule\n"
-            "\\emph{ref} arm & \\multicolumn{2}{c}{within-recording gap} & "
+            "\\emph{ref} arm & \\multicolumn{2}{c}{within-assay gap} & "
             "\\multicolumn{2}{c}{adherence} & "
             "\\multicolumn{2}{c}{map $r$} \\\\\n"
             "\\cmidrule(lr){2-3}\\cmidrule(lr){4-5}\\cmidrule(lr){6-7}\n"
@@ -659,9 +704,9 @@ def app_pooled_marginals() -> None:
 # and how it is selected all come from the extractor, so a renamed or dropped
 # stage breaks this table instead of leaving a stale row in the paper.
 _STAGE_ROLE = {
-    "1":  ("the recording's running union of active sites",
+    "1":  ("the assay's running union of active sites",
            "frozen code-to-support mapper"),
-    "2A": ("the clip itself, reconstructed through the quantiser",
+    "2A": ("the clip itself, reconstructed through the quantizer",
            "frozen motif alphabet, $V=961$"),
     "3":  ("the clip's texton usage histogram",
            "frozen nine-scalar-to-code mapper"),
@@ -735,7 +780,7 @@ def app_cvae_collapse() -> None:
         f"{cfg['free_bits']} applied \\emph{{per channel}}, which is where "
         "collapse happens; the KL charged only on the latent cells the hole "
         "touches, so the latent is not taxed for what the skip connections "
-        "already carry; and the posterior log-variance initialised at "
+        "already carry; and the posterior log-variance initialized at "
         f"${cfg['post_logvar_init']}$. The latent is a {cfg['z_ch']}-channel "
         "grid and not a global vector, so it can say \\emph{where} the extra "
         "spikes go.")

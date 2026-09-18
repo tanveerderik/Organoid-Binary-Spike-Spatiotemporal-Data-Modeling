@@ -46,7 +46,7 @@ MIRROR = ROOT / "paper" / "figures"
 # and re-check before keeping an edit.
 FIGURES = [
     ("f1_pipeline",   "f1_pipeline",   (TEXT_W, 2.10)),
-    ("f2_motifs",     "f2_motifs",     (TEXT_W, 2.45)),
+    ("f2_motifs",     "f2_motifs",     (TEXT_W, 2.25)),
     ("f3_task_axis",  "f3_task_axis",  (TEXT_W, 1.75)),
     ("f4_generation", "f4_generation", (TEXT_W, 1.9)),
     # Appendix figures. Not page-budgeted against the 9-page main text, but

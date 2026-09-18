@@ -30,7 +30,7 @@ The pipeline has two halves:
 | Input volume | `48 x 120 x 224` (t, h, w) after temporal pooling of a 6000-sample crop by 120 |
 | Patch size | `6 x 15 x 14` |
 | Token grid | `8 x 8 x 16` = **1024 token positions** |
-| Spike voxel probability | ~1.2e-4 |
+| Spike voxel probability | 1.62e-4 |
 
 Splits are **temporal within assay** (a clip's later time range is held out from
 its own earlier range), not random, so held-out clips are never interleaved with
@@ -170,8 +170,11 @@ ckpts/ reports/       checkpoints and JSON training/evaluation reports
 
 ## Project status
 
-Active research project. Stages 1 through 3 are complete; Stage 4 is in
-progress. Architecture and training strategy are under continuous development.
+All pipeline stages are complete and are what the manuscript reports: the
+global-context pretraining, the hierarchical VQ-VAE, the ladder flattening to a
+single alphabet, the local-context mapper, and the discrete prior including
+Stage 4A, 4B and 4C. The shipped checkpoint for each stage, and how it was
+selected, are recorded in `ckpts/CHECKPOINTS.md`.
 
 ---
 

@@ -220,7 +220,7 @@ def stages() -> list[dict[str, Any]]:
         },
         {
             "stage": "2A",
-            "what": "Tokeniser (3-level residual VQ-VAE)",
+            "what": "Tokenizer (3-level residual VQ-VAE)",
             "trained": "encoder, decoder, EMA codebooks",
             "optimizer": "AdamW",
             "lr": _require(s2_opt, "lr", "stage 2A"),
@@ -451,7 +451,7 @@ def objectives() -> list[dict[str, Any]]:
             "terms": [
                 _term("support, token grid",
                       f"outside {s1_sup[0]['outside_w']}, mass {s1_sup[0]['mass_w']}",
-                      "cover the recording's active sites, penalise mass "
+                      "cover the recording's active sites, penalize mass "
                       "outside them, match the total"),
                 _term("support, full array",
                       f"outside {s1_sup[1]['outside_w']}, mass {s1_sup[1]['mass_w']}",
@@ -473,7 +473,7 @@ def objectives() -> list[dict[str, Any]]:
                 _term("tolerant spike reconstruction", c2["pos_weight"],
                       "exact BCE at a decaying positive weight, plus "
                       "max-pooled hit, peak-margin and multi-count terms"),
-                _term("vector quantisation", c2["lambda_vq"],
+                _term("vector quantization", c2["lambda_vq"],
                       f"commitment at $\\beta = {c2['vq_beta']}$ plus a usage-entropy "
                       f"term at {c2['usage_loss_weight']} against a detached "
                       f"codebook; codebooks are EMA at decay {c2['vq_decay']}"),
@@ -522,7 +522,7 @@ def objectives() -> list[dict[str, Any]]:
             "terms": [
                 _term("categorical cross-entropy", 1.0,
                       "the correct motif at each masked active cell"),
-                _term("neighbourhood CE",
+                _term("neighborhood CE",
                       _require(s4a, "lambda_z1_neighbor_ce", "stage 4A"),
                       "partial credit over the five codebook-nearest "
                       "alternatives at temperature "
@@ -531,7 +531,7 @@ def objectives() -> list[dict[str, Any]]:
                 _term("expected code distance",
                       _require(s4a, "lambda_z1_distance", "stage 4A"),
                       "the whole predicted distribution is pulled toward the "
-                      "target's neighbourhood, not just its mode"),
+                      "target's neighborhood, not just its mode"),
                 _term("context", _require(s4a, "lambda_ctx", "stage 4A"),
                       "soft-decode the motif logits through the frozen "
                       "tokenizer; the result's nine moments must match the clip"),
@@ -556,7 +556,7 @@ def objectives() -> list[dict[str, Any]]:
                       "the class-balancing ratio, which over-produces"),
                 _term("count", float(s4b["lambda_count"]),
                       "one categorical over the clip's total active count, "
-                      "with an ordinal neighbour term at "
+                      "with an ordinal neighbor term at "
                       f"{_require(s4b_sig, 'lambda_count_neighbor', 'stage 4B')} "
                       "and an expected-distance term at "
                       f"{_require(s4b_sig, 'lambda_count_distance', 'stage 4B')} "

@@ -27,7 +27,7 @@
     },
     {
       "stage": "2A",
-      "what": "Tokeniser (3-level residual VQ-VAE)",
+      "what": "Tokenizer (3-level residual VQ-VAE)",
       "trained": "encoder, decoder, EMA codebooks",
       "optimizer": "AdamW",
       "lr": 0.001,
@@ -136,7 +136,7 @@
         {
           "term": "support, token grid",
           "coeff": "outside 2.0, mass 1.0",
-          "constrains": "cover the recording's active sites, penalise mass outside them, match the total"
+          "constrains": "cover the recording's active sites, penalize mass outside them, match the total"
         },
         {
           "term": "support, full array",
@@ -165,7 +165,7 @@
           "constrains": "exact BCE at a decaying positive weight, plus max-pooled hit, peak-margin and multi-count terms"
         },
         {
-          "term": "vector quantisation",
+          "term": "vector quantization",
           "coeff": 1.0,
           "constrains": "commitment at $\\beta = 0.25$ plus a usage-entropy term at 0.001 against a detached codebook; codebooks are EMA at decay 0.95"
         },
@@ -247,14 +247,14 @@
           "constrains": "the correct motif at each masked active cell"
         },
         {
-          "term": "neighbourhood CE",
+          "term": "neighborhood CE",
           "coeff": 0.05,
           "constrains": "partial credit over the five codebook-nearest alternatives at temperature 0.25, so a near miss in alphabet geometry is not a total miss"
         },
         {
           "term": "expected code distance",
           "coeff": 0.05,
-          "constrains": "the whole predicted distribution is pulled toward the target's neighbourhood, not just its mode"
+          "constrains": "the whole predicted distribution is pulled toward the target's neighborhood, not just its mode"
         },
         {
           "term": "context",
@@ -290,7 +290,7 @@
         {
           "term": "count",
           "coeff": 0.065,
-          "constrains": "one categorical over the clip's total active count, with an ordinal neighbour term at 0.25 and an expected-distance term at 0.05 so a near-miss count is scored as one"
+          "constrains": "one categorical over the clip's total active count, with an ordinal neighbor term at 0.25 and an expected-distance term at 0.05 so a near-miss count is scored as one"
         },
         {
           "term": "temporal co-activation",

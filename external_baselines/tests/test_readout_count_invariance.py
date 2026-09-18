@@ -73,7 +73,8 @@ def test_placement_features_are_not_invariant():
         merged_hard(f, x, roi, rate)[0, 0].numpy()) for f in _fields(4)])
     i0 = ACTIVITY_CTX_NAMES.index("log_mean_firing_density")
     moved = [n for i, n in enumerate(ACTIVITY_CTX_NAMES)
-             if i != i0 and ctx[:, i].ptp() > 0]
+             # np.ptp(), not ndarray.ptp(): NumPy 2 removed the method.
+             if i != i0 and np.ptp(ctx[:, i]) > 0]
     assert len(moved) >= 6, f"only {len(moved)} placement features moved: {moved}"
 
 

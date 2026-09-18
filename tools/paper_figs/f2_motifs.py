@@ -96,7 +96,7 @@ def _band_reuse(fig, gs, d, H):
     ks = sorted(int(k) for k in core)
     ax.plot(ks, [core[str(k)] for k in ks], marker="o", ms=4, lw=1.6,
             color=PALETTE["pipeline"], mec=SURFACE, mew=0.8)
-    ax.set_xlabel("used by at least $k$ recordings", fontsize=7)
+    ax.set_xlabel("used by at least $k$ assays", fontsize=7)
     ax.set_ylabel("alphabet entries", fontsize=7)
     ax.annotate(f"{core['5']:.0f} of {d_V} entries\nused by $\\geq$5",
                 (5, core["5"]), textcoords="offset points", xytext=(10, 10),

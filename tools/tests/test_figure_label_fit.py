@@ -22,6 +22,13 @@ from matplotlib.patches import FancyBboxPatch, Rectangle   # noqa: E402
 from MAGVIT_project.tools import make_paper_figures as MPF  # noqa: E402
 from MAGVIT_project.tools.paper_figs.style import apply_style  # noqa: E402
 
+from MAGVIT_project.tools.tests._release_guard import needs_paper, needs_reports
+
+# The release omits the manuscript and the report artifacts;
+# absent material skips, present-but-wrong still fails.
+pytestmark = [needs_paper, needs_reports]
+
+
 # A label may sit this many points outside its border before it reads as
 # broken. Rounded corners and the box pad make an exact zero too strict.
 TOLERANCE_PX = 0.5

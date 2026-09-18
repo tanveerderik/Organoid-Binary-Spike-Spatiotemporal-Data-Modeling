@@ -77,8 +77,11 @@ def test_no_code_identifiers_in_prose():
     NWB array names a reader needs to load the right data.
     """
     allowed = {"000732", "001132", "001603", "0.241130.1903",
-               "dandi:OpenAccess", "neuroconv", "sub-U",
+               "dandi:OpenAccess", "neuroconv", "sub-U", "10F", "11G",
                "obj-1wcxx1y", "obj-m6lpfz", "obj-paunmv",
+               # The three byte-identical pairs the provenance audit names.
+               "obj-1e5gdym", "obj-7c50zw", "obj-1cs0t8m", "obj-at6hmv",
+               "obj-1q4jnyp", "obj-en3uzn",
                r"binary\_unit\_burst", r"binary\_ch\_burst"}
     text = _all_prose()
     found = {m for m in re.findall(r"\\texttt\{([^{}]*)\}", text)}

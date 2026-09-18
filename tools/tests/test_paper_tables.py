@@ -19,6 +19,13 @@ from pathlib import Path
 
 import pytest
 
+from MAGVIT_project.tools.tests._release_guard import needs_paper, needs_reports
+
+# The release omits the manuscript and the report artifacts;
+# absent material skips, present-but-wrong still fails.
+pytestmark = [needs_paper, needs_reports]
+
+
 ROOT = Path(__file__).resolve().parents[2]
 TABLES = ROOT / "paper" / "tables"
 GEN = ROOT / "tools" / "make_paper_tables.py"
@@ -45,10 +52,10 @@ def test_task_completion_has_both_metrics_all_arms_and_the_null():
     for arm in ("Ours", "MaskGIT-flat", "3D U-Net", "3D CVAE"):
         assert arm in t, f"{arm} missing from T2"
     assert "Site AP" in t and "Voxel AP" in t
-    # The seen-recording site-map null is a ROW, not a footnote: every learned
+    # The seen-assay site-map null is a ROW, not a footnote: every learned
     # arm loses to it, and a table that omits it overstates the result.
-    assert "recording site map, seen" in t
-    assert "recording site map, unseen" in t
+    assert "assay site map, seen" in t
+    assert "assay site map, unseen" in t
     # Its free-generation values, site and voxel. Pinned so the row cannot be
     # emitted empty. Updated 2026-08-29 from 0.7205/0.0869, which were measured
     # under the old 12/8-batch prefix budget; at the full 70-batch protocol the
@@ -84,8 +91,8 @@ def test_prior_null_table_quotes_median_rank_and_beats_the_hardest_rung():
     assert "median rank" in t
     # The ladder must be present in full: beating `uniform` is worth nothing,
     # and a table showing only the easy rungs would say nothing.
-    for rung in ("uniform", "global marginal", "per-recording marginal",
-                 "per-recording $\\times$ position"):
+    for rung in ("uniform", "global marginal", "per-assay marginal",
+                 "per-assay $\\times$ position"):
         assert rung in t, f"null rung {rung!r} missing"
 
 
