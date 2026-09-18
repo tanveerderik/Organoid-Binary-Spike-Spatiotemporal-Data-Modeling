@@ -56,6 +56,12 @@ ckpts/cache/
 ckpts/*
 !ckpts/CHECKPOINTS.md
 
+# The DAPS adaptation targets a different corpus and rig. It is unpublished,
+# not referenced by the paper, and make_release.py already keeps it out of the
+# anonymous supplement -- but it was tracked, so a routine push would have
+# published it. Ignored so that cannot happen by accident.
+daps/
+
 # Scratch and local backups. daps_scratch/ alone is 5.2GB of intermediates.
 daps_scratch/
 paper_BACKUP_*/
