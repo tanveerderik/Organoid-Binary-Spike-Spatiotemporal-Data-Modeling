@@ -2,10 +2,12 @@
 
 Form: four small-multiple dumbbells. Each row pairs an arm's full-context value
 (filled) with the SAME arm's random-context value (hollow); the connector's
-length is that arm's conditioning gain, and its direction says whether context
-helped. A plain bar chart of full-context values would hide the two facts this
-figure exists to show -- that the flat tokenizer's connector is longer than
-ours, and that the U-Net's points the wrong way on two of the four families.
+length is the random-to-full change. On A, C and D the target is the true clip,
+so direction says whether context helped; B scores obedience to the descriptor
+SUPPLIED, so an obedient arm is flat there and its connector is not a gain.
+A plain bar chart of full-context values would hide the two facts this figure
+exists to show -- that the flat tokenizer's connector is longer than ours, and
+that the U-Net's points the wrong way on family D.
 
 Every panel is oriented so RIGHTWARD IS BETTER. Two of the four families are
 lower-is-better, and a reader scanning four panels should not have to hold
@@ -92,6 +94,6 @@ def draw(fig) -> None:
                bbox_to_anchor=(0.5, 1.16), handletextpad=0.4,
                columnspacing=1.4, labelcolor=INK_2)
     fig.text(0.5, 1.21, "rightward is better in every panel; the connector is "
-                        "that arm's conditioning gain", ha="center",
+                        "the random-to-full change", ha="center",
              va="bottom", fontsize=6.5, color=INK_2)
     fig.subplots_adjust(wspace=0.42)

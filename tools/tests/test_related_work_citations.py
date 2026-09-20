@@ -8,7 +8,13 @@ which cost about 120 words after two existing sentences were compressed to pay
 for part of it. The provenance audit of 2026-09-12 then added Wu et al. 2026,
 about 60 words, and paid for two thirds of it by deleting a peer-method sentence
 that Section 5 already carried and by not restating the sorted-unit contrast
-twice. The binding constraint on any further growth is the page gate,
+twice. Automated pre-review feedback on 2026-09-18 then asked for the
+cross-session models, POYO and NDT2: the section had claimed every peer used
+session-specific parameterizations, and these two are the obvious things a
+reviewer would check that claim against. They cost about 45 words, roughly half
+of it paid back by three trims in the same section, and the claim survives
+because both still learn a per-unit or per-session embedding. The binding
+constraint on any further growth is the page gate,
 `tools/check_page_budget.py`, not this number.
 """
 from pathlib import Path
@@ -26,8 +32,8 @@ BIB = ROOT / "paper" / "refs.bib"
 
 REQUIRED_KEYS = ["kapoor2024ldns", "molano2018spikegan",
                  "minnick2026spikeprophecy", "minnick2026implicit",
-                 "wu2026generative"]
-MAX_WORDS = 550  # measured 2026-09-12, after Wu et al. 2026 was cited
+                 "wu2026generative", "azabou2023poyo", "ye2023ndt2"]
+MAX_WORDS = 580  # raised 2026-09-18, see below
 
 
 def test_bib_has_the_adjacent_generative_work():

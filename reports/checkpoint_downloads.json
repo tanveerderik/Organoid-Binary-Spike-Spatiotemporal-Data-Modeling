@@ -1,0 +1,60 @@
+{
+  "checkpoints": {
+    "activity_prior_best.pt": {
+      "bytes": 4749331,
+      "sha256": "2b89c77879cd2010aee9745c32ed8ec97bde044d47361e71b082c09355072401"
+    },
+    "activity_prior_best_hard_metric.pt": {
+      "bytes": 7667625,
+      "sha256": "648bdd485c79117e594378673a61743459a4ae4a849193d8d5fdcd8fe0faa33b"
+    },
+    "activity_prior_best_loss.pt": {
+      "bytes": 4749331,
+      "sha256": "efe0a8386637d1a9e7c054efb5ce782a8b21842f974f6d68ad702944781e6994"
+    },
+    "activity_prior_refined_best.pt": {
+      "bytes": 7665001,
+      "sha256": "6fe2be1afe28c90a9d76cf7cd5d636f9fec6dfa18f13621577a011ad5a82b4ed"
+    },
+    "context_prior.pkl": {
+      "bytes": 1125238,
+      "sha256": "1cc0408f41fb912dae0b0b52c54376981a43bfca5294b90acd831b7d3918baf8"
+    },
+    "motif_prior_adapt_best.pt": {
+      "bytes": 8735335,
+      "sha256": "9fd97183dc3d7ff429c50dbf08c62ff4882e71408f6eba3b1644221d4540c5f5"
+    },
+    "motif_prior_best.pt": {
+      "bytes": 8735335,
+      "sha256": "287140e5df646f05a7e2c5ff6fd7b7b9a524f8188001d2077f9df34d0ca9c3e0"
+    },
+    "null_baselines.pkl": {
+      "bytes": 3482609,
+      "sha256": "135800023a0982ef1717b076cf04ab56b714dcbfeb4d08fbe888ef838d123bac"
+    },
+    "spatial_bias_pretrain.pt": {
+      "bytes": 6812007,
+      "sha256": "801df4c8f443e27269ccc8c7a021b7d019237ebfe92c9765a061ca943949be70"
+    },
+    "stage2b_flat_codebook.pt": {
+      "bytes": 294491,
+      "sha256": "dab3fbcd23809abe35e72b9e7a497204233017f54918288110574ee12517f032"
+    },
+    "stage3_lct_mapper.pt": {
+      "bytes": 1571940,
+      "sha256": "ada9d0c9dc67523eb02a1562a2f8e974a500014ec99604887516f0909d228cd1"
+    },
+    "token_adjacency_bank.pt": {
+      "bytes": 69065,
+      "sha256": "bc8d6530691671d07b2794568166a105a1eeeb9de6cf347df1c2344d6daf4b08"
+    },
+    "vqvae_stage2a_best.pt": {
+      "bytes": 18226269,
+      "sha256": "2e025e49160b04c600c39dcdf3415c678b02e471a6c908c4a91e60beb9e2127d"
+    },
+    "vqvae_stage2a_last.pt": {
+      "bytes": 18226269,
+      "sha256": "e234572c8eb7e1dc8e9023b72de521e1b000f3517118fab49d720532ceeb5e7c"
+    }
+  }
+}

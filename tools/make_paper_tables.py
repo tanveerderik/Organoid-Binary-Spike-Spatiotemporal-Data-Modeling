@@ -194,8 +194,11 @@ def data_provenance() -> None:
     macros.append(f"\\newcommand{{\\NOrganoidRoutings}}{{{len(cfgs['000732'])}}}")
     macros.append(f"\\newcommand{{\\NSliceRoutings}}{{{len(cfgs['001132'])}}}")
     ch = [r["n_routed_channels"] for r in d["used"]]
-    macros.append(f"\\newcommand{{\\ChanMin}}{{{min(ch)}}}")
-    macros.append(f"\\newcommand{{\\ChanMax}}{{{max(ch)}}}")
+    # Thin-space grouping, to match 26{,}400 and 1{,}024 in the same paragraph.
+    def _grp(n: int) -> str:
+        return f"{n:,}".replace(",", "{,}")
+    macros.append(f"\\newcommand{{\\ChanMin}}{{{_grp(min(ch))}}}")
+    macros.append(f"\\newcommand{{\\ChanMax}}{{{_grp(max(ch))}}}")
     # How much recording the corpus is, which the recording count does not say:
     # the files run from 127 s to 1940 s, so 31 recordings is not 31 of anything
     # comparable. Summed from the same durations the provenance table prints.
@@ -304,7 +307,8 @@ def task_completion() -> None:
     work does not win. Cells carry the paired-test verdict instead.
 
     Read WITHIN a column only. The ROI fraction differs by task
-    (1.00 / 0.60 / 0.41 / 0.33), so the columns have different base rates.
+    (1.00 / 0.59 / 0.40 / 0.34, in column order), so the columns have different
+    base rates, and so do the clip counts (279 / 278 / 278 / 243).
     `recon` is free generation at zero context, not a fourth completion task.
     """
     src = EB / "cross_model_tests.json"
@@ -317,8 +321,12 @@ def task_completion() -> None:
     # between the two rows is how much of the first is memorization.
     nulls = json.loads((EB / "task_eval_nulls.json").read_text())["tasks"]
     TASKS = ["recon", "causal", "noncausal", "spatial"]
+    # All four learned arms, because all four are in the Benjamini-Hochberg
+    # pool: 2 families x 4 settings x 4 arms = the 32 tests Appendix P counts.
+    # Showing three would leave a reader unable to reconcile the arithmetic.
     ARMLBL = {"MaskGIT-flat": "MaskGIT-flat",
               "3D U-Net (det.)": "3D U-Net$^\\dagger$",
+              "3D U-Net seed 2": "3D U-Net, seed 2$^\\dagger$",
               "3D CVAE": "3D CVAE"}
     MARK = {"pipeline": "$^{\\ast}$", "arm": "", "ns": "$^{\\circ}$"}
 

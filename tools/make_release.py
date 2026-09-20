@@ -47,7 +47,67 @@ DOCS = ["README.md", "LICENSE", ".gitignore",
         "analysis/README.md", "external_baselines/README.md",
         "reports/archive/README.md", "ckpts/CHECKPOINTS.md"]
 DIAGNOSTICS_DIR = Path("reports/external_baselines")
-CHECKPOINT = Path("ckpts/vqvae_stage2a_best.pt")
+CHECKPOINT_MANIFEST = Path("ckpts/CHECKPOINTS.md")
+
+# The generators read report artifacts by name, and some of those names are
+# built at run time, so harvesting them from the source misses cases. Ship the
+# two top-level JSON directories wholesale instead: ~39MB raw, which compresses
+# to a few MB, out of the 235MB under reports/. The per-arm `manifest.json`
+# files in the subdirectories are the bulk of that 235MB and are excluded --
+# they are per-clip dumps, not generator inputs.
+ARTIFACT_DIRS = [Path("reports"), Path("reports/external_baselines"),
+                 Path("ckpts"), Path("ckpts/external_baselines")]
+
+
+def generator_artifacts() -> list[Path]:
+    """Report JSON the table and figure generators load."""
+    out: list[Path] = []
+    for d in ARTIFACT_DIRS:
+        src = ROOT / d
+        if not src.is_dir():
+            continue
+        for pat in ("*.json", "*.npz"):
+            for f in sorted(src.glob(pat)):
+                out.append(f.relative_to(ROOT))
+    return out
+
+
+# Files the manifest marks `**referenced**` rather than `**shipped**`, which
+# the eval and generation paths nonetheless load. `build_pipeline` calls
+# `load_stage1_gct_for_eval`, which RAISES without the Stage-1 pretrain, so
+# omitting it leaves an export that cannot run inference at all. The two
+# training-only referenced checkpoints (`vqvae_stage1_best`, 17.6MB;
+# `motif_prior_warmstart`, 4.2MB) and the 244MB `motif_null_baselines.pkl` stay
+# out: nothing in evaluation or generation reads them, and the computed null
+# results are already in the shipped report artifacts.
+ALSO_SHIP = [
+    Path("ckpts/spatial_bias_pretrain.pt"),   # Stage-1 gct mapper + memory banks
+    Path("ckpts/context_prior.pkl"),          # default --bank for the ladder
+    Path("ckpts/token_adjacency_bank.pt"),    # adjacency reference
+    Path("ckpts/null_baselines.pkl"),         # model-free references
+]
+
+
+def shipped_checkpoints() -> list[Path]:
+    """The checkpoints the paper's results were produced with.
+
+    Read out of `ckpts/CHECKPOINTS.md`, which `tools/gen_checkpoint_manifest.py`
+    generates from `main.py`'s CKPTS dict, so this list cannot drift from the
+    code the way a hardcoded one would. Rows marked `**shipped**` are exactly
+    the ones an evaluation or generation run loads, plus the training-path
+    variants those runs' provenance depends on.
+    """
+    md = ROOT / CHECKPOINT_MANIFEST
+    if not md.is_file():
+        return []
+    names = []
+    for line in md.read_text().splitlines():
+        if not line.startswith("|") or "**shipped**" not in line:
+            continue
+        m = re.match(r"\|\s*`([^`]+)`", line)
+        if m:
+            names.append(Path("ckpts") / m.group(1))
+    return names + [p for p in ALSO_SHIP if p not in names]
 
 # `daps/` is an adaptation of this pipeline to a different corpus and a
 # different rig. It is unpublished, unreviewed, not referenced by the paper,
@@ -225,14 +285,24 @@ def main() -> int:
         total += _copy(md.relative_to(ROOT), dest)
         n_diag += 1
 
-    ck_mb = 0.0
+    n_art = 0
+    for art in generator_artifacts():
+        s = _copy(art, dest)
+        if s:
+            total += s
+            n_art += 1
+
+    ck_mb, n_ck = 0.0, 0
     if not a.no_checkpoint:
-        s = _copy(CHECKPOINT, dest)
-        total += s
-        ck_mb = s / 1e6
-        if not s:
-            print(f"WARNING: {CHECKPOINT} not found; released without it",
-                  file=sys.stderr)
+        for ck in shipped_checkpoints():
+            s = _copy(ck, dest)
+            if not s:
+                print(f"WARNING: {ck} not found; released without it",
+                      file=sys.stderr)
+                continue
+            total += s
+            ck_mb += s / 1e6
+            n_ck += 1
 
     (dest / "RELEASE.md").write_text(f"""# Release export
 
@@ -260,15 +330,20 @@ themselves when it is absent, rather than failing.
 | Python sources | {n_py} files |
 | Documentation | {n_doc} files |
 | Rendered diagnostics | {n_diag} markdown files under `reports/external_baselines/` |
-| Checkpoints | {'none' if a.no_checkpoint else f'`{CHECKPOINT.as_posix()}` ({ck_mb:.1f} MB)'} |
+| Report artifacts | {n_art} JSON files the table and figure generators read |
+| Checkpoints | {'none' if a.no_checkpoint else f'{n_ck} shipped ({ck_mb:.1f} MB), listed in `ckpts/CHECKPOINTS.md`'} |
 | Total | {total / 1e6:.1f} MB |
 
 ## What was excluded, and how to regenerate it
 
-**Checkpoints.** All except the Stage-2A VQ-VAE. `ckpts/CHECKPOINTS.md` is
-included and lists every one of them, what produced it, and which ship, so the
-omission is auditable. Regenerate by running the pipeline stages in
-`main.py` (`TRAIN_STAGES`).
+**Checkpoints.** Every checkpoint marked `**shipped**` is included, which is
+the full set an evaluation or generation run loads: the Stage-2A tokenizer, the
+flattened codebook, the Stage-3 local-context mapper, the activity prior and
+the Stage-4C motif prior, together with the training-path variants their
+provenance depends on. What is excluded is the exploratory and superseded
+checkpoints. `ckpts/CHECKPOINTS.md` lists every one of them, what produced it,
+and which ship, so the omission is auditable. Regenerate the rest by running
+the pipeline stages in `main.py` (`TRAIN_STAGES`).
 
 **`reports/*.json`.** Training and evaluation reports, regenerated by the
 stage that writes them. The rendered `.md` diagnostics ARE included, because
@@ -290,7 +365,8 @@ new preparation still requires training exposure.
 
     print(f"wrote {dest}")
     print(f"  {n_py} python, {n_doc} docs, {n_diag} diagnostics"
-          f"{'' if a.no_checkpoint else ', 1 checkpoint'}")
+          f", {n_art} artifacts"
+          f"{'' if a.no_checkpoint else f', {n_ck} checkpoints'}")
     print(f"  {total / 1e6:.1f} MB total")
 
     if a.no_verify:
