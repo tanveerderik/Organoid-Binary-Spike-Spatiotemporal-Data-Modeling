@@ -499,7 +499,57 @@ def temporal_trend_score_np(frame_means: np.ndarray, eps: float = 1e-8) -> float
     return float((fm * t).mean() / (fm_std + eps))
 
 
-def compute_activity_ctx(thw: np.ndarray, max_num_units: float = 1024.0, eps: float = 1e-8) -> np.ndarray:
+CTX_SOURCES = ("full", "visible", "none")
+
+
+def hidden_voxel_mask_from_spec(mask_spec, thw_shape, patch_size) -> np.ndarray:
+    """(T,H,W) bool, True where the task hides voxels.
+
+    Voxel-level mirror of `TransformerVQVAE.predict_mask_from_spec` followed by
+    the token-to-voxel expansion `task_eval.roi_voxels` uses: the hole is the
+    union of every token the spec touches, so the visible region is exactly the
+    complement of the region the model is asked to fill. Same fallbacks as the
+    token version (an empty hole becomes the whole volume).
+    """
+    T, H, W = map(int, thw_shape)
+    pt, ph, pw = (int(p) for p in patch_size)
+    t_tok, h_tok, w_tok = max(1, T // pt), max(1, H // ph), max(1, W // pw)
+    stype = mask_spec.get("type", "recon") if isinstance(mask_spec, dict) else "recon"
+    tok = np.ones((t_tok, h_tok, w_tok), bool)
+    if stype == "causal" and t_tok > 1:
+        pref = max(1, min(t_tok - 1, int(mask_spec.get("prefix_frames", 0)) // pt))
+        tok[:] = False
+        tok[pref:] = True
+    elif stype == "noncausal":
+        tt = np.zeros(t_tok, bool)
+        for a, b in mask_spec.get("time_spans", []):
+            a, b = int(a), int(b)
+            if b <= a:
+                continue
+            ta = max(0, min(t_tok - 1, a // pt))
+            tb = max(0, min(t_tok - 1, (b - 1) // pt))
+            if tb >= ta:
+                tt[ta:tb + 1] = True
+        if tt.any():
+            tok[:] = tt[:, None, None]
+    elif stype == "spatial" and mask_spec.get("spatial_box") is not None:
+        y0, y1, x0, x1 = map(int, mask_spec["spatial_box"])
+        ty0 = max(0, min(h_tok - 1, y0 // ph))
+        ty1 = max(0, min(h_tok - 1, (y1 - 1) // ph))
+        tx0 = max(0, min(w_tok - 1, x0 // pw))
+        tx1 = max(0, min(w_tok - 1, (x1 - 1) // pw))
+        if ty1 >= ty0 and tx1 >= tx0:
+            tok[:] = False
+            tok[:, ty0:ty1 + 1, tx0:tx1 + 1] = True
+    vox = tok.repeat(pt, 0).repeat(ph, 1).repeat(pw, 2)
+    out = np.ones((T, H, W), bool)
+    tv, hv, wv = min(T, vox.shape[0]), min(H, vox.shape[1]), min(W, vox.shape[2])
+    out[:tv, :hv, :wv] = vox[:tv, :hv, :wv]
+    return out
+
+
+def compute_activity_ctx(thw: np.ndarray, max_num_units: float = 1024.0, eps: float = 1e-8,
+                         visible_mask: Optional[np.ndarray] = None) -> np.ndarray:
     """
     Compute 9D local context from a (T,H,W) binary spike volume.
 
@@ -513,11 +563,26 @@ def compute_activity_ctx(thw: np.ndarray, max_num_units: float = 1024.0, eps: fl
       6) cov_yt
       7) active_site_ratio
       8) temporal_trend_score
+
+    `visible_mask` (T,H,W) bool restricts every feature to the voxels a
+    completion task shows the model, so the descriptor carries no information
+    about the hidden region: density is visible spikes over visible voxels,
+    moments and active sites use visible spikes only, and frames with no
+    visible voxel take the mean of the visible frames in the trend. With
+    `visible_mask=None` the output is bit-identical to the whole-clip version.
     """
     x = thw.astype(np.float32)
     T, H, W = x.shape
 
-    mean_firing_density = float(x.mean())
+    if visible_mask is not None:
+        vis = np.asarray(visible_mask, bool)
+        if vis.shape != x.shape:
+            raise ValueError(f"visible_mask {vis.shape} != volume {x.shape}")
+        x = x * vis
+        n_vis = float(vis.sum())
+        mean_firing_density = float(x.sum() / n_vis) if n_vis > 0 else 0.0
+    else:
+        mean_firing_density = float(x.mean())
     log_mean_firing_density = float(np.clip(np.log(mean_firing_density + 1e-6), -15.0, 0.0))
 
     mass = float(x.sum())
@@ -550,7 +615,14 @@ def compute_activity_ctx(thw: np.ndarray, max_num_units: float = 1024.0, eps: fl
     active_site_count = float((x.max(axis=0) > 0).sum())
     active_site_ratio = float(min(active_site_count / max(denom, 1.0), 1.0))
 
-    frame_means = x.reshape(T, -1).mean(axis=1)
+    if visible_mask is not None:
+        n_f = vis.reshape(T, -1).sum(axis=1).astype(np.float32)
+        frame_means = np.where(n_f > 0, x.reshape(T, -1).sum(axis=1) / np.maximum(n_f, 1.0), 0.0)
+        if (n_f > 0).any():
+            frame_means = np.where(n_f > 0, frame_means, frame_means[n_f > 0].mean())
+        frame_means = frame_means.astype(np.float32)
+    else:
+        frame_means = x.reshape(T, -1).mean(axis=1)
     temporal_trend = temporal_trend_score_np(frame_means)
 
     return np.array([
@@ -564,3 +636,48 @@ def compute_activity_ctx(thw: np.ndarray, max_num_units: float = 1024.0, eps: fl
         active_site_ratio,
         temporal_trend,
     ], dtype=np.float32)
+
+
+def compute_activity_ctx_batch(x_b1thw, hidden_b1thw=None, source: str = "full"):
+    """Batched descriptor for evaluation and training loops.
+
+    x_b1thw: (B,1,T,H,W) tensor or array; hidden_b1thw: same shape, 1 = hidden.
+    source: "full" (whole clip, the shipped behaviour), "visible" (complement
+    of the hole only) or "none" (zeros). Computed with the numpy reference so
+    the values are exactly the ones `NpzBurstDataset` would produce.
+    """
+    if source not in CTX_SOURCES:
+        raise ValueError(f"source must be one of {CTX_SOURCES}, got {source!r}")
+    is_t = torch.is_tensor(x_b1thw)
+    xs = x_b1thw.detach().float().cpu().numpy() if is_t else np.asarray(x_b1thw, np.float32)
+    B = xs.shape[0]
+    out = np.zeros((B, 9), np.float32)
+    if source != "none":
+        if source == "visible" and hidden_b1thw is None:
+            raise ValueError("source='visible' needs the hidden mask")
+        hs = None
+        if source == "visible":
+            hs = (hidden_b1thw.detach().cpu().numpy() if torch.is_tensor(hidden_b1thw)
+                  else np.asarray(hidden_b1thw)) > 0.5
+        for b in range(B):
+            out[b] = compute_activity_ctx(
+                (xs[b, 0] > 0.5).astype(np.float32),
+                visible_mask=None if hs is None else ~hs[b, 0])
+    if is_t:
+        return torch.from_numpy(out).to(x_b1thw.device)
+    return out
+
+
+def token_roi_to_voxels(roi_bn, token_grid, patch_size, thw):
+    """(B,N) token mask -> (B,1,T,H,W) voxel mask, token order t-major then h then w.
+
+    Same flatten order as PatchEmbed3D / predict_mask_from_spec, and the same
+    expansion task_eval.roi_voxels performs through vqvae.unpatchify."""
+    tt, ht, wt = (int(g) for g in token_grid)
+    pt, ph, pw = (int(p) for p in patch_size)
+    T, H, W = (int(v) for v in thw)
+    r = roi_bn.reshape(roi_bn.shape[0], tt, ht, wt)
+    v = (r.repeat_interleave(pt, 1).repeat_interleave(ph, 2)
+          .repeat_interleave(pw, 3))[:, :T, :H, :W]
+    return v.unsqueeze(1)
+

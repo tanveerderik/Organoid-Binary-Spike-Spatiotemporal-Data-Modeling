@@ -11,9 +11,16 @@ Rungs, all scored against the same real reference half:
                  data does not reproduce its own statistics exactly, so no
                  generator can score better. Repeated over several disjoint
                  splits to get a spread.
-  temporal shuffle   independently permute each electrode's time series. Keeps
-                 the exact firing rate and per-electrode marginals, destroys
-                 temporal persistence, avalanches and ISI structure.
+  temporal shuffle   permute the FRAME ORDER of each clip (one permutation per
+                 clip, shared by every electrode). Keeps the exact firing rate,
+                 per-electrode marginals and within-frame co-activation;
+                 destroys temporal persistence, avalanches and ISI structure.
+                 (An earlier version of this docstring said each electrode was
+                 permuted independently; the code never did that.)
+  electrode circular shift   roll each electrode's time series by its own
+                 random offset. Keeps every electrode's rate and its own ISI
+                 sequence; destroys cross-electrode synchrony. This is the
+                 per-electrode null the temporal-shuffle description promised.
   spatial shuffle    permute electrode identities within each frame. Keeps rate
                  and temporal structure, destroys spatial co-activation.
   mean-field     independent Bernoulli at the matched global rate. Keeps only
@@ -136,6 +143,21 @@ for i in range(tsh.shape[0]):
 results["rung_temporal_shuffle"] = score(REF, tsh)
 print(f"  stat_error={results['rung_temporal_shuffle']['stat_error']:.4f} "
       f"sub={results['rung_temporal_shuffle']['distribution_subscore_normalized']:.4f}")
+
+# ---- electrode circular shift --------------------------------------------
+print("\n[rung] electrode circular shift (per-electrode ISI kept, synchrony destroyed)",
+      flush=True)
+csh = HALF.clone()
+Bc, Tc, Hc, Wc = csh.shape
+# own generator, so adding this rung leaves the global RNG stream -- and hence
+# every existing rung's numbers -- exactly as before
+off = torch.randint(0, Tc, (Bc, 1, Hc, Wc),
+                    generator=torch.Generator().manual_seed(args.seed + 7))
+tix = (torch.arange(Tc).view(1, Tc, 1, 1) - off) % Tc
+csh = torch.gather(csh, 1, tix)
+results["rung_electrode_circular_shift"] = score(REF, csh)
+print(f"  stat_error={results['rung_electrode_circular_shift']['stat_error']:.4f} "
+      f"sub={results['rung_electrode_circular_shift']['distribution_subscore_normalized']:.4f}")
 
 # ---- spatial shuffle -----------------------------------------------------
 print("\n[rung] spatial shuffle (electrode identity permuted per frame)", flush=True)

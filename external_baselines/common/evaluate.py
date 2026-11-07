@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional
 import torch
 
 from ..common import data as bdata
-from ..common.ladder import REGIMES, ContextLadder
+from ..common.ladder import CTX_FLAGS, REGIMES, ContextLadder
 from ..common.protocol import SpikeVolumeBaseline
 from MAGVIT_project.inference.generation_output import GenerationWriter
 
@@ -210,9 +210,10 @@ def evaluate_baseline(
 
         for regime in regimes:
             cond_r = ladder.apply(cond_d, regime)
-            flags = {"global": regime != "random",
-                     "local": regime == "global_full_local",
-                     "visible": False}
+            # Read from the ladder's own table rather than re-derived here: the
+            # old inline rule marked `local_only` (true lct, random gct) as
+            # global=True, local=False -- the opposite of what that rung does.
+            flags = {**CTX_FLAGS[regime], "visible": False}
             for rep in range(reps):
                 vols = baseline.sample(cond_r, generator=gen).float().cpu()
                 _check_volume(vols, real, baseline.meta.name)

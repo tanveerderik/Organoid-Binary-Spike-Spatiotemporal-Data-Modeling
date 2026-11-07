@@ -892,6 +892,13 @@ def _count_calibration(J, have, modes) -> None:
     NJ = _nulls_json() or {}
     ctrl = (NJ.get("count_control_lct_only") or {}).get("tasks", {})
 
+    def _ctrl_r(m, arm="lct_density_x_roi"):
+        """r for one arithmetic control; reads the old flat schema too."""
+        c = ctrl.get(m, {}) or {}
+        if "r_within_assay" in c:                     # pre-2026-11 payload
+            return c["r_within_assay"] if arm == "lct_density_x_roi" else None
+        return (c.get(arm) or {}).get("r_within_assay")
+
     print("| within-assay r with true ROI count | "
           + " | ".join(s_ for _, s_ in modes) + " |")
     print("|---|" + "---|" * len(modes))
@@ -907,10 +914,14 @@ def _count_calibration(J, have, modes) -> None:
         # time and lct[0] is log_mean_firing_density, so exp(lct[0]) * |ROI|
         # predicts the count with no model at all. A count head only earns
         # credit for what it scores ABOVE this line.
-        print("| _null_ lct arithmetic, no model | " + " | ".join(
-            ("--" if ctrl.get(m, {}).get("r_within_assay") is None
-             else f"{ctrl[m]['r_within_assay']:+.4f}") for m, _ in modes)
-            + " |")
+        for arm, lab in (("lct_density_x_roi", "lct density x |ROI|"),
+                         ("lct_exact", "lct EXACT: total - visible"),
+                         ("visible_density_x_roi", "visible density x |ROI|")):
+            rs = [_ctrl_r(m, arm) for m, _ in modes]
+            if all(r is None for r in rs):
+                continue
+            print(f"| _null_ {lab}, no model | " + " | ".join(
+                "--" if r is None else f"{r:+.4f}" for r in rs) + " |")
     hv = [(k, lab) for k, lab in have if any(cc(k, m) for m, _ in modes)]
     lrn, lkp = _split_class(hv)
 
@@ -942,7 +953,7 @@ def _count_calibration(J, have, modes) -> None:
               "clip's total count. So `exp(lct[0]) x |ROI|` predicts the ROI "
               "count with no model whatsoever. On "
               f"`{rec}` that control scores "
-              f"{ctrl.get(rec, {}).get('r_within_assay', float('nan')):+.4f}: "
+              f"{(_ctrl_r(rec) if _ctrl_r(rec) is not None else float('nan')):+.4f}: "
               "the ROI is the whole volume there, so lct[0] IS the answer and "
               "no count head can beat arithmetic. On the three tasks where the "
               "ROI is a strict subset the control is much weaker, and that gap "

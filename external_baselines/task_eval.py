@@ -60,6 +60,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -80,7 +81,8 @@ from MAGVIT_project.inference.decode import decode_flat_ids_to_xgen      # noqa:
 # functions training reports, not re-implementations.
 from MAGVIT_project.utils.constants import (                             # noqa: E402
     ACTIVITY_CTX_NAMES, DEFAULT_GAP_BINS, gap_bin_labels)
-from MAGVIT_project.utils.recon import compute_activity_ctx              # noqa: E402
+from MAGVIT_project.utils.recon import (                                 # noqa: E402
+    compute_activity_ctx, compute_activity_ctx_batch)
 from MAGVIT_project.training.stage4_activity import _hard_gap_rates      # noqa: E402
 from MAGVIT_project.inference.metrics_gen import (                       # noqa: E402
     evaluate_generation_global_metrics)
@@ -625,15 +627,27 @@ def main():
     ap_.add_argument("--ckpt", default=None,
                      help="score this checkpoint instead of the canonical one")
     ap_.add_argument("--out", default=None)
+    ap_.add_argument("--ctx-source", default=os.environ.get("CTX_SOURCE", "full"),
+                     choices=("full", "visible", "none"),
+                     help="descriptor handed to EVERY arm: full = whole clip "
+                          "incl. the hole (shipped), visible = only the voxels "
+                          "outside the hole, none = zeros. Defaults to $CTX_SOURCE "
+                          "so it matches the checkpoints main.CKPTS resolves.")
     args = ap_.parse_args()
+    if args.ctx_source != os.environ.get("CTX_SOURCE", "full"):
+        raise SystemExit(
+            f"--ctx-source {args.ctx_source} but CTX_SOURCE="
+            f"{os.environ.get('CTX_SOURCE', 'full')}: the pipeline checkpoints "
+            f"are resolved from CTX_SOURCE, so the two must agree")
 
     dev = torch.device(args.device)
     torch.manual_seed(args.seed)
     if dev.type == "cuda":
         torch.cuda.manual_seed_all(args.seed)
 
+    _sfx = "" if args.ctx_source == "full" else f"_ctx{args.ctx_source}"
     out_path = Path(args.out or
-                    f"reports/external_baselines/task_eval_{args.model}.json")
+                    f"reports/external_baselines/task_eval_{args.model}{_sfx}.json")
     is_pipe = args.model == "pipeline"
     cfg = dict(activity_field="soft", motif_steps=12, motif_temperature=1.0,
                motif_top_k=5, activity_readout="gumbel",
@@ -681,6 +695,17 @@ def main():
             B = x.shape[0]
             tid = torch.full((B,), tid_val, device=dev, dtype=torch.long)
             specs = masks_for_task(batch, x, mode)
+            if args.ctx_source != "full":
+                # Recompute the descriptor from THIS task's hole -- the loader's
+                # value was built for a different, randomly drawn mask -- and
+                # hand the same value to the pipeline and to the baselines
+                # (split_batch reads batch["local_ctx"]).
+                pm_c = P["vqvae"].predict_mask_from_spec(
+                    specs, P["vqvae"].token_grid, device=dev)
+                hole = roi_voxels(P["vqvae"], pm_c, P["vqvae"].token_grid,
+                                  x.shape[-3:])
+                lct = compute_activity_ctx_batch(x, hole, args.ctx_source).to(dev)
+                batch["local_ctx"] = lct.detach().cpu()
 
             # `model` is ONE sample. `model_mc` averages `--mc` independent
             # token samplings -- a Monte-Carlo posterior mean. AP is a ranking
@@ -796,6 +821,7 @@ def main():
     # ---- report ----
     out = {"seed": args.seed, "batches": args.batches, "mc": args.mc,
            "model": args.model, "phase": args.phase,
+           "ctx_source": args.ctx_source,
            "n_train_clips": n_train, "tasks": {}}
     print("\n" + "=" * 78)
     print("Per-clip EXACT average precision on ROI voxels (higher is better)")

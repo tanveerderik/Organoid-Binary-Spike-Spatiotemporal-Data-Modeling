@@ -40,6 +40,7 @@ from MAGVIT_project.external_baselines import task_eval as TE
 from MAGVIT_project.external_baselines.common import data as bdata
 from MAGVIT_project.external_baselines.common.pipeline import build_pipeline
 from MAGVIT_project.utils.constants import ACTIVITY_CTX_NAMES
+from MAGVIT_project.utils.recon import compute_activity_ctx_batch
 
 NULLS = ("separable", "marginal", "marginal_xa", "copy")
 OUT_PATH = Path("reports/external_baselines/task_eval_nulls.json")
@@ -173,20 +174,40 @@ def _within_assay_r(pred, true, assays) -> float | None:
 
 
 def count_control(vq, seed: int, batches: int, dev) -> dict:
-    """ROI count predicted from the conditioning input by arithmetic alone."""
+    """ROI count predicted from the conditioning input by arithmetic alone.
+
+    Three model-free arms, none of which has any parameters:
+
+    * `lct_density_x_roi`: exp(lct0) x |ROI| -- the clip's mean density spread
+      over the hole. This is the control the paper reported.
+    * `lct_exact`: exp(lct0) x T*H*W  -  (visible spikes). The whole-clip
+      descriptor fixes the clip's TOTAL count, and the visible spikes are in the
+      input, so their difference IS the hidden count up to float rounding.
+      This is the floor any count head conditioned on the whole-clip
+      descriptor has to clear.
+    * `visible_density_x_roi`: (visible spikes / visible voxels) x |ROI| -- the
+      fair arithmetic control when the descriptor is computed from the visible
+      region only. Undefined on `recon`, where nothing is visible.
+
+    The whole-clip descriptor is recomputed from x here rather than read from
+    the batch, so the result does not depend on $CTX_SOURCE.
+    """
     i0 = ACTIVITY_CTX_NAMES.index("log_mean_firing_density")
+    arms = ("lct_density_x_roi", "lct_exact", "visible_density_x_roi")
     out = {}
-    print(f"\n{'task':<11}{'n':>4}{'lct-only r':>13}{'lct-only bias':>15}")
+    print(f"\n{'task':<11}{'n':>4}" + "".join(f"{a:>24}" for a in arms))
     for mode in TE.MODES:
-        pred, true, assays = [], [], []
+        pred = {a: [] for a in arms}
+        true, assays = [], []
         for batch in bdata.iter_raw("test", batches=(batches or None)):
             x = batch["x"].to(dev).float()
             if x.dim() == 4:
                 x = x.unsqueeze(1)
-            lct = batch["local_ctx"].float()
+            lct = compute_activity_ctx_batch(x, None, "full").cpu()
             specs = TE.masks_for_task(batch, x, mode)
             pm0 = vq.predict_mask_from_spec(specs, vq.token_grid, device=dev)
             roi_vox = TE.roi_voxels(vq, pm0, vq.token_grid, x.shape[-3:])
+            n_all = int(np.prod(x.shape[-3:]))
             for b in range(x.shape[0]):
                 m = roi_vox[b, 0] > 0.5
                 n = int(m.sum())
@@ -195,18 +216,33 @@ def count_control(vq, seed: int, batches: int, dev) -> dict:
                 tgt = x[b, 0][m]
                 if float(tgt.sum()) < 1.0:
                     continue
-                # the entire "model": clip density from lct, times the ROI size
                 dens = float(np.exp(float(lct[b, i0])) - 1e-6)
-                pred.append(dens * n)
+                vis_spk = float(x[b, 0][~m].sum())
+                n_vis = n_all - n
+                pred["lct_density_x_roi"].append(dens * n)
+                pred["lct_exact"].append(dens * n_all - vis_spk)
+                pred["visible_density_x_roi"].append(
+                    vis_spk / n_vis * n if n_vis > 0 else float("nan"))
                 true.append(float(tgt.sum()))
                 assays.append(int(batch["assay_idx"][b]))
-        r = _within_assay_r(pred, true, assays)
-        bias = (np.mean(pred) - np.mean(true)) / np.mean(true)
-        print(f"{mode:<11}{len(true):>4}"
-              f"{('--' if r is None else f'{r:+.4f}'):>13}{bias:>+15.1%}")
-        out[mode] = {"n": len(true), "r_within_assay": r, "bias": float(bias),
-                     "mae": float(np.mean(np.abs(np.array(pred)
-                                                 - np.array(true))))}
+        row = {"n": len(true)}
+        line = f"{mode:<11}{len(true):>4}"
+        for a in arms:
+            p = np.asarray(pred[a], float)
+            t = np.asarray(true, float)
+            ok = np.isfinite(p)
+            if not ok.any():
+                row[a] = None
+                line += f"{'n/a':>24}"
+                continue
+            r = _within_assay_r(list(p[ok]), list(t[ok]),
+                                [a_ for a_, k in zip(assays, ok) if k])
+            bias = (p[ok].mean() - t[ok].mean()) / t[ok].mean()
+            row[a] = {"r_within_assay": r, "bias": float(bias),
+                      "mae": float(np.mean(np.abs(p[ok] - t[ok])))}
+            line += f"{('--' if r is None else f'r={r:+.4f}'):>14}{bias:>+10.1%}"
+        print(line)
+        out[mode] = row
     return out
 
 
@@ -228,11 +264,14 @@ def main() -> int:
     out["count_control_lct_only"] = {
         "seed": a.seed, "batches": a.batches,
         "tasks": count_control(vq, a.seed, a.batches, dev),
-        "definition": "ROI count predicted as exp(lct[log_mean_firing_density])"
-                      " * |ROI|, i.e. arithmetic on the conditioning input with"
-                      " no model. Every arm is handed the true clip lct at"
-                      " generation time, so this is the floor any count head"
-                      " must clear."}
+        "definition": {
+            "lct_density_x_roi": "exp(lct0) * |ROI| (the control reported "
+                                 "previously)",
+            "lct_exact": "exp(lct0) * T*H*W - visible spikes: the hidden count "
+                         "recovered exactly from the whole-clip descriptor",
+            "visible_density_x_roi": "visible spikes / visible voxels * |ROI|: "
+                                     "the fair control for a visible-only "
+                                     "descriptor"}}
 
     p = Path(a.out)
     p.parent.mkdir(parents=True, exist_ok=True)

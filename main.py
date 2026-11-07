@@ -154,6 +154,24 @@ STAGE3_TEXTON_BASIS = "z1"
 #              variation inside 0.92 seed sd, motif-MRR declining t=-10.45.
 #              Kept so the paper can show why 4C moves the motif prior instead.
 STAGE4_PHASES = ("4a",)
+
+# Optional environment overrides, so a scripted run (docs/REVIEW_EXPERIMENTS_RUNBOOK.md)
+# never needs a source edit. Unset = the values above.
+#     TRAIN_STAGES=3,4 STAGE4_PHASES=4a,4b,4c CTX_SOURCE=visible python main.py
+def _env_tuple(name, cast):
+    v = os.environ.get(name)
+    return None if v is None else tuple(cast(t) for t in v.split(",") if t.strip())
+
+
+def _stage_num(t):
+    f = float(t)
+    return int(f) if f.is_integer() else f
+
+
+TRAIN_STAGES = _env_tuple("TRAIN_STAGES", _stage_num) or TRAIN_STAGES
+EVAL_STAGES = (_env_tuple("EVAL_STAGES", _stage_num)
+               if "EVAL_STAGES" in os.environ else EVAL_STAGES)
+STAGE4_PHASES = _env_tuple("STAGE4_PHASES", str.strip) or STAGE4_PHASES
 # Warm-start 3A from ckpts/motif_prior_warmstart.pt when present. The z1 trunk
 # from the previous run reached 0.288 top-1; retraining from scratch would spend
 # ~400 epochs re-earning it. strict=False because the alpha head is now a
@@ -517,6 +535,28 @@ CKPTS = {
 
 }
 
+# Which voxels the 9-D local descriptor (lct) is computed from, for training
+# AND evaluation: "full" = whole clip including the hidden region (shipped
+# behaviour), "visible" = only voxels the task leaves visible, "none" = zeros.
+# Set from the environment so a run never needs a source edit:
+#     CTX_SOURCE=visible python -m MAGVIT_project.main
+# Anything other than "full" writes its context-dependent checkpoints and
+# reports under a `_ctx<source>` suffix, so the shipped files are never
+# overwritten. The tokenizer (Stage 2A/2B) only uses lct as a loss target,
+# never as an input, so it is shared across sources.
+CTX_SOURCE = os.environ.get("CTX_SOURCE", "full")
+if CTX_SOURCE not in ("full", "visible", "none"):
+    raise ValueError(f"CTX_SOURCE must be full|visible|none, got {CTX_SOURCE!r}")
+_CTX_SUFFIX = "" if CTX_SOURCE == "full" else f"_ctx{CTX_SOURCE}"
+_CTX_DEPENDENT_CKPTS = (
+    "stage3_lct", "motif_prior_best", "motif_prior_ship", "activity_prior_best",
+    "activity_prior_best_loss", "activity_prior_best_hard_metric",
+    "activity_prior_refined_best",
+)
+for _k in _CTX_DEPENDENT_CKPTS:
+    CKPTS[_k] = CKPTS[_k].with_name(CKPTS[_k].stem + _CTX_SUFFIX + CKPTS[_k].suffix)
+CONTEXT_PRIOR_PATH = Path(f"ckpts/context_prior{_CTX_SUFFIX}.pkl")
+
 REPORTS = {
     "stage1_gct": Path("reports/training_report_stage1_gct.json"),
     "stage2a": Path("reports/training_report_vqvae_stage2a.json"),
@@ -537,6 +577,10 @@ REPORTS = {
     "generation_baselines": Path("reports/evaluation_report_generation_baselines.json"),
     "motif_nulls": Path("reports/evaluation_report_motif_nulls.json"),
 }
+if _CTX_SUFFIX:
+    REPORTS = {k: (v if k in ("stage1_gct", "stage2a", "stage2a_eval", "stage2b")
+                   else v.with_name(v.stem + _CTX_SUFFIX + v.suffix))
+               for k, v in REPORTS.items()}
 
 MOTIF_NULL_BASELINE_PATH = Path("ckpts/motif_null_baselines.pkl")
 
@@ -655,6 +699,7 @@ def make_loaders(assay_dict: dict, assay_indices: list[int], per_assay_quota):
         cache_mode=cache_mode,
         cache_max_gb=cache_max_gb,
         cache_write_prob=cache_write_prob,
+        ctx_source=CTX_SOURCE,
     )
 
 
@@ -2055,6 +2100,7 @@ def run_stage4b(prior, model, train_loader, val_loader, device):
         activity_count_scale=float(dcfg["activity_count_scale"]),
         random_mask_prob=float(dcfg["random_mask_prob"]),
         random_mask_ratio=tuple(dcfg["random_mask_ratio"]),
+        ctx_source=CTX_SOURCE,
         select_on=str(dcfg["select_on"]),
         scheduler=sched_activity,
         motif_prior=prior.motif_prior,
@@ -3805,7 +3851,7 @@ def main():
             _, _lct_mapper = build_context_mappers(model, device)
             build_context_prior(
                 train_loader,
-                save_path="ckpts/context_prior.pkl",
+                save_path=str(CONTEXT_PRIOR_PATH),
                 model=model,
                 device=device,
                 feature_names=ACTIVITY_CTX_NAMES,
@@ -3843,10 +3889,13 @@ def main():
             model.load_checkpoint(
                 str(select_ckpt(2, prefer_best=True)), map_location=device
             )
+            # Model selection must not see test clips: the held-out set this
+            # stage early-stops on is the VALIDATION split (it was the test
+            # split before 2026-11).
             run_stage3_lct(
                 model,
                 train_loader,
-                test_loader,
+                val_loader,
                 device,
                 batch_to_device=_batch_to_device,
                 flat_codebook_path=CKPTS["stage2b_flat"],

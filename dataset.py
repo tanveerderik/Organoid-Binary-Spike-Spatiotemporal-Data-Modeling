@@ -17,7 +17,7 @@ from torch.utils.data import Dataset, DataLoader, Subset
 from .utils.io import npz_load_volume, ensure_thw, load_thw_raw_only
 from .utils.transforms import temporal_pool_max, random_spatial_crop, pick_temporal_span
 from .utils.padding import crop_time_to_multiple, pad_hw_symmetric_to_multiple
-from .utils.recon import compute_activity_ctx
+from .utils.recon import CTX_SOURCES, compute_activity_ctx, hidden_voxel_mask_from_spec
 from .utils.embed import fourier_embed_2d
 
 from .utils.constants import (
@@ -368,6 +368,11 @@ class NpzBurstDataset(Dataset):
 
         # Local context computation control
         use_activity_ctx: bool = True,
+        # Which voxels the 9-D descriptor is computed from: "full" (the whole
+        # clip, the shipped behaviour), "visible" (only the voxels this item's
+        # mask_spec leaves visible, so the descriptor says nothing about the
+        # hole) or "none" (zeros). "none" is the same as use_activity_ctx=False.
+        ctx_source: str = "full",
 
         # Global context mapping
         task_id_map: Optional[Dict[str, int]] = None,  # default {"recon": 0, "causal": 1, "noncausal": 2, "spatial": 3}
@@ -504,6 +509,9 @@ class NpzBurstDataset(Dataset):
 
         # Context knobs
         self.use_activity_ctx = bool(use_activity_ctx)
+        if ctx_source not in CTX_SOURCES:
+            raise ValueError(f"ctx_source must be one of {CTX_SOURCES}, got {ctx_source!r}")
+        self.ctx_source = "none" if not self.use_activity_ctx else str(ctx_source)
 
     # --------------- length ----------------
     def __len__(self) -> int:
@@ -683,7 +691,13 @@ class NpzBurstDataset(Dataset):
         x = _to_chw_thw(x_thw)  # (1,T,H,W) float32 {0,1}
     
         # ---------------- local contexts ----------------
-        if self.use_activity_ctx:
+        if self.ctx_source == "visible":
+            hidden = hidden_voxel_mask_from_spec(
+                mask_spec, thw_span.shape,
+                self.patch_size if self.patch_size is not None else (1, 1, 1))
+            local_ctx_np = compute_activity_ctx(
+                thw_span, visible_mask=~hidden).astype(np.float32, copy=False)
+        elif self.ctx_source == "full":
             local_ctx_np = compute_activity_ctx(thw_span).astype(np.float32, copy=False)
         else:
             local_ctx_np = np.zeros(

@@ -1,10 +1,17 @@
 """The contract every external baseline implements.
 
 The point of this file is *enforced comparability*. A baseline receives a
-`ConditioningBatch` and nothing else, so it is structurally incapable of seeing
-the held-out clip it is being scored against. Leakage is the first thing a
-reviewer suspects in a generative comparison; here it is impossible by
-construction rather than by discipline.
+`ConditioningBatch` and nothing else, so it never receives the held-out VOXELS
+it is scored against.
+
+That is not the same as receiving no information about them. The 9-d `lct` in
+the batch is computed by the dataset from the WHOLE clip, hidden region
+included, and its first feature is the clip's log mean firing density -- so the
+total spike count, and with the visible spikes the hidden count, is in the
+conditioning input. Every arm (pipeline and baselines alike) receives the same
+lct, so comparisons between arms are fair, but a result read as prediction
+from visible data must use CTX_SOURCE=visible (lct from the visible region
+only; see utils/recon.compute_activity_ctx and task_eval --ctx-source).
 
 Two consequences worth stating up front:
 

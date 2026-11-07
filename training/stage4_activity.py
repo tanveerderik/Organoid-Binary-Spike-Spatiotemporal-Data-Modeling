@@ -32,9 +32,11 @@ from ..utils.losses import (
 )
 from ..utils.recon import (
     compute_activity_ctx,
+    compute_activity_ctx_batch,
     dilate_spatial_support_hw,
     sample_full_token_map_to_crop,
     soft_spatial_token_map_from_logits,
+    token_roi_to_voxels,
 )
 from .train_prior import (
     _batch_to_device,
@@ -2082,6 +2084,10 @@ def train_maskgit_activity_prior(
     lambda_spatial: float = 0.0,
     random_mask_prob: float = 0.5,
     random_mask_ratio: Tuple[float, float] = (0.15, 1.0),
+    # "full" keeps the loader's descriptor (whole clip). "visible" recomputes it
+    # from the voxels outside the FINAL token mask -- after the scattered-mask
+    # substitution below, which the loader cannot know about. "none" zeros it.
+    ctx_source: str = "full",
     select_on: str = "generation",
     deterministic_val_masks: bool = True,
     scheduler=None,
@@ -2173,6 +2179,11 @@ def train_maskgit_activity_prior(
                     rnd = _random_token_mask(roi, ratio)
                     roi = torch.where(take.view(-1, 1), rnd, roi)
                     pmask = roi.unsqueeze(-1) if pmask.dim() == 3 else roi
+            if ctx_source != "full":
+                hidden = token_roi_to_voxels(
+                    roi, (activity_prior.Ttok, activity_prior.Htok, activity_prior.Wtok),
+                    vqvae.patch_size, x.shape[-3:])
+                lct = compute_activity_ctx_batch(x, hidden, ctx_source).to(lct.dtype)
 
             tg = build_activity_targets_from_codes(
                 codes=codes,

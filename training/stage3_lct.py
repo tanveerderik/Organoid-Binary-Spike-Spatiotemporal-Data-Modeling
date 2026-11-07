@@ -83,7 +83,7 @@ def _r2(p, t):
 def run_stage3_lct(
     model,
     train_loader,
-    test_loader,
+    heldout_loader,
     device,
     *,
     batch_to_device,
@@ -244,7 +244,9 @@ def run_stage3_lct(
     print("building fixed held-out set...", flush=True)
     EL, EG, EF, ET, ER = [], [], [], [], []
     with torch.no_grad():
-        for i, b in enumerate(test_loader):
+        # heldout_loader is the VALIDATION loader: this set drives early
+        # stopping and checkpoint selection, so it must never be the test split.
+        for i, b in enumerate(heldout_loader):
             x, g, l, _, _ = batch_to_device(b, device)
             lz, ge, cf, ct, rg = batch_targets(x, g, l)
             if lz is None:
