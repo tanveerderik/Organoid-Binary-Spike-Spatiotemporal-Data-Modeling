@@ -1,0 +1,141 @@
+{
+  "source": "reports/analysis_motif_reuse.npz",
+  "duplicates_removed": {
+    "10": 4,
+    "11": 3,
+    "13": 6
+  },
+  "reuse_with_duplicates": {
+    "n_recordings": 31,
+    "rarefy_budget": 117,
+    "draws": 200,
+    "H_code_mm": 6.276963571914401,
+    "H_code_given_recording_mm": 5.705713120115587,
+    "retained_fraction_mm": 0.9089925494621616,
+    "recording_explains_frac_mm": 0.09100745053783843,
+    "rarefied_jaccard": {
+      "all": 0.10881919507795451,
+      "within_organoid": 0.10943536157228871,
+      "within_slice": 0.12371741002224439,
+      "cross_tissue": 0.10345024533740863
+    }
+  },
+  "reuse_without_duplicates": {
+    "n_recordings": 28,
+    "rarefy_budget": 117,
+    "draws": 200,
+    "H_code_mm": 6.269246693197771,
+    "H_code_given_recording_mm": 5.682183537661072,
+    "retained_fraction_mm": 0.9063582621220391,
+    "recording_explains_frac_mm": 0.09364173787796093,
+    "rarefied_jaccard": {
+      "all": 0.10879402211471385,
+      "within_organoid": 0.10817255504458236,
+      "within_slice": 0.12315268699090183,
+      "cross_tissue": 0.10338519227892486
+    }
+  },
+  "published_reference_keys": [
+    "V",
+    "ckpt",
+    "codebook_source",
+    "entropy",
+    "excludes_blank",
+    "jaccard_rarefied",
+    "jaccard_raw_SIZE_CONFOUNDED",
+    "label_shuffle_null",
+    "n_clips",
+    "n_recordings",
+    "n_tokens",
+    "per_recording",
+    "shared_core",
+    "vocab_global"
+  ],
+  "probes": {
+    "tissue": {
+      "target": "slice (1) vs organoid (0)",
+      "cv": "leave-one-group-out; group = slice patient or organoid recording",
+      "motif_usage": {
+        "balanced_accuracy": 0.5435897435897437,
+        "auc": 0.5333333333333334,
+        "perm_p": 0.16583416583416583,
+        "null_mean_bacc": 0.421348717948718,
+        "n": 28,
+        "n_groups": 17
+      },
+      "rate_only": {
+        "balanced_accuracy": 0.5923076923076923,
+        "auc": 0.517948717948718,
+        "perm_p": 0.12987012987012986,
+        "null_mean_bacc": 0.41958974358974366,
+        "n": 28,
+        "n_groups": 17
+      },
+      "motif_plus_rate": {
+        "balanced_accuracy": 0.5153846153846154,
+        "auc": 0.48717948717948717,
+        "perm_p": 0.33766233766233766,
+        "null_mean_bacc": 0.4616769230769231,
+        "n": 28,
+        "n_groups": 17
+      },
+      "motif_usage_settings_sweep_bacc": {
+        "pca2_C0.1": 0.5051282051282051,
+        "pca2_C1": 0.5051282051282051,
+        "pca2_C10": 0.5051282051282051,
+        "pca5_C0.1": 0.5051282051282051,
+        "pca5_C1": 0.5435897435897437,
+        "pca5_C10": 0.5435897435897437,
+        "pca10_C0.1": 0.5051282051282051,
+        "pca10_C1": 0.5051282051282051,
+        "pca10_C10": 0.5051282051282051
+      }
+    },
+    "tissue_leave_one_recording_out": {
+      "target": "slice (1) vs organoid (0)",
+      "cv": "leave-one-recording-out (same-patient slices remain in training)",
+      "motif_usage": {
+        "balanced_accuracy": 0.8897435897435897,
+        "auc": 0.917948717948718,
+        "perm_p": 0.000999000999000999,
+        "null_mean_bacc": 0.4156769230769231,
+        "n": 28,
+        "n_groups": 28
+      },
+      "rate_only": {
+        "balanced_accuracy": 0.7076923076923077,
+        "auc": 0.8717948717948718,
+        "perm_p": 0.01098901098901099,
+        "null_mean_bacc": 0.43358717948717945,
+        "n": 28,
+        "n_groups": 28
+      }
+    },
+    "slice_patient": {
+      "target": "patient 10F (1) vs 11G (0), slices only",
+      "cv": "leave-one-recording-out",
+      "confound": "each patient's slices use their own routing configurations",
+      "motif_usage": {
+        "balanced_accuracy": 0.5,
+        "auc": 0.6388888888888888,
+        "perm_p": 0.997002997002997,
+        "null_mean_bacc": 0.49983333333333335,
+        "n": 13,
+        "n_groups": 13
+      },
+      "rate_only": {
+        "balanced_accuracy": 0.8194444444444444,
+        "auc": 0.8888888888888888,
+        "perm_p": 0.003996003996003996,
+        "null_mean_bacc": 0.4715555555555556,
+        "n": 13,
+        "n_groups": 13
+      }
+    }
+  },
+  "caveats": [
+    "n = 28 recordings (15 organoid, 13 slice from 2 patients); every number carries that sample size",
+    "tissue and slice patient are confounded with electrode routing",
+    "counts come from the 9 test clips per recording on the temporal split"
+  ]
+}

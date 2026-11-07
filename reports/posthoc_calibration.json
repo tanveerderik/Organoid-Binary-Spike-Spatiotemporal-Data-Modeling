@@ -1,0 +1,382 @@
+{
+  "source": "reports/external_baselines/dumps/pipeline.npz",
+  "field": "model_mc (mean decoded probability over 8 draws), the field whose ROI sum is the own-count",
+  "ratio_stability": {
+    "recon": {
+      "clips": [
+        {
+          "assay": 0,
+          "true": 268,
+          "own": 1701,
+          "ratio": 6.347014925373134
+        },
+        {
+          "assay": 1,
+          "true": 58,
+          "own": 480,
+          "ratio": 8.275862068965518
+        },
+        {
+          "assay": 2,
+          "true": 168,
+          "own": 1631,
+          "ratio": 9.708333333333334
+        },
+        {
+          "assay": 3,
+          "true": 111,
+          "own": 635,
+          "ratio": 5.7207207207207205
+        },
+        {
+          "assay": 4,
+          "true": 222,
+          "own": 1277,
+          "ratio": 5.752252252252252
+        },
+        {
+          "assay": 5,
+          "true": 19,
+          "own": 207,
+          "ratio": 10.894736842105264
+        },
+        {
+          "assay": 6,
+          "true": 344,
+          "own": 2543,
+          "ratio": 7.392441860465116
+        },
+        {
+          "assay": 8,
+          "true": 378,
+          "own": 2244,
+          "ratio": 5.936507936507937
+        }
+      ],
+      "n": 8,
+      "geo_mean_ratio": 7.295313817197779,
+      "sd_log_ratio": 0.24958053882834488,
+      "min_ratio": 5.720720720720721,
+      "max_ratio": 10.894736842105262
+    },
+    "causal": {
+      "clips": [
+        {
+          "assay": 0,
+          "true": 195,
+          "own": 1181,
+          "ratio": 6.056410256410256
+        },
+        {
+          "assay": 1,
+          "true": 21,
+          "own": 89,
+          "ratio": 4.238095238095238
+        },
+        {
+          "assay": 2,
+          "true": 75,
+          "own": 623,
+          "ratio": 8.306666666666667
+        },
+        {
+          "assay": 3,
+          "true": 30,
+          "own": 208,
+          "ratio": 6.933333333333334
+        },
+        {
+          "assay": 4,
+          "true": 219,
+          "own": 1338,
+          "ratio": 6.109589041095891
+        },
+        {
+          "assay": 5,
+          "true": 1,
+          "own": 19,
+          "ratio": 19.0
+        },
+        {
+          "assay": 6,
+          "true": 137,
+          "own": 1127,
+          "ratio": 8.226277372262773
+        },
+        {
+          "assay": 8,
+          "true": 189,
+          "own": 1197,
+          "ratio": 6.333333333333333
+        }
+      ],
+      "n": 8,
+      "geo_mean_ratio": 7.394682292092457,
+      "sd_log_ratio": 0.4358444197640187,
+      "min_ratio": 4.238095238095238,
+      "max_ratio": 18.999999999999996
+    },
+    "noncausal": {
+      "clips": [
+        {
+          "assay": 0,
+          "true": 107,
+          "own": 581,
+          "ratio": 5.429906542056075
+        },
+        {
+          "assay": 1,
+          "true": 20,
+          "own": 120,
+          "ratio": 6.0
+        },
+        {
+          "assay": 2,
+          "true": 75,
+          "own": 788,
+          "ratio": 10.506666666666666
+        },
+        {
+          "assay": 3,
+          "true": 67,
+          "own": 359,
+          "ratio": 5.358208955223881
+        },
+        {
+          "assay": 4,
+          "true": 130,
+          "own": 802,
+          "ratio": 6.1692307692307695
+        },
+        {
+          "assay": 6,
+          "true": 165,
+          "own": 1131,
+          "ratio": 6.8545454545454545
+        },
+        {
+          "assay": 8,
+          "true": 116,
+          "own": 691,
+          "ratio": 5.956896551724138
+        }
+      ],
+      "n": 7,
+      "geo_mean_ratio": 6.445206680272595,
+      "sd_log_ratio": 0.2307013318914875,
+      "min_ratio": 5.358208955223881,
+      "max_ratio": 10.506666666666668
+    },
+    "spatial": {
+      "clips": [
+        {
+          "assay": 0,
+          "true": 142,
+          "own": 942,
+          "ratio": 6.633802816901408
+        },
+        {
+          "assay": 1,
+          "true": 37,
+          "own": 286,
+          "ratio": 7.72972972972973
+        },
+        {
+          "assay": 3,
+          "true": 89,
+          "own": 467,
+          "ratio": 5.247191011235955
+        },
+        {
+          "assay": 4,
+          "true": 82,
+          "own": 382,
+          "ratio": 4.658536585365853
+        },
+        {
+          "assay": 5,
+          "true": 13,
+          "own": 85,
+          "ratio": 6.538461538461538
+        },
+        {
+          "assay": 6,
+          "true": 77,
+          "own": 505,
+          "ratio": 6.558441558441558
+        },
+        {
+          "assay": 8,
+          "true": 78,
+          "own": 456,
+          "ratio": 5.846153846153846
+        }
+      ],
+      "n": 7,
+      "geo_mean_ratio": 6.099881360903185,
+      "sd_log_ratio": 0.16849185406224698,
+      "min_ratio": 4.658536585365853,
+      "max_ratio": 7.729729729729729
+    },
+    "pooled": {
+      "n": 30,
+      "geo_mean_ratio": 6.822138332958096,
+      "sd_log_ratio": 0.2908745393798245,
+      "note": "sd_log_ratio = 0.1 means a single scale factor leaves about +/-10% per-clip spread"
+    }
+  },
+  "heldout_logit_offset": {
+    "recordings": [
+      0,
+      1
+    ],
+    "folds": [
+      {
+        "fit_on_assays": [
+          1
+        ],
+        "test_assay": 0,
+        "task": "recon",
+        "offset": -2.0236991966035607,
+        "scale_at_median_p": 132165.76764648443,
+        "true": 268,
+        "expected_before": 1700.6420348286629,
+        "expected_after": 246.93321601262807,
+        "bias_before": 5.345679234435309,
+        "bias_after": -0.07860740293795498,
+        "ece_before": 0.0011622383992376162,
+        "ece_after": 8.106988399591524e-05,
+        "ap_before": 0.023638061245167062,
+        "ap_after": 0.02363540040814001
+      },
+      {
+        "fit_on_assays": [
+          1
+        ],
+        "test_assay": 0,
+        "task": "causal",
+        "offset": -2.0236991966035607,
+        "scale_at_median_p": 132165.76764648443,
+        "true": 195,
+        "expected_before": 1180.6338457465172,
+        "expected_after": 172.5202607643804,
+        "bias_before": 5.054532542289832,
+        "bias_after": -0.11528071402881845,
+        "ece_before": 0.0012815641210458819,
+        "ece_after": 8.475917119883826e-05,
+        "ap_before": 0.03600883859141281,
+        "ap_after": 0.036006638588992904
+      },
+      {
+        "fit_on_assays": [
+          1
+        ],
+        "test_assay": 0,
+        "task": "noncausal",
+        "offset": -2.0236991966035607,
+        "scale_at_median_p": 132165.76764648443,
+        "true": 107,
+        "expected_before": 580.8129694461823,
+        "expected_after": 83.99515789471864,
+        "bias_before": 4.428158592954975,
+        "bias_after": -0.21499852434842393,
+        "ece_before": 0.0010321587634583315,
+        "ece_after": 6.743124928843993e-05,
+        "ap_before": 0.020266530226547265,
+        "ap_after": 0.020260999607810613
+      },
+      {
+        "fit_on_assays": [
+          1
+        ],
+        "test_assay": 0,
+        "task": "spatial",
+        "offset": -2.0236991966035607,
+        "scale_at_median_p": 2.2173736316108807,
+        "true": 142,
+        "expected_before": 941.8847987055779,
+        "expected_after": 139.221479946073,
+        "bias_before": 5.632991540180126,
+        "bias_after": -0.019567042633288678,
+        "ece_before": 0.00211518671526204,
+        "ece_after": 0.00017999201408138544,
+        "ap_before": 0.027092293040476778,
+        "ap_after": 0.02708928526678591
+      },
+      {
+        "fit_on_assays": [
+          0
+        ],
+        "test_assay": 1,
+        "task": "recon",
+        "offset": -1.9189110762626482,
+        "scale_at_median_p": 146766.81810933334,
+        "true": 58,
+        "expected_before": 479.6015767455101,
+        "expected_after": 74.20755657056087,
+        "bias_before": 7.268992702508795,
+        "bias_after": 0.2794406305269115,
+        "ece_before": 0.0003433437433577926,
+        "ece_after": 2.9400428824154317e-05,
+        "ap_before": 0.014333735451368963,
+        "ap_after": 0.014319548144168321
+      },
+      {
+        "fit_on_assays": [
+          0
+        ],
+        "test_assay": 1,
+        "task": "causal",
+        "offset": -1.9189110762626482,
+        "scale_at_median_p": 146766.81810933334,
+        "true": 21,
+        "expected_before": 88.88820922374725,
+        "expected_after": 13.782261389872973,
+        "bias_before": 3.2327718677974886,
+        "bias_after": -0.3437018385774775,
+        "ece_before": 0.0001484646698430417,
+        "ece_after": 1.5159793007195307e-05,
+        "ap_before": 0.014221088559453463,
+        "ap_after": 0.014208439537649043
+      },
+      {
+        "fit_on_assays": [
+          0
+        ],
+        "test_assay": 1,
+        "task": "noncausal",
+        "offset": -1.9189110762626482,
+        "scale_at_median_p": 146766.81810933334,
+        "true": 20,
+        "expected_before": 119.61038160324097,
+        "expected_after": 18.454237228059036,
+        "bias_before": 4.980519080162049,
+        "bias_after": -0.0772881385970482,
+        "ece_before": 0.00022644195336079785,
+        "ece_after": 1.738828802353658e-05,
+        "ap_before": 0.0046464567442038975,
+        "ap_after": 0.004609188427418644
+      },
+      {
+        "fit_on_assays": [
+          0
+        ],
+        "test_assay": 1,
+        "task": "spatial",
+        "offset": -1.9189110762626482,
+        "scale_at_median_p": 146766.81810933334,
+        "true": 37,
+        "expected_before": 285.72637605667114,
+        "expected_after": 44.42264684582537,
+        "bias_before": 6.722334488018139,
+        "bias_after": 0.20061207691419924,
+        "ece_before": 0.0005796902394168592,
+        "ece_after": 5.4807003971556386e-05,
+        "ap_before": 0.0024189992749694537,
+        "ap_after": 0.002417523511330533
+      }
+    ],
+    "max_abs_ap_change": 3.7268316785253434e-05
+  },
+  "scope": "pilot: 8 recordings for the ratio, 2 for the fitted offset; re-run on all 279 clips on the GPU machine"
+}

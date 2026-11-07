@@ -1,0 +1,3639 @@
+{
+  "unit": "recording (duplicates merged)",
+  "n_recordings": 28,
+  "n_recording_ids_before_merge": 31,
+  "duplicates_merged": {
+    "10": 4,
+    "11": 3,
+    "13": 6
+  },
+  "payloads": {
+    "pipeline": "task_eval_pipeline.json",
+    "maskgit_flat": "task_eval_maskgit_flat.json",
+    "unet3d": "task_eval_unet3d.json",
+    "unet3d_seed2": "task_eval_unet3d_seed2.json",
+    "cvae3d": "task_eval_cvae3d.json",
+    "dg": "task_eval_dg.json",
+    "glm": "task_eval_glm.json"
+  },
+  "payloads_passed_over": {
+    "maskgit_flat": [
+      "task_eval_maskgit_flat_cal.json: 12 batches, not the canonical clip set"
+    ]
+  },
+  "arm_key": "model_mc",
+  "label_recovery": {
+    "method": "recon index // 9 over sorted assay ids; other tasks via clip_keys subsequence alignment",
+    "dump_checks": [
+      {
+        "arm": "pipeline",
+        "task": "recon",
+        "tag": "clip00",
+        "assay": 0,
+        "fields": [
+          "field",
+          "field_oracle"
+        ],
+        "matched_index": 0,
+        "label_at_match": 0,
+        "abs_err": 7.768732832744846e-05,
+        "runner_up_err": 0.002896490375621008,
+        "status": "match"
+      },
+      {
+        "arm": "pipeline",
+        "task": "recon",
+        "tag": "clip01",
+        "assay": 1,
+        "fields": [
+          "field",
+          "field_oracle"
+        ],
+        "matched_index": 9,
+        "label_at_match": 1,
+        "abs_err": 0.00011977320711845443,
+        "runner_up_err": 0.00820580172862736,
+        "status": "match"
+      },
+      {
+        "arm": "pipeline",
+        "task": "causal",
+        "tag": "clip00",
+        "assay": 0,
+        "fields": [
+          "field",
+          "field_oracle"
+        ],
+        "matched_index": 0,
+        "label_at_match": 0,
+        "abs_err": 8.755396032428947e-05,
+        "runner_up_err": 0.0060694357533301255,
+        "status": "match"
+      },
+      {
+        "arm": "pipeline",
+        "task": "causal",
+        "tag": "clip01",
+        "assay": 1,
+        "fields": [
+          "field",
+          "field_oracle"
+        ],
+        "matched_index": 9,
+        "label_at_match": 1,
+        "abs_err": 2.0856273184200608e-05,
+        "runner_up_err": 0.005442805198231504,
+        "status": "match"
+      },
+      {
+        "arm": "pipeline",
+        "task": "noncausal",
+        "tag": "clip00",
+        "assay": 0,
+        "fields": [
+          "field",
+          "field_oracle"
+        ],
+        "matched_index": 0,
+        "label_at_match": 0,
+        "abs_err": 1.0276415242937292e-05,
+        "runner_up_err": 0.006308262067781633,
+        "status": "match"
+      },
+      {
+        "arm": "pipeline",
+        "task": "noncausal",
+        "tag": "clip01",
+        "assay": 1,
+        "fields": [
+          "field",
+          "field_oracle"
+        ],
+        "matched_index": 9,
+        "label_at_match": 1,
+        "abs_err": 5.524482381516482e-06,
+        "runner_up_err": 0.00783467877480861,
+        "status": "match"
+      },
+      {
+        "arm": "pipeline",
+        "task": "spatial",
+        "tag": "clip00",
+        "assay": 0,
+        "fields": [
+          "field",
+          "field_oracle"
+        ],
+        "matched_index": 0,
+        "label_at_match": 0,
+        "abs_err": 8.32916763952099e-05,
+        "runner_up_err": Infinity,
+        "status": "match"
+      },
+      {
+        "arm": "pipeline",
+        "task": "spatial",
+        "tag": "clip01",
+        "assay": 1,
+        "fields": [
+          "field",
+          "field_oracle"
+        ],
+        "matched_index": 9,
+        "label_at_match": 1,
+        "abs_err": 1.3718623362206708e-06,
+        "runner_up_err": 0.006474569973947148,
+        "status": "match"
+      },
+      {
+        "arm": "unet3d",
+        "task": "recon",
+        "tag": "clip00",
+        "assay": 0,
+        "fields": [
+          "field"
+        ],
+        "matched_index": 0,
+        "label_at_match": 0,
+        "abs_err": 4.152827582336316e-07,
+        "runner_up_err": 0.0004443657884836798,
+        "status": "match"
+      },
+      {
+        "arm": "unet3d",
+        "task": "recon",
+        "tag": "clip01",
+        "assay": 0,
+        "fields": [
+          "field"
+        ],
+        "matched_index": 1,
+        "label_at_match": 0,
+        "abs_err": 2.1024219272469669e-07,
+        "runner_up_err": 0.00015138565525499303,
+        "status": "match"
+      },
+      {
+        "arm": "unet3d",
+        "task": "causal",
+        "tag": "clip00",
+        "assay": 0,
+        "fields": [
+          "field"
+        ],
+        "matched_index": 0,
+        "label_at_match": 0,
+        "abs_err": 1.1541066086140361e-07,
+        "runner_up_err": 0.0013701874103120987,
+        "status": "match"
+      },
+      {
+        "arm": "unet3d",
+        "task": "causal",
+        "tag": "clip01",
+        "assay": 0,
+        "fields": [
+          "field"
+        ],
+        "matched_index": 1,
+        "label_at_match": 0,
+        "abs_err": 6.456772005253297e-08,
+        "runner_up_err": 0.00022983213025996874,
+        "status": "match"
+      },
+      {
+        "arm": "unet3d",
+        "task": "noncausal",
+        "tag": "clip00",
+        "assay": 0,
+        "fields": [
+          "field"
+        ],
+        "matched_index": 0,
+        "label_at_match": 0,
+        "abs_err": 2.2149018229222772e-07,
+        "runner_up_err": 5.713266589214838e-05,
+        "status": "match"
+      },
+      {
+        "arm": "unet3d",
+        "task": "noncausal",
+        "tag": "clip01",
+        "assay": 0,
+        "fields": [
+          "field"
+        ],
+        "matched_index": 1,
+        "label_at_match": 0,
+        "abs_err": 3.4207927191581833e-07,
+        "runner_up_err": 0.0003844259827817387,
+        "status": "match"
+      },
+      {
+        "arm": "unet3d",
+        "task": "spatial",
+        "tag": "clip00",
+        "assay": 0,
+        "fields": [
+          "field"
+        ],
+        "matched_index": 0,
+        "label_at_match": 0,
+        "abs_err": 3.285082751658397e-08,
+        "runner_up_err": 0.0001937902122279185,
+        "status": "match"
+      },
+      {
+        "arm": "unet3d",
+        "task": "spatial",
+        "tag": "clip01",
+        "assay": 0,
+        "fields": [
+          "field"
+        ],
+        "matched_index": 1,
+        "label_at_match": 0,
+        "abs_err": 4.2457696317055316e-08,
+        "runner_up_err": 0.0002631816937002235,
+        "status": "match"
+      },
+      {
+        "arm": "cvae3d",
+        "task": "recon",
+        "tag": "clip00",
+        "assay": 0,
+        "fields": [
+          "field"
+        ],
+        "matched_index": 0,
+        "label_at_match": 0,
+        "abs_err": 2.2150784411215096e-06,
+        "runner_up_err": 9.309593535465621e-05,
+        "status": "match"
+      },
+      {
+        "arm": "cvae3d",
+        "task": "recon",
+        "tag": "clip01",
+        "assay": 0,
+        "fields": [
+          "field"
+        ],
+        "matched_index": 1,
+        "label_at_match": 0,
+        "abs_err": 8.95458583340114e-06,
+        "runner_up_err": 0.0005485871336105216,
+        "status": "match"
+      },
+      {
+        "arm": "cvae3d",
+        "task": "causal",
+        "tag": "clip00",
+        "assay": 0,
+        "fields": [
+          "field"
+        ],
+        "matched_index": 0,
+        "label_at_match": 0,
+        "abs_err": 1.7299138090065558e-07,
+        "runner_up_err": 0.0008418082146083722,
+        "status": "match"
+      },
+      {
+        "arm": "cvae3d",
+        "task": "causal",
+        "tag": "clip01",
+        "assay": 0,
+        "fields": [
+          "field"
+        ],
+        "matched_index": 1,
+        "label_at_match": 0,
+        "abs_err": 1.7751770476845397e-06,
+        "runner_up_err": 0.0017595674587077767,
+        "status": "match"
+      },
+      {
+        "arm": "cvae3d",
+        "task": "noncausal",
+        "tag": "clip00",
+        "assay": 0,
+        "fields": [
+          "field"
+        ],
+        "matched_index": 0,
+        "label_at_match": 0,
+        "abs_err": 1.0486335533341218e-05,
+        "runner_up_err": 0.00020240943463720878,
+        "status": "match"
+      },
+      {
+        "arm": "cvae3d",
+        "task": "noncausal",
+        "tag": "clip01",
+        "assay": 0,
+        "fields": [
+          "field"
+        ],
+        "matched_index": 1,
+        "label_at_match": 0,
+        "abs_err": 1.615264995348531e-06,
+        "runner_up_err": 0.00015238416144447778,
+        "status": "match"
+      },
+      {
+        "arm": "cvae3d",
+        "task": "spatial",
+        "tag": "clip00",
+        "assay": 0,
+        "fields": [
+          "field"
+        ],
+        "matched_index": 0,
+        "label_at_match": 0,
+        "abs_err": 1.8617025162891154e-05,
+        "runner_up_err": 0.00032176742024508237,
+        "status": "match"
+      },
+      {
+        "arm": "cvae3d",
+        "task": "spatial",
+        "tag": "clip01",
+        "assay": 0,
+        "fields": [
+          "field"
+        ],
+        "matched_index": 1,
+        "label_at_match": 0,
+        "abs_err": 1.6648735880891996e-07,
+        "runner_up_err": 0.0005143620975880739,
+        "status": "match"
+      }
+    ]
+  },
+  "bootstrap": {
+    "levels": "recordings within tissue, then clips within recording; equal weight per recording",
+    "n_boot": 10000,
+    "seed": 20261107
+  },
+  "multiplicity": "BH and Holm over all 88 tests jointly, per level",
+  "rows": [
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "recon",
+      "arm": "Ours (4C+soft)",
+      "first_mean": 0.06704869096984738,
+      "arm_mean": 0.012678125055427784,
+      "clip": {
+        "n": 279,
+        "mean_delta": 0.054370565914419584,
+        "median_delta": 0.04261724229759209,
+        "wins_frac": 0.992831541218638,
+        "p": 4.916426773843079e-47,
+        "q_bh": 4.32645556098191e-46,
+        "p_holm": 3.883977151336032e-45,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.051390617883206445,
+        "median_delta": 0.039330542491674336,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.051390617883206445,
+        "ci_low": 0.0402971240895411,
+        "ci_high": 0.06408893805911396,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "voxel AP",
+      "task": "recon",
+      "arm": "MaskGIT-flat",
+      "first_mean": 0.012678125055427784,
+      "arm_mean": 0.013043794062688595,
+      "clip": {
+        "n": 279,
+        "mean_delta": -0.0003656690072608102,
+        "median_delta": 0.0016656085752966958,
+        "wins_frac": 0.6236559139784946,
+        "p": 0.0003075540399862811,
+        "q_bh": 0.00034698404511272735,
+        "p_holm": 0.0033830944398490917,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.0006615740393533213,
+        "median_delta": 0.0028496536337583624,
+        "recordings_won_frac": 0.7142857142857143,
+        "p": 0.05049888789653778,
+        "q_bh": 0.059252028465270994,
+        "p_holm": 0.7069844305515289,
+        "verdict": "ns"
+      },
+      "bootstrap": {
+        "estimate": 0.0006615740393533213,
+        "ci_low": -0.0038781783395180837,
+        "ci_high": 0.004339231384816815,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": false
+      },
+      "verdict_changed": true
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "recon",
+      "arm": "MaskGIT-flat",
+      "first_mean": 0.06704869096984738,
+      "arm_mean": 0.013043794062688595,
+      "clip": {
+        "n": 279,
+        "mean_delta": 0.05400489690715877,
+        "median_delta": 0.044780711511315484,
+        "wins_frac": 0.996415770609319,
+        "p": 2.6081029139749753e-47,
+        "q_bh": 3.0285144118365893e-46,
+        "p_holm": 2.1386443894594796e-45,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.05205219192255978,
+        "median_delta": 0.04179855828473593,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.05205219192255978,
+        "ci_low": 0.042930022467624555,
+        "ci_high": 0.06188921034838236,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "voxel AP",
+      "task": "recon",
+      "arm": "3D U-Net (det.)",
+      "first_mean": 0.012678125055427784,
+      "arm_mean": 0.026865170222117055,
+      "clip": {
+        "n": 279,
+        "mean_delta": -0.014187045166689274,
+        "median_delta": -0.007368560111102705,
+        "wins_frac": 0.13620071684587814,
+        "p": 6.01382304356794e-33,
+        "q_bh": 1.0800335261917933e-32,
+        "p_holm": 2.405529217427176e-31,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.011670681437002511,
+        "median_delta": -0.007143884988090678,
+        "recordings_won_frac": 0.17857142857142858,
+        "p": 4.76837158203125e-06,
+        "q_bh": 8.392333984375e-06,
+        "p_holm": 0.00018596649169921875,
+        "verdict": "arm"
+      },
+      "bootstrap": {
+        "estimate": -0.011670681437002511,
+        "ci_low": -0.01810734173834198,
+        "ci_high": -0.006433420711429418,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "recon",
+      "arm": "3D U-Net (det.)",
+      "first_mean": 0.06704869096984738,
+      "arm_mean": 0.026865170222117055,
+      "clip": {
+        "n": 279,
+        "mean_delta": 0.040183520747730316,
+        "median_delta": 0.029849147836711987,
+        "wins_frac": 0.989247311827957,
+        "p": 2.291989986665483e-47,
+        "q_bh": 3.0285144118365893e-46,
+        "p_holm": 1.9481914886656606e-45,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.03971993644620395,
+        "median_delta": 0.03187655109356636,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.03971993644620395,
+        "ci_low": 0.031220701836271254,
+        "ci_high": 0.049758375334316186,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "voxel AP",
+      "task": "recon",
+      "arm": "3D U-Net seed 2",
+      "first_mean": 0.012678125055427784,
+      "arm_mean": 0.03215129149116092,
+      "clip": {
+        "n": 279,
+        "mean_delta": -0.019473166435733134,
+        "median_delta": -0.011659020603038129,
+        "wins_frac": 0.053763440860215055,
+        "p": 2.95694790777655e-42,
+        "q_bh": 8.673713862811212e-42,
+        "p_holm": 1.7445992655881644e-40,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.017572307168891334,
+        "median_delta": -0.011100911088070178,
+        "recordings_won_frac": 0.07142857142857142,
+        "p": 3.725290298461914e-08,
+        "q_bh": 7.995745030845084e-08,
+        "p_holm": 1.7881393432617188e-06,
+        "verdict": "arm"
+      },
+      "bootstrap": {
+        "estimate": -0.017572307168891334,
+        "ci_low": -0.024403746450562723,
+        "ci_high": -0.011689365203901072,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "recon",
+      "arm": "3D U-Net seed 2",
+      "first_mean": 0.06704869096984738,
+      "arm_mean": 0.03215129149116092,
+      "clip": {
+        "n": 279,
+        "mean_delta": 0.034897399478686454,
+        "median_delta": 0.028321470232981844,
+        "wins_frac": 0.953405017921147,
+        "p": 2.3080476262915643e-44,
+        "q_bh": 8.124327644546306e-44,
+        "p_holm": 1.477150480826601e-42,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.03381831071431512,
+        "median_delta": 0.030157367823138187,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.03381831071431512,
+        "ci_low": 0.02679737361875407,
+        "ci_high": 0.04168302687958652,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "voxel AP",
+      "task": "recon",
+      "arm": "3D CVAE",
+      "first_mean": 0.012678125055427784,
+      "arm_mean": 0.025017058065932553,
+      "clip": {
+        "n": 279,
+        "mean_delta": -0.01233893301050477,
+        "median_delta": -0.005040849313682684,
+        "wins_frac": 0.2616487455197133,
+        "p": 4.0784012463373335e-20,
+        "q_bh": 6.187919132373885e-20,
+        "p_holm": 1.2643043863645733e-18,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.011390754573996822,
+        "median_delta": -0.006215614555222369,
+        "recordings_won_frac": 0.2857142857142857,
+        "p": 0.0005255788564682007,
+        "q_bh": 0.0007708489894866944,
+        "p_holm": 0.01524178683757782,
+        "verdict": "arm"
+      },
+      "bootstrap": {
+        "estimate": -0.011390754573996822,
+        "ci_low": -0.020430825529000055,
+        "ci_high": -0.0047401872406644145,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "recon",
+      "arm": "3D CVAE",
+      "first_mean": 0.06704869096984738,
+      "arm_mean": 0.025017058065932553,
+      "clip": {
+        "n": 279,
+        "mean_delta": 0.042031632903914824,
+        "median_delta": 0.03518518100953643,
+        "wins_frac": 0.992831541218638,
+        "p": 1.912018711992051e-46,
+        "q_bh": 1.4021470554608374e-45,
+        "p_holm": 1.4722544082338794e-44,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.039999863309209634,
+        "median_delta": 0.03515008430912982,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.039999863309209634,
+        "ci_low": 0.03311071319315677,
+        "ci_high": 0.04711914188395475,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "recon",
+      "arm": "Dich. Gaussian (ref)",
+      "first_mean": 0.06704869096984738,
+      "arm_mean": 0.05445811480472719,
+      "clip": {
+        "n": 279,
+        "mean_delta": 0.012590576165120184,
+        "median_delta": 0.011013184549421684,
+        "wins_frac": 0.8602150537634409,
+        "p": 1.2486937718165805e-36,
+        "q_bh": 2.555466323717653e-36,
+        "p_holm": 5.74399135035627e-35,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.011955679337311396,
+        "median_delta": 0.01008380785755001,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.011955679337311396,
+        "ci_low": 0.009132277751909888,
+        "ci_high": 0.014779075552432819,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "recon",
+      "arm": "Coupled GLM (ref)",
+      "first_mean": 0.06704869096984738,
+      "arm_mean": 0.06883939966678487,
+      "clip": {
+        "n": 279,
+        "mean_delta": -0.0017907086969375012,
+        "median_delta": -0.000893381048551644,
+        "wins_frac": 0.4336917562724014,
+        "p": 0.0004552264265288333,
+        "q_bh": 0.0005007490691817165,
+        "p_holm": 0.0040970378387595,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.0016724770573234035,
+        "median_delta": -0.0009909455179719718,
+        "recordings_won_frac": 0.35714285714285715,
+        "p": 0.0379299521446228,
+        "q_bh": 0.045105889036848736,
+        "p_holm": 0.6068792343139648,
+        "verdict": "arm"
+      },
+      "bootstrap": {
+        "estimate": -0.0016724770573234035,
+        "ci_low": -0.0034880814115307935,
+        "ci_high": 0.00010660897363185436,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": false
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "causal",
+      "arm": "Ours (4C+soft)",
+      "first_mean": 0.06947316229992441,
+      "arm_mean": 0.01369356436347212,
+      "clip": {
+        "n": 278,
+        "mean_delta": 0.05577959793645229,
+        "median_delta": 0.041332457706193954,
+        "wins_frac": 0.9640287769784173,
+        "p": 3.790078020653519e-44,
+        "q_bh": 1.2827956377596525e-43,
+        "p_holm": 2.3877491530117167e-42,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.05225427259161224,
+        "median_delta": 0.03935369219304462,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.05225427259161224,
+        "ci_low": 0.039078004257384384,
+        "ci_high": 0.06737308388567681,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "voxel AP",
+      "task": "causal",
+      "arm": "MaskGIT-flat",
+      "first_mean": 0.01369356436347212,
+      "arm_mean": 0.015085827148358889,
+      "clip": {
+        "n": 278,
+        "mean_delta": -0.0013922627848867706,
+        "median_delta": -0.0005952268997777943,
+        "wins_frac": 0.460431654676259,
+        "p": 0.2986306158361004,
+        "q_bh": 0.3055755138788004,
+        "p_holm": 0.8958918475083012,
+        "verdict": "ns"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.00035428191152019804,
+        "median_delta": -0.0008791296055793442,
+        "recordings_won_frac": 0.4642857142857143,
+        "p": 0.8665077835321426,
+        "q_bh": 0.8764676431129719,
+        "p_holm": 1.0,
+        "verdict": "ns"
+      },
+      "bootstrap": {
+        "estimate": -0.00035428191152019804,
+        "ci_low": -0.004729814090164683,
+        "ci_high": 0.00411026439788343,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": false
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "causal",
+      "arm": "MaskGIT-flat",
+      "first_mean": 0.06947316229992441,
+      "arm_mean": 0.015085827148358889,
+      "clip": {
+        "n": 278,
+        "mean_delta": 0.054387335151565526,
+        "median_delta": 0.041770855067990005,
+        "wins_frac": 0.9928057553956835,
+        "p": 2.3187235368235287e-46,
+        "q_bh": 1.457483366003361e-45,
+        "p_holm": 1.7416384820433332e-44,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.051899990680092045,
+        "median_delta": 0.04211647513661815,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.051899990680092045,
+        "ci_low": 0.04089750099824573,
+        "ci_high": 0.06417766679263778,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "voxel AP",
+      "task": "causal",
+      "arm": "3D U-Net (det.)",
+      "first_mean": 0.01369356436347212,
+      "arm_mean": 0.0359017482736381,
+      "clip": {
+        "n": 278,
+        "mean_delta": -0.022208183910165977,
+        "median_delta": -0.010615573669052775,
+        "wins_frac": 0.12589928057553956,
+        "p": 1.5750689515360327e-34,
+        "q_bh": 2.9490652709610825e-34,
+        "p_holm": 6.615289596451338e-33,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.0193900288486834,
+        "median_delta": -0.007040594896450068,
+        "recordings_won_frac": 0.10714285714285714,
+        "p": 6.556510925292969e-07,
+        "q_bh": 1.1774958396444515e-06,
+        "p_holm": 2.6226043701171875e-05,
+        "verdict": "arm"
+      },
+      "bootstrap": {
+        "estimate": -0.0193900288486834,
+        "ci_low": -0.028747150057928064,
+        "ci_high": -0.011314192253547245,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "causal",
+      "arm": "3D U-Net (det.)",
+      "first_mean": 0.06947316229992441,
+      "arm_mean": 0.0359017482736381,
+      "clip": {
+        "n": 278,
+        "mean_delta": 0.033571414026286314,
+        "median_delta": 0.02861810267248475,
+        "wins_frac": 0.9640287769784173,
+        "p": 3.3130504658247684e-45,
+        "q_bh": 1.2676019173590418e-44,
+        "p_holm": 2.186613307444347e-43,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.03286424374292884,
+        "median_delta": 0.028672451169162602,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.03286424374292884,
+        "ci_low": 0.02570769483993851,
+        "ci_high": 0.04049444069333755,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "voxel AP",
+      "task": "causal",
+      "arm": "3D U-Net seed 2",
+      "first_mean": 0.01369356436347212,
+      "arm_mean": 0.03393143259334657,
+      "clip": {
+        "n": 278,
+        "mean_delta": -0.02023786822987445,
+        "median_delta": -0.012820241073553824,
+        "wins_frac": 0.09712230215827339,
+        "p": 5.257655284963192e-38,
+        "q_bh": 1.1284723538457582e-37,
+        "p_holm": 2.5236745367823322e-36,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.018306556046110364,
+        "median_delta": -0.012293809342763706,
+        "recordings_won_frac": 0.10714285714285714,
+        "p": 1.4156103134155273e-07,
+        "q_bh": 2.768304612901476e-07,
+        "p_holm": 6.370246410369873e-06,
+        "verdict": "arm"
+      },
+      "bootstrap": {
+        "estimate": -0.018306556046110364,
+        "ci_low": -0.02594700157654604,
+        "ci_high": -0.01188171272130248,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "causal",
+      "arm": "3D U-Net seed 2",
+      "first_mean": 0.06947316229992441,
+      "arm_mean": 0.03393143259334657,
+      "clip": {
+        "n": 278,
+        "mean_delta": 0.03554172970657784,
+        "median_delta": 0.027772694204398388,
+        "wins_frac": 0.9244604316546763,
+        "p": 1.803326404342668e-43,
+        "q_bh": 5.667597270791243e-43,
+        "p_holm": 1.1000291066490276e-41,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.03394771654550188,
+        "median_delta": 0.027583464984919842,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.03394771654550188,
+        "ci_low": 0.025933712242411828,
+        "ci_high": 0.0426837804366206,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "voxel AP",
+      "task": "causal",
+      "arm": "3D CVAE",
+      "first_mean": 0.01369356436347212,
+      "arm_mean": 0.025227976089874028,
+      "clip": {
+        "n": 278,
+        "mean_delta": -0.011534411726401905,
+        "median_delta": -0.004861266690497712,
+        "wins_frac": 0.2733812949640288,
+        "p": 6.760458263467048e-17,
+        "q_bh": 9.915338786418337e-17,
+        "p_holm": 1.960532896405444e-15,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.01018798472408305,
+        "median_delta": -0.005928028743227564,
+        "recordings_won_frac": 0.2857142857142857,
+        "p": 0.006060026586055756,
+        "q_bh": 0.00808003544807434,
+        "p_holm": 0.14544063806533813,
+        "verdict": "arm"
+      },
+      "bootstrap": {
+        "estimate": -0.01018798472408305,
+        "ci_low": -0.019877491327283718,
+        "ci_high": -0.002406652727141044,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "causal",
+      "arm": "3D CVAE",
+      "first_mean": 0.06947316229992441,
+      "arm_mean": 0.025227976089874028,
+      "clip": {
+        "n": 278,
+        "mean_delta": 0.04424518621005038,
+        "median_delta": 0.03591545964335318,
+        "wins_frac": 0.9928057553956835,
+        "p": 3.162258444161694e-46,
+        "q_bh": 1.8551916205748605e-45,
+        "p_holm": 2.3400712486796537e-44,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.04206628786752919,
+        "median_delta": 0.03562993110223097,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.04206628786752919,
+        "ci_low": 0.03387978409215645,
+        "ci_high": 0.05081253237449376,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "causal",
+      "arm": "Dich. Gaussian (ref)",
+      "first_mean": 0.06947316229992441,
+      "arm_mean": 0.05738521723275559,
+      "clip": {
+        "n": 278,
+        "mean_delta": 0.012087945067168815,
+        "median_delta": 0.010591766202809823,
+        "wins_frac": 0.7805755395683454,
+        "p": 5.418593385711963e-26,
+        "q_bh": 8.669749417139141e-26,
+        "p_holm": 1.8423217511420674e-24,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.011095165980587152,
+        "median_delta": 0.01153433927209185,
+        "recordings_won_frac": 0.8571428571428571,
+        "p": 7.964670658111572e-06,
+        "q_bh": 1.3478673421419584e-05,
+        "p_holm": 0.0002946928143501282,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.011095165980587152,
+        "ci_low": 0.006991788818799916,
+        "ci_high": 0.015218788406149193,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "causal",
+      "arm": "Coupled GLM (ref)",
+      "first_mean": 0.06947316229992441,
+      "arm_mean": 0.07374683340415523,
+      "clip": {
+        "n": 278,
+        "mean_delta": -0.00427367110423083,
+        "median_delta": -0.0021554101657259538,
+        "wins_frac": 0.3920863309352518,
+        "p": 3.564729115022456e-05,
+        "q_bh": 4.127581080552318e-05,
+        "p_holm": 0.0004634147849529193,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.003855200368968863,
+        "median_delta": -0.0037256967727326753,
+        "recordings_won_frac": 0.32142857142857145,
+        "p": 0.0026621222496032715,
+        "q_bh": 0.0038404386551653753,
+        "p_holm": 0.0745394229888916,
+        "verdict": "arm"
+      },
+      "bootstrap": {
+        "estimate": -0.003855200368968863,
+        "ci_low": -0.006739001835633732,
+        "ci_high": -0.0011307905547208567,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "noncausal",
+      "arm": "Ours (4C+soft)",
+      "first_mean": 0.07190006786500248,
+      "arm_mean": 0.01541589346352666,
+      "clip": {
+        "n": 278,
+        "mean_delta": 0.05648417440147581,
+        "median_delta": 0.04279840717040917,
+        "wins_frac": 0.9676258992805755,
+        "p": 9.811416504897669e-45,
+        "q_bh": 3.5975193851291456e-44,
+        "p_holm": 6.3774207281834845e-43,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.053229993103387205,
+        "median_delta": 0.04256755950630515,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.053229993103387205,
+        "ci_low": 0.04170443599570993,
+        "ci_high": 0.06614775406886868,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "voxel AP",
+      "task": "noncausal",
+      "arm": "MaskGIT-flat",
+      "first_mean": 0.01541589346352666,
+      "arm_mean": 0.0161663042207905,
+      "clip": {
+        "n": 278,
+        "mean_delta": -0.0007504107572638407,
+        "median_delta": -0.0005190323527670363,
+        "wins_frac": 0.4748201438848921,
+        "p": 0.6005566017099693,
+        "q_bh": 0.6005566017099693,
+        "p_holm": 0.8958918475083012,
+        "verdict": "ns"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -5.1406146721947494e-05,
+        "median_delta": 0.00031770978100390207,
+        "recordings_won_frac": 0.5,
+        "p": 0.7281656339764595,
+        "q_bh": 0.7538655975285699,
+        "p_holm": 1.0,
+        "verdict": "ns"
+      },
+      "bootstrap": {
+        "estimate": -5.1406146721947494e-05,
+        "ci_low": -0.004252463017184605,
+        "ci_high": 0.003684864036214833,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": false
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "noncausal",
+      "arm": "MaskGIT-flat",
+      "first_mean": 0.07190006786500248,
+      "arm_mean": 0.0161663042207905,
+      "clip": {
+        "n": 278,
+        "mean_delta": 0.05573376364421197,
+        "median_delta": 0.04347769270480309,
+        "wins_frac": 0.9892086330935251,
+        "p": 2.54340943613925e-45,
+        "q_bh": 1.0658096684774e-44,
+        "p_holm": 1.7295184165746899e-43,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.05317858695666527,
+        "median_delta": 0.03998109368921142,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.05317858695666527,
+        "ci_low": 0.0433350935427426,
+        "ci_high": 0.06386077369710329,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "voxel AP",
+      "task": "noncausal",
+      "arm": "3D U-Net (det.)",
+      "first_mean": 0.01541589346352666,
+      "arm_mean": 0.03670584609091398,
+      "clip": {
+        "n": 278,
+        "mean_delta": -0.021289952627387324,
+        "median_delta": -0.00998014671772511,
+        "wins_frac": 0.1366906474820144,
+        "p": 7.383557274370606e-30,
+        "q_bh": 1.2495250772011796e-29,
+        "p_holm": 2.7319161915171245e-28,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.018685871530754183,
+        "median_delta": -0.008575470026367996,
+        "recordings_won_frac": 0.10714285714285714,
+        "p": 6.735324859619141e-06,
+        "q_bh": 1.1621737012676164e-05,
+        "p_holm": 0.00025594234466552734,
+        "verdict": "arm"
+      },
+      "bootstrap": {
+        "estimate": -0.018685871530754183,
+        "ci_low": -0.02732399009369991,
+        "ci_high": -0.011158046790339986,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "noncausal",
+      "arm": "3D U-Net (det.)",
+      "first_mean": 0.07190006786500248,
+      "arm_mean": 0.03670584609091398,
+      "clip": {
+        "n": 278,
+        "mean_delta": 0.035194221774088486,
+        "median_delta": 0.02939078103807456,
+        "wins_frac": 0.9424460431654677,
+        "p": 8.411694977387099e-41,
+        "q_bh": 2.177144582382543e-40,
+        "p_holm": 4.6264322375629047e-39,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.03454412157263302,
+        "median_delta": 0.03237881638559467,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.03454412157263302,
+        "ci_low": 0.02715113292300942,
+        "ci_high": 0.041933276471707366,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "voxel AP",
+      "task": "noncausal",
+      "arm": "3D U-Net seed 2",
+      "first_mean": 0.01541589346352666,
+      "arm_mean": 0.03549830111386309,
+      "clip": {
+        "n": 278,
+        "mean_delta": -0.02008240765033643,
+        "median_delta": -0.012716534025583572,
+        "wins_frac": 0.10431654676258993,
+        "p": 1.0022477086594425e-32,
+        "q_bh": 1.7639559672406187e-32,
+        "p_holm": 3.9087660637718257e-31,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.018092673133475217,
+        "median_delta": -0.011961925170390273,
+        "recordings_won_frac": 0.07142857142857142,
+        "p": 2.4586915969848633e-07,
+        "q_bh": 4.6035076709503825e-07,
+        "p_holm": 1.0572373867034912e-05,
+        "verdict": "arm"
+      },
+      "bootstrap": {
+        "estimate": -0.018092673133475217,
+        "ci_low": -0.025349821918924337,
+        "ci_high": -0.011889982198366266,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "noncausal",
+      "arm": "3D U-Net seed 2",
+      "first_mean": 0.07190006786500248,
+      "arm_mean": 0.03549830111386309,
+      "clip": {
+        "n": 278,
+        "mean_delta": 0.03640176675113938,
+        "median_delta": 0.03038458084311449,
+        "wins_frac": 0.9100719424460432,
+        "p": 2.027986542205294e-40,
+        "q_bh": 5.098937591830453e-40,
+        "p_holm": 1.0951127327908587e-38,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.035137319969912,
+        "median_delta": 0.031351363054450604,
+        "recordings_won_frac": 0.9642857142857143,
+        "p": 2.2351741790771484e-08,
+        "q_bh": 5.3160899394267314e-08,
+        "p_holm": 1.1622905731201172e-06,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.035137319969912,
+        "ci_low": 0.027207514222412126,
+        "ci_high": 0.04328277440191854,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "voxel AP",
+      "task": "noncausal",
+      "arm": "3D CVAE",
+      "first_mean": 0.01541589346352666,
+      "arm_mean": 0.025683464729645465,
+      "clip": {
+        "n": 278,
+        "mean_delta": -0.010267571266118805,
+        "median_delta": -0.005260841552409183,
+        "wins_frac": 0.30935251798561153,
+        "p": 3.526850005756818e-11,
+        "q_bh": 4.774812315486154e-11,
+        "p_holm": 8.464440013816363e-10,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.008973074691152402,
+        "median_delta": -0.0025636727555307286,
+        "recordings_won_frac": 0.39285714285714285,
+        "p": 0.0379299521446228,
+        "q_bh": 0.045105889036848736,
+        "p_holm": 0.6068792343139648,
+        "verdict": "arm"
+      },
+      "bootstrap": {
+        "estimate": -0.008973074691152402,
+        "ci_low": -0.01792170743455257,
+        "ci_high": -0.0018012930883200724,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "noncausal",
+      "arm": "3D CVAE",
+      "first_mean": 0.07190006786500248,
+      "arm_mean": 0.025683464729645465,
+      "clip": {
+        "n": 278,
+        "mean_delta": 0.046216603135357005,
+        "median_delta": 0.036886792969150914,
+        "wins_frac": 0.9640287769784173,
+        "p": 2.1020846380820853e-45,
+        "q_bh": 9.249172407561176e-45,
+        "p_holm": 1.450438400276639e-43,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.0442569184122348,
+        "median_delta": 0.03873113275271754,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.0442569184122348,
+        "ci_low": 0.036840905680511286,
+        "ci_high": 0.05217072899219224,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "noncausal",
+      "arm": "Dich. Gaussian (ref)",
+      "first_mean": 0.07190006786500248,
+      "arm_mean": 0.061136277224816266,
+      "clip": {
+        "n": 278,
+        "mean_delta": 0.0107637906401862,
+        "median_delta": 0.009056046577921879,
+        "wins_frac": 0.7877697841726619,
+        "p": 4.269862129091391e-22,
+        "q_bh": 6.709783345715043e-22,
+        "p_holm": 1.4090545026001592e-20,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.009847062313384322,
+        "median_delta": 0.009169042478337441,
+        "recordings_won_frac": 0.8571428571428571,
+        "p": 7.204711437225342e-05,
+        "q_bh": 0.0001174101123103389,
+        "p_holm": 0.0025216490030288696,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.009847062313384322,
+        "ci_low": 0.0050338437506397896,
+        "ci_high": 0.013976291128495522,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "noncausal",
+      "arm": "Coupled GLM (ref)",
+      "first_mean": 0.07190006786500248,
+      "arm_mean": 0.07768778751526755,
+      "clip": {
+        "n": 278,
+        "mean_delta": -0.0057877196502650686,
+        "median_delta": -0.003064742469462787,
+        "wins_frac": 0.38489208633093525,
+        "p": 5.7972102175941016e-08,
+        "q_bh": 7.18527463589128e-08,
+        "p_holm": 1.0434978391669383e-06,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.005241719869859123,
+        "median_delta": -0.005694381187202872,
+        "recordings_won_frac": 0.21428571428571427,
+        "p": 0.00010570138692855835,
+        "q_bh": 0.00016912221908569336,
+        "p_holm": 0.003593847155570984,
+        "verdict": "arm"
+      },
+      "bootstrap": {
+        "estimate": -0.005241719869859123,
+        "ci_low": -0.008131895208351003,
+        "ci_high": -0.0024780738633662313,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "spatial",
+      "arm": "Ours (4C+soft)",
+      "first_mean": 0.08345117771011791,
+      "arm_mean": 0.020049743610232335,
+      "clip": {
+        "n": 243,
+        "mean_delta": 0.06340143409988556,
+        "median_delta": 0.048460278850429334,
+        "wins_frac": 0.9588477366255144,
+        "p": 1.1254827013451792e-37,
+        "q_bh": 2.3581542313898994e-37,
+        "p_holm": 5.2897686963223425e-36,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 27,
+        "mean_delta": 0.057545658301775375,
+        "median_delta": 0.048571746934583375,
+        "recordings_won_frac": 0.9629629629629629,
+        "p": 4.470348358154297e-08,
+        "q_bh": 9.148619895757631e-08,
+        "p_holm": 2.1010637283325195e-06,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.057545658301775375,
+        "ci_low": 0.040960056765779046,
+        "ci_high": 0.07639778191659624,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "voxel AP",
+      "task": "spatial",
+      "arm": "MaskGIT-flat",
+      "first_mean": 0.020049743610232335,
+      "arm_mean": 0.011898778731144375,
+      "clip": {
+        "n": 243,
+        "mean_delta": 0.008150964879087964,
+        "median_delta": 0.0032115024736128423,
+        "wins_frac": 0.7777777777777778,
+        "p": 4.875612123888728e-13,
+        "q_bh": 6.810378839717589e-13,
+        "p_holm": 1.2676591522110693e-11,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 27,
+        "mean_delta": 0.008946728740893096,
+        "median_delta": 0.006256580563809153,
+        "recordings_won_frac": 0.8148148148148148,
+        "p": 0.00018434226512908936,
+        "q_bh": 0.00028459858476069934,
+        "p_holm": 0.005898952484130859,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.008946728740893096,
+        "ci_low": 0.003138683952331902,
+        "ci_high": 0.016554627395471276,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "spatial",
+      "arm": "MaskGIT-flat",
+      "first_mean": 0.08345117771011791,
+      "arm_mean": 0.011898778731144375,
+      "clip": {
+        "n": 243,
+        "mean_delta": 0.07155239897897353,
+        "median_delta": 0.05585257982057071,
+        "wins_frac": 0.9876543209876543,
+        "p": 2.693301645079488e-40,
+        "q_bh": 6.583626243527637e-40,
+        "p_holm": 1.4274498718921287e-38,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 27,
+        "mean_delta": 0.06649238704266847,
+        "median_delta": 0.05438746725318136,
+        "recordings_won_frac": 1.0,
+        "p": 1.4901161193847656e-08,
+        "q_bh": 3.642506069607205e-08,
+        "p_holm": 8.642673492431641e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.06649238704266847,
+        "ci_low": 0.051962763471790005,
+        "ci_high": 0.08485104591121276,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "voxel AP",
+      "task": "spatial",
+      "arm": "3D U-Net (det.)",
+      "first_mean": 0.020049743610232335,
+      "arm_mean": 0.02554677048742394,
+      "clip": {
+        "n": 243,
+        "mean_delta": -0.005497026877191607,
+        "median_delta": -0.004814222545251496,
+        "wins_frac": 0.25102880658436216,
+        "p": 2.3081131194659126e-12,
+        "q_bh": 3.17365553926563e-12,
+        "p_holm": 5.7702827986647815e-11,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 27,
+        "mean_delta": -0.003413520105847304,
+        "median_delta": -0.003914536280778728,
+        "recordings_won_frac": 0.3333333333333333,
+        "p": 0.10040661692619324,
+        "q_bh": 0.11475041934422084,
+        "p_holm": 1.0,
+        "verdict": "ns"
+      },
+      "bootstrap": {
+        "estimate": -0.003413520105847304,
+        "ci_low": -0.011437327593997392,
+        "ci_high": 0.005691958073652703,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": false
+      },
+      "verdict_changed": true
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "spatial",
+      "arm": "3D U-Net (det.)",
+      "first_mean": 0.08345117771011791,
+      "arm_mean": 0.02554677048742394,
+      "clip": {
+        "n": 243,
+        "mean_delta": 0.05790440722269396,
+        "median_delta": 0.042431280328162055,
+        "wins_frac": 0.9629629629629629,
+        "p": 1.1998309225629272e-38,
+        "q_bh": 2.63962802963844e-38,
+        "p_holm": 5.8791715205583435e-37,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 27,
+        "mean_delta": 0.05413213819592806,
+        "median_delta": 0.04445184814326134,
+        "recordings_won_frac": 0.9629629629629629,
+        "p": 2.9802322387695312e-08,
+        "q_bh": 6.556510925292969e-08,
+        "p_holm": 1.519918441772461e-06,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.05413213819592806,
+        "ci_low": 0.040861992872578114,
+        "ci_high": 0.07171994196520243,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "voxel AP",
+      "task": "spatial",
+      "arm": "3D U-Net seed 2",
+      "first_mean": 0.020049743610232335,
+      "arm_mean": 0.025309065124434538,
+      "clip": {
+        "n": 243,
+        "mean_delta": -0.005259321514202201,
+        "median_delta": -0.006043064286581161,
+        "wins_frac": 0.205761316872428,
+        "p": 9.246247055834362e-16,
+        "q_bh": 1.3338848211695472e-15,
+        "p_holm": 2.5889491756336212e-14,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 27,
+        "mean_delta": -0.004850404526932858,
+        "median_delta": -0.00534665077325063,
+        "recordings_won_frac": 0.18518518518518517,
+        "p": 0.007585808634757996,
+        "q_bh": 0.009873064125285429,
+        "p_holm": 0.1668877899646759,
+        "verdict": "arm"
+      },
+      "bootstrap": {
+        "estimate": -0.004850404526932858,
+        "ci_low": -0.010935850592750283,
+        "ci_high": 0.0035074783773275126,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": false
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "spatial",
+      "arm": "3D U-Net seed 2",
+      "first_mean": 0.08345117771011791,
+      "arm_mean": 0.025309065124434538,
+      "clip": {
+        "n": 243,
+        "mean_delta": 0.058142112585683366,
+        "median_delta": 0.03887787335067049,
+        "wins_frac": 0.9588477366255144,
+        "p": 5.863584266000527e-40,
+        "q_bh": 1.3945822038055309e-39,
+        "p_holm": 3.049063818320274e-38,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 27,
+        "mean_delta": 0.05269525377484251,
+        "median_delta": 0.041265200828811896,
+        "recordings_won_frac": 1.0,
+        "p": 1.4901161193847656e-08,
+        "q_bh": 3.642506069607205e-08,
+        "p_holm": 8.642673492431641e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.05269525377484251,
+        "ci_low": 0.03908046045787228,
+        "ci_high": 0.07058843214769957,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "voxel AP",
+      "task": "spatial",
+      "arm": "3D CVAE",
+      "first_mean": 0.020049743610232335,
+      "arm_mean": 0.020906894637476667,
+      "clip": {
+        "n": 243,
+        "mean_delta": -0.0008571510272443316,
+        "median_delta": -0.0013296423812815877,
+        "wins_frac": 0.41975308641975306,
+        "p": 0.0022777871590407483,
+        "q_bh": 0.0024150032529588654,
+        "p_holm": 0.01366672295424449,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 27,
+        "mean_delta": -0.0009147143439637239,
+        "median_delta": 0.0005572522241332838,
+        "recordings_won_frac": 0.5925925925925926,
+        "p": 0.9153143465518951,
+        "q_bh": 0.9153143465518951,
+        "p_holm": 1.0,
+        "verdict": "ns"
+      },
+      "bootstrap": {
+        "estimate": -0.0009147143439637239,
+        "ci_low": -0.008549555041415921,
+        "ci_high": 0.008197461235114544,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": false
+      },
+      "verdict_changed": true
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "spatial",
+      "arm": "3D CVAE",
+      "first_mean": 0.08345117771011791,
+      "arm_mean": 0.020906894637476667,
+      "clip": {
+        "n": 243,
+        "mean_delta": 0.06254428307264122,
+        "median_delta": 0.04613568561678799,
+        "wins_frac": 0.9917695473251029,
+        "p": 4.620243544753069e-41,
+        "q_bh": 1.232064945267485e-40,
+        "p_holm": 2.5873363850617185e-39,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 27,
+        "mean_delta": 0.05663094395781165,
+        "median_delta": 0.04537879957389273,
+        "recordings_won_frac": 1.0,
+        "p": 1.4901161193847656e-08,
+        "q_bh": 3.642506069607205e-08,
+        "p_holm": 8.642673492431641e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.05663094395781165,
+        "ci_low": 0.043567962366094386,
+        "ci_high": 0.07407775701360259,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "spatial",
+      "arm": "Dich. Gaussian (ref)",
+      "first_mean": 0.08345117771011791,
+      "arm_mean": 0.06822577136581415,
+      "clip": {
+        "n": 243,
+        "mean_delta": 0.015225406344303756,
+        "median_delta": 0.010964912280701754,
+        "wins_frac": 0.7901234567901234,
+        "p": 3.5082343678529816e-20,
+        "q_bh": 5.416221480194077e-20,
+        "p_holm": 1.1226349977129541e-18,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 27,
+        "mean_delta": 0.014210100704594712,
+        "median_delta": 0.0122714978217592,
+        "recordings_won_frac": 0.8518518518518519,
+        "p": 0.00042723119258880615,
+        "q_bh": 0.0006372261855561854,
+        "p_holm": 0.012816935777664185,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.014210100704594712,
+        "ci_low": 0.0015239943859071635,
+        "ci_high": 0.029650999661027497,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "voxel AP",
+      "task": "spatial",
+      "arm": "Coupled GLM (ref)",
+      "first_mean": 0.08345117771011791,
+      "arm_mean": 0.08058953275994947,
+      "clip": {
+        "n": 243,
+        "mean_delta": 0.0028616449501684335,
+        "median_delta": -0.0008405080832653566,
+        "wins_frac": 0.48148148148148145,
+        "p": 0.4245033056196754,
+        "q_bh": 0.4293826539601315,
+        "p_holm": 0.8958918475083012,
+        "verdict": "ns"
+      },
+      "recording": {
+        "n_recordings": 27,
+        "mean_delta": 0.0033537634378387952,
+        "median_delta": 0.0005725160679504614,
+        "recordings_won_frac": 0.5185185185185185,
+        "p": 0.8039880394935608,
+        "q_bh": 0.822685435760853,
+        "p_holm": 1.0,
+        "verdict": "ns"
+      },
+      "bootstrap": {
+        "estimate": 0.0033537634378387952,
+        "ci_low": -0.004566250646897845,
+        "ci_high": 0.01660848597537497,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": false
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "recon",
+      "arm": "Ours (4C+soft)",
+      "first_mean": 0.679634774006023,
+      "arm_mean": 0.22438859026775626,
+      "clip": {
+        "n": 279,
+        "mean_delta": 0.4552461837382668,
+        "median_delta": 0.5003680985049159,
+        "wins_frac": 0.992831541218638,
+        "p": 1.847779266615764e-47,
+        "q_bh": 3.0285144118365893e-46,
+        "p_holm": 1.589090169289557e-45,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.45130897631484074,
+        "median_delta": 0.48744674604703825,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.45130897631484074,
+        "ci_low": 0.4018857433939221,
+        "ci_high": 0.4968757988171908,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "site AP",
+      "task": "recon",
+      "arm": "MaskGIT-flat",
+      "first_mean": 0.22438859026775626,
+      "arm_mean": 0.14811924799077622,
+      "clip": {
+        "n": 279,
+        "mean_delta": 0.07626934227698004,
+        "median_delta": 0.0802231115299879,
+        "wins_frac": 0.7204301075268817,
+        "p": 2.4574671065936464e-17,
+        "q_bh": 3.6653746674617095e-17,
+        "p_holm": 7.372401319780939e-16,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.07576695939262737,
+        "median_delta": 0.08257939035706938,
+        "recordings_won_frac": 0.75,
+        "p": 0.004406772553920746,
+        "q_bh": 0.006155491821349613,
+        "p_holm": 0.11457608640193939,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.07576695939262737,
+        "ci_low": 0.03399720317230201,
+        "ci_high": 0.11849637751600378,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "recon",
+      "arm": "MaskGIT-flat",
+      "first_mean": 0.679634774006023,
+      "arm_mean": 0.14811924799077622,
+      "clip": {
+        "n": 279,
+        "mean_delta": 0.5315155260152468,
+        "median_delta": 0.5302600477192392,
+        "wins_frac": 1.0,
+        "p": 1.6589254731329558e-47,
+        "q_bh": 3.0285144118365893e-46,
+        "p_holm": 1.4598332939701615e-45,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.5270759357074681,
+        "median_delta": 0.5008273157574479,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.5270759357074681,
+        "ci_low": 0.4919927681512473,
+        "ci_high": 0.5599313757616857,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "site AP",
+      "task": "recon",
+      "arm": "3D U-Net (det.)",
+      "first_mean": 0.22438859026775626,
+      "arm_mean": 0.3412091760898611,
+      "clip": {
+        "n": 279,
+        "mean_delta": -0.11682058582210492,
+        "median_delta": -0.12225172626924478,
+        "wins_frac": 0.17204301075268819,
+        "p": 1.0981613815688628e-27,
+        "q_bh": 1.8233622939256587e-27,
+        "p_holm": 3.953380973647906e-26,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.10188446424705519,
+        "median_delta": -0.12386814397216211,
+        "recordings_won_frac": 0.17857142857142858,
+        "p": 0.0001721307635307312,
+        "q_bh": 0.00027049119983400615,
+        "p_holm": 0.00568031519651413,
+        "verdict": "arm"
+      },
+      "bootstrap": {
+        "estimate": -0.10188446424705519,
+        "ci_low": -0.14584914874853824,
+        "ci_high": -0.05710321705095864,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "recon",
+      "arm": "3D U-Net (det.)",
+      "first_mean": 0.679634774006023,
+      "arm_mean": 0.3412091760898611,
+      "clip": {
+        "n": 279,
+        "mean_delta": 0.33842559791616184,
+        "median_delta": 0.35245570498584883,
+        "wins_frac": 0.982078853046595,
+        "p": 3.639800365344395e-47,
+        "q_bh": 3.558915912781186e-46,
+        "p_holm": 2.911840292275516e-45,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.3494245120677855,
+        "median_delta": 0.360285950781167,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.3494245120677855,
+        "ci_low": 0.29900788806274553,
+        "ci_high": 0.39874214084917065,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "site AP",
+      "task": "recon",
+      "arm": "3D U-Net seed 2",
+      "first_mean": 0.22438859026775626,
+      "arm_mean": 0.40453771441629643,
+      "clip": {
+        "n": 279,
+        "mean_delta": -0.18014912414854015,
+        "median_delta": -0.16824574705183257,
+        "wins_frac": 0.06810035842293907,
+        "p": 3.761347690217791e-43,
+        "q_bh": 1.1413744715143642e-42,
+        "p_holm": 2.2568086141306745e-41,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.16898787841553992,
+        "median_delta": -0.1658561848561924,
+        "recordings_won_frac": 0.03571428571428571,
+        "p": 1.4156103134155273e-07,
+        "q_bh": 2.768304612901476e-07,
+        "p_holm": 6.370246410369873e-06,
+        "verdict": "arm"
+      },
+      "bootstrap": {
+        "estimate": -0.16898787841553992,
+        "ci_low": -0.20849829103922446,
+        "ci_high": -0.1275834736604257,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "recon",
+      "arm": "3D U-Net seed 2",
+      "first_mean": 0.679634774006023,
+      "arm_mean": 0.40453771441629643,
+      "clip": {
+        "n": 279,
+        "mean_delta": 0.27509705958972663,
+        "median_delta": 0.29269151237354407,
+        "wins_frac": 0.967741935483871,
+        "p": 2.2916295816359646e-46,
+        "q_bh": 1.457483366003361e-45,
+        "p_holm": 1.7416384820433332e-44,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.2823210978993009,
+        "median_delta": 0.2977923549797503,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.2823210978993009,
+        "ci_low": 0.2335964418662684,
+        "ci_high": 0.3298159634465322,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "site AP",
+      "task": "recon",
+      "arm": "3D CVAE",
+      "first_mean": 0.22438859026775626,
+      "arm_mean": 0.27091800595404686,
+      "clip": {
+        "n": 279,
+        "mean_delta": -0.0465294156862906,
+        "median_delta": -0.0433337078454471,
+        "wins_frac": 0.4050179211469534,
+        "p": 1.277727885188017e-06,
+        "q_bh": 1.5194601877911554e-06,
+        "p_holm": 1.979923911920273e-05,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.04265559280965132,
+        "median_delta": -0.025451937119485207,
+        "recordings_won_frac": 0.39285714285714285,
+        "p": 0.12562106549739838,
+        "q_bh": 0.14172633030475715,
+        "p_holm": 1.0,
+        "verdict": "ns"
+      },
+      "bootstrap": {
+        "estimate": -0.04265559280965132,
+        "ci_low": -0.09522418016536023,
+        "ci_high": 0.010601299183388499,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": false
+      },
+      "verdict_changed": true
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "recon",
+      "arm": "3D CVAE",
+      "first_mean": 0.679634774006023,
+      "arm_mean": 0.27091800595404686,
+      "clip": {
+        "n": 279,
+        "mean_delta": 0.4087167680519762,
+        "median_delta": 0.3957765754142741,
+        "wins_frac": 1.0,
+        "p": 1.6589014704206382e-47,
+        "q_bh": 3.0285144118365893e-46,
+        "p_holm": 1.4598332939701615e-45,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.4086533835051895,
+        "median_delta": 0.4061764729605697,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.4086533835051895,
+        "ci_low": 0.37337852017322753,
+        "ci_high": 0.44408757023813955,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "recon",
+      "arm": "Dich. Gaussian (ref)",
+      "first_mean": 0.679634774006023,
+      "arm_mean": 0.6996857804479532,
+      "clip": {
+        "n": 279,
+        "mean_delta": -0.02005100644193012,
+        "median_delta": -0.01723030772475964,
+        "wins_frac": 0.34767025089605735,
+        "p": 2.126732088666072e-09,
+        "q_bh": 2.7933197582479754e-09,
+        "p_holm": 4.678810595065359e-08,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.018855587250068816,
+        "median_delta": -0.015266098824950563,
+        "recordings_won_frac": 0.32142857142857145,
+        "p": 0.009536407887935638,
+        "q_bh": 0.012162375277367191,
+        "p_holm": 0.19072815775871277,
+        "verdict": "arm"
+      },
+      "bootstrap": {
+        "estimate": -0.018855587250068816,
+        "ci_low": -0.03407718870585095,
+        "ci_high": -0.004207438403431011,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "recon",
+      "arm": "Coupled GLM (ref)",
+      "first_mean": 0.679634774006023,
+      "arm_mean": 0.6983829781733594,
+      "clip": {
+        "n": 279,
+        "mean_delta": -0.01874820416733643,
+        "median_delta": -0.01568164318289811,
+        "wins_frac": 0.34050179211469533,
+        "p": 1.5521413970580154e-08,
+        "q_bh": 1.9512634705872193e-08,
+        "p_holm": 3.0454677574818586e-07,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.017641925577621766,
+        "median_delta": -0.013592755076254154,
+        "recordings_won_frac": 0.17857142857142858,
+        "p": 0.006060026586055756,
+        "q_bh": 0.00808003544807434,
+        "p_holm": 0.14544063806533813,
+        "verdict": "arm"
+      },
+      "bootstrap": {
+        "estimate": -0.017641925577621766,
+        "ci_low": -0.03235330696405855,
+        "ci_high": -0.003129241095956648,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "causal",
+      "arm": "Ours (4C+soft)",
+      "first_mean": 0.5713689526101255,
+      "arm_mean": 0.2170362182008382,
+      "clip": {
+        "n": 278,
+        "mean_delta": 0.3543327344092873,
+        "median_delta": 0.386339557657566,
+        "wins_frac": 0.9532374100719424,
+        "p": 6.603798059481506e-46,
+        "q_bh": 3.2285234957465136e-45,
+        "p_holm": 4.68869662223187e-44,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.35172982109309414,
+        "median_delta": 0.36130616280018,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.35172982109309414,
+        "ci_low": 0.3020464168130443,
+        "ci_high": 0.399570875142936,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "site AP",
+      "task": "causal",
+      "arm": "MaskGIT-flat",
+      "first_mean": 0.2170362182008382,
+      "arm_mean": 0.14715231633957718,
+      "clip": {
+        "n": 278,
+        "mean_delta": 0.06988390186126102,
+        "median_delta": 0.056786940767664926,
+        "wins_frac": 0.6690647482014388,
+        "p": 6.174084264761328e-15,
+        "q_bh": 8.763216375790272e-15,
+        "p_holm": 1.6670027514855586e-13,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.0683508739294089,
+        "median_delta": 0.06225799809511928,
+        "recordings_won_frac": 0.75,
+        "p": 0.004778154194355011,
+        "q_bh": 0.00656996201723814,
+        "p_holm": 0.11945385485887527,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.0683508739294089,
+        "ci_low": 0.03245242447512247,
+        "ci_high": 0.10587125813646585,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "causal",
+      "arm": "MaskGIT-flat",
+      "first_mean": 0.5713689526101255,
+      "arm_mean": 0.14715231633957718,
+      "clip": {
+        "n": 278,
+        "mean_delta": 0.42421663627054834,
+        "median_delta": 0.4086838119848586,
+        "wins_frac": 1.0,
+        "p": 2.418014348569743e-47,
+        "q_bh": 3.0285144118365893e-46,
+        "p_holm": 2.0311320527985842e-45,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.420080695022503,
+        "median_delta": 0.3903073296181678,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.420080695022503,
+        "ci_low": 0.38217098243293257,
+        "ci_high": 0.4558301316436872,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "site AP",
+      "task": "causal",
+      "arm": "3D U-Net (det.)",
+      "first_mean": 0.2170362182008382,
+      "arm_mean": 0.32965765181150725,
+      "clip": {
+        "n": 278,
+        "mean_delta": -0.11262143361066902,
+        "median_delta": -0.1079743678559105,
+        "wins_frac": 0.17625899280575538,
+        "p": 2.778520411043679e-26,
+        "q_bh": 4.5279591883674774e-26,
+        "p_holm": 9.724821438652877e-25,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.10144100957261985,
+        "median_delta": -0.10126752619366783,
+        "recordings_won_frac": 0.14285714285714285,
+        "p": 0.00019368529319763184,
+        "q_bh": 0.0002938673414033035,
+        "p_holm": 0.006004244089126587,
+        "verdict": "arm"
+      },
+      "bootstrap": {
+        "estimate": -0.10144100957261985,
+        "ci_low": -0.14244437776169686,
+        "ci_high": -0.05895664598367361,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "causal",
+      "arm": "3D U-Net (det.)",
+      "first_mean": 0.5713689526101255,
+      "arm_mean": 0.32965765181150725,
+      "clip": {
+        "n": 278,
+        "mean_delta": 0.24171130079861824,
+        "median_delta": 0.2510509619199425,
+        "wins_frac": 0.9676258992805755,
+        "p": 3.556670714956651e-46,
+        "q_bh": 1.956168893226158e-45,
+        "p_holm": 2.596369621918355e-44,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.2502888115204742,
+        "median_delta": 0.2698954698100707,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.2502888115204742,
+        "ci_low": 0.21023907787178364,
+        "ci_high": 0.29151300046716566,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "site AP",
+      "task": "causal",
+      "arm": "3D U-Net seed 2",
+      "first_mean": 0.2170362182008382,
+      "arm_mean": 0.34144418914541896,
+      "clip": {
+        "n": 278,
+        "mean_delta": -0.1244079709445808,
+        "median_delta": -0.11672544527953532,
+        "wins_frac": 0.11151079136690648,
+        "p": 9.277682813230349e-34,
+        "q_bh": 1.7009085157588974e-33,
+        "p_holm": 3.803849953424443e-32,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.11844912951258275,
+        "median_delta": -0.11671619588814844,
+        "recordings_won_frac": 0.03571428571428571,
+        "p": 3.203749656677246e-07,
+        "q_bh": 5.873541037241617e-07,
+        "p_holm": 1.3135373592376709e-05,
+        "verdict": "arm"
+      },
+      "bootstrap": {
+        "estimate": -0.11844912951258275,
+        "ci_low": -0.15455025251500698,
+        "ci_high": -0.08339980703838827,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "causal",
+      "arm": "3D U-Net seed 2",
+      "first_mean": 0.5713689526101255,
+      "arm_mean": 0.34144418914541896,
+      "clip": {
+        "n": 278,
+        "mean_delta": 0.22992476346470653,
+        "median_delta": 0.2453834904523625,
+        "wins_frac": 0.9280575539568345,
+        "p": 2.980687930084968e-45,
+        "q_bh": 1.192275172033987e-44,
+        "p_holm": 1.9970609131569285e-43,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.23328069158051132,
+        "median_delta": 0.27648611224143765,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.23328069158051132,
+        "ci_low": 0.19222854911766502,
+        "ci_high": 0.2727775629176906,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "site AP",
+      "task": "causal",
+      "arm": "3D CVAE",
+      "first_mean": 0.2170362182008382,
+      "arm_mean": 0.23684284246099038,
+      "clip": {
+        "n": 278,
+        "mean_delta": -0.019806624260152172,
+        "median_delta": -0.013468940275614627,
+        "wins_frac": 0.4568345323741007,
+        "p": 0.023576234912655154,
+        "q_bh": 0.024408337321337098,
+        "p_holm": 0.09430493965062062,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.015923000668069728,
+        "median_delta": -0.001057171511924298,
+        "recordings_won_frac": 0.4642857142857143,
+        "p": 0.5670346617698669,
+        "q_bh": 0.6011933763343168,
+        "p_holm": 1.0,
+        "verdict": "ns"
+      },
+      "bootstrap": {
+        "estimate": -0.015923000668069728,
+        "ci_low": -0.06378677453243434,
+        "ci_high": 0.03141850542586634,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": false
+      },
+      "verdict_changed": true
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "causal",
+      "arm": "3D CVAE",
+      "first_mean": 0.5713689526101255,
+      "arm_mean": 0.23684284246099038,
+      "clip": {
+        "n": 278,
+        "mean_delta": 0.33452611014913514,
+        "median_delta": 0.32709025269048636,
+        "wins_frac": 0.9928057553956835,
+        "p": 7.840977588527031e-47,
+        "q_bh": 6.272782070821625e-46,
+        "p_holm": 6.115962519051085e-45,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.33580682042502435,
+        "median_delta": 0.3203486417239175,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.33580682042502435,
+        "ci_low": 0.29965242519069674,
+        "ci_high": 0.3734958086967856,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "causal",
+      "arm": "Dich. Gaussian (ref)",
+      "first_mean": 0.5713689526101255,
+      "arm_mean": 0.587502513450322,
+      "clip": {
+        "n": 278,
+        "mean_delta": -0.016133560840196393,
+        "median_delta": -0.0157663961088636,
+        "wins_frac": 0.35251798561151076,
+        "p": 1.2374524449501707e-06,
+        "q_bh": 1.4917234952823977e-06,
+        "p_holm": 1.979923911920273e-05,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.014794482983435952,
+        "median_delta": -0.016020656004158064,
+        "recordings_won_frac": 0.2857142857142857,
+        "p": 0.03170907497406006,
+        "q_bh": 0.03875553607940674,
+        "p_holm": 0.539054274559021,
+        "verdict": "arm"
+      },
+      "bootstrap": {
+        "estimate": -0.014794482983435952,
+        "ci_low": -0.029009626730082207,
+        "ci_high": -0.0010546784008099764,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "causal",
+      "arm": "Coupled GLM (ref)",
+      "first_mean": 0.5713689526101255,
+      "arm_mean": 0.5938266349468443,
+      "clip": {
+        "n": 278,
+        "mean_delta": -0.022457682336718673,
+        "median_delta": -0.01762969239076556,
+        "wins_frac": 0.37050359712230213,
+        "p": 1.5227338787409292e-08,
+        "q_bh": 1.9420374105681417e-08,
+        "p_holm": 3.0454677574818586e-07,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.02081160102611077,
+        "median_delta": -0.015591454417368922,
+        "recordings_won_frac": 0.21428571428571427,
+        "p": 0.002901986241340637,
+        "q_bh": 0.004118948213515743,
+        "p_holm": 0.0783536285161972,
+        "verdict": "arm"
+      },
+      "bootstrap": {
+        "estimate": -0.02081160102611077,
+        "ci_low": -0.03671927851167642,
+        "ci_high": -0.005182213956654975,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "noncausal",
+      "arm": "Ours (4C+soft)",
+      "first_mean": 0.5183636203274221,
+      "arm_mean": 0.18886676654040416,
+      "clip": {
+        "n": 278,
+        "mean_delta": 0.329496853787018,
+        "median_delta": 0.359288102664155,
+        "wins_frac": 0.9568345323741008,
+        "p": 5.568521460611837e-46,
+        "q_bh": 2.882528756081422e-45,
+        "p_holm": 4.0093354516405226e-44,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.32627526943060553,
+        "median_delta": 0.32468798061769666,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.32627526943060553,
+        "ci_low": 0.28631475873268347,
+        "ci_high": 0.3640373850344374,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "site AP",
+      "task": "noncausal",
+      "arm": "MaskGIT-flat",
+      "first_mean": 0.18886676654040416,
+      "arm_mean": 0.13867372857790705,
+      "clip": {
+        "n": 278,
+        "mean_delta": 0.0501930379624971,
+        "median_delta": 0.02771218029743667,
+        "wins_frac": 0.6402877697841727,
+        "p": 4.1627548461755163e-10,
+        "q_bh": 5.550339794900688e-10,
+        "p_holm": 9.574336146203687e-09,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.05035020772182181,
+        "median_delta": 0.04106478391113014,
+        "recordings_won_frac": 0.7142857142857143,
+        "p": 0.01025690883398056,
+        "q_bh": 0.012894399677004132,
+        "p_holm": 0.19488126784563065,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.05035020772182181,
+        "ci_low": 0.020503220322095075,
+        "ci_high": 0.08056070956647829,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "noncausal",
+      "arm": "MaskGIT-flat",
+      "first_mean": 0.5183636203274221,
+      "arm_mean": 0.13867372857790705,
+      "clip": {
+        "n": 278,
+        "mean_delta": 0.3796898917495151,
+        "median_delta": 0.37555911161914984,
+        "wins_frac": 0.9928057553956835,
+        "p": 2.552453835375441e-47,
+        "q_bh": 3.0285144118365893e-46,
+        "p_holm": 2.1185366833616157e-45,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.3766254771524273,
+        "median_delta": 0.3656457804188626,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.3766254771524273,
+        "ci_low": 0.3405268073327171,
+        "ci_high": 0.4109847711319661,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "site AP",
+      "task": "noncausal",
+      "arm": "3D U-Net (det.)",
+      "first_mean": 0.18886676654040416,
+      "arm_mean": 0.3057000820521043,
+      "clip": {
+        "n": 278,
+        "mean_delta": -0.11683331551170015,
+        "median_delta": -0.10675015700092613,
+        "wins_frac": 0.1366906474820144,
+        "p": 2.385023705943323e-30,
+        "q_bh": 4.115335022019852e-30,
+        "p_holm": 9.063090082584628e-29,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.10522881008064025,
+        "median_delta": -0.09935558010755162,
+        "recordings_won_frac": 0.10714285714285714,
+        "p": 1.765042543411255e-05,
+        "q_bh": 2.9306366758526496e-05,
+        "p_holm": 0.0006354153156280518,
+        "verdict": "arm"
+      },
+      "bootstrap": {
+        "estimate": -0.10522881008064025,
+        "ci_low": -0.1421824708904836,
+        "ci_high": -0.06816900248415583,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "noncausal",
+      "arm": "3D U-Net (det.)",
+      "first_mean": 0.5183636203274221,
+      "arm_mean": 0.3057000820521043,
+      "clip": {
+        "n": 278,
+        "mean_delta": 0.21266353827531786,
+        "median_delta": 0.21688227511900987,
+        "wins_frac": 0.9496402877697842,
+        "p": 1.5788579794308234e-45,
+        "q_bh": 7.312605378416445e-45,
+        "p_holm": 1.1052005856015764e-43,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.22104645934996522,
+        "median_delta": 0.22181931313481304,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.22104645934996522,
+        "ci_low": 0.18446517039681806,
+        "ci_high": 0.2575328392296012,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "site AP",
+      "task": "noncausal",
+      "arm": "3D U-Net seed 2",
+      "first_mean": 0.18886676654040416,
+      "arm_mean": 0.3078690070616198,
+      "clip": {
+        "n": 278,
+        "mean_delta": -0.11900224052121565,
+        "median_delta": -0.11388855720306201,
+        "wins_frac": 0.11870503597122302,
+        "p": 4.923488813425099e-35,
+        "q_bh": 9.418848164813234e-35,
+        "p_holm": 2.1171001897727928e-33,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.11094471673658693,
+        "median_delta": -0.10495091244159546,
+        "recordings_won_frac": 0.07142857142857142,
+        "p": 2.4586915969848633e-07,
+        "q_bh": 4.6035076709503825e-07,
+        "p_holm": 1.0572373867034912e-05,
+        "verdict": "arm"
+      },
+      "bootstrap": {
+        "estimate": -0.11094471673658693,
+        "ci_low": -0.14170841446186855,
+        "ci_high": -0.07938584099555858,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "noncausal",
+      "arm": "3D U-Net seed 2",
+      "first_mean": 0.5183636203274221,
+      "arm_mean": 0.3078690070616198,
+      "clip": {
+        "n": 278,
+        "mean_delta": 0.21049461326580235,
+        "median_delta": 0.23318021686483292,
+        "wins_frac": 0.9388489208633094,
+        "p": 5.128954946370142e-44,
+        "q_bh": 1.6716593899280462e-43,
+        "p_holm": 3.179952066749488e-42,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.21533055269401855,
+        "median_delta": 0.2471692309754311,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.21533055269401855,
+        "ci_low": 0.1780765868766619,
+        "ci_high": 0.250949068627032,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "site AP",
+      "task": "noncausal",
+      "arm": "3D CVAE",
+      "first_mean": 0.18886676654040416,
+      "arm_mean": 0.21265860072399906,
+      "clip": {
+        "n": 278,
+        "mean_delta": -0.023791834183594908,
+        "median_delta": -0.014901180191920313,
+        "wins_frac": 0.420863309352518,
+        "p": 0.0015424801080762469,
+        "q_bh": 0.0016553445062281675,
+        "p_holm": 0.010797360756533729,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.019057428272518658,
+        "median_delta": -0.004875230561238373,
+        "recordings_won_frac": 0.5,
+        "p": 0.5075842142105103,
+        "q_bh": 0.5447245225673769,
+        "p_holm": 1.0,
+        "verdict": "ns"
+      },
+      "bootstrap": {
+        "estimate": -0.019057428272518658,
+        "ci_low": -0.061916708426884445,
+        "ci_high": 0.02288020913916636,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": false
+      },
+      "verdict_changed": true
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "noncausal",
+      "arm": "3D CVAE",
+      "first_mean": 0.5183636203274221,
+      "arm_mean": 0.21265860072399906,
+      "clip": {
+        "n": 278,
+        "mean_delta": 0.30570501960342306,
+        "median_delta": 0.2982113682650558,
+        "wins_frac": 0.9928057553956835,
+        "p": 2.7531949198514447e-47,
+        "q_bh": 3.0285144118365893e-46,
+        "p_holm": 2.23008788507967e-45,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": 0.3072178411580868,
+        "median_delta": 0.28148635693566193,
+        "recordings_won_frac": 1.0,
+        "p": 7.450580596923828e-09,
+        "q_bh": 2.1855036417643228e-08,
+        "p_holm": 6.556510925292969e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.3072178411580868,
+        "ci_low": 0.273510758062804,
+        "ci_high": 0.3408021945124121,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "noncausal",
+      "arm": "Dich. Gaussian (ref)",
+      "first_mean": 0.5183636203274221,
+      "arm_mean": 0.5302187396544741,
+      "clip": {
+        "n": 278,
+        "mean_delta": -0.011855119327051845,
+        "median_delta": -0.008914486020443063,
+        "wins_frac": 0.42805755395683454,
+        "p": 0.0009440394995096439,
+        "q_bh": 0.0010256231599610945,
+        "p_holm": 0.007552315996077151,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.01041892385579615,
+        "median_delta": -0.004456896486077919,
+        "recordings_won_frac": 0.42857142857142855,
+        "p": 0.13146880269050598,
+        "q_bh": 0.14644626122486742,
+        "p_holm": 1.0,
+        "verdict": "ns"
+      },
+      "bootstrap": {
+        "estimate": -0.01041892385579615,
+        "ci_low": -0.02329831782582631,
+        "ci_high": 0.0016492324872375101,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": false
+      },
+      "verdict_changed": true
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "noncausal",
+      "arm": "Coupled GLM (ref)",
+      "first_mean": 0.5183636203274221,
+      "arm_mean": 0.5374892733718755,
+      "clip": {
+        "n": 278,
+        "mean_delta": -0.01912565304445323,
+        "median_delta": -0.014637873007583513,
+        "wins_frac": 0.36330935251798563,
+        "p": 3.0657893882365065e-07,
+        "q_bh": 3.74707591895573e-07,
+        "p_holm": 5.211841960002061e-06,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 28,
+        "mean_delta": -0.016856829285992563,
+        "median_delta": -0.012387311322190965,
+        "recordings_won_frac": 0.21428571428571427,
+        "p": 0.007629185914993286,
+        "q_bh": 0.009873064125285429,
+        "p_holm": 0.1668877899646759,
+        "verdict": "arm"
+      },
+      "bootstrap": {
+        "estimate": -0.016856829285992563,
+        "ci_low": -0.03135638840170485,
+        "ci_high": -0.003192234529878369,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "spatial",
+      "arm": "Ours (4C+soft)",
+      "first_mean": 0.7224128656716958,
+      "arm_mean": 0.30923580579492665,
+      "clip": {
+        "n": 243,
+        "mean_delta": 0.413177059876769,
+        "median_delta": 0.46666666666666656,
+        "wins_frac": 0.9382716049382716,
+        "p": 8.607582245980825e-36,
+        "q_bh": 1.721516449196165e-35,
+        "p_holm": 3.873412010691371e-34,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 27,
+        "mean_delta": 0.39294935207955056,
+        "median_delta": 0.38937722894346116,
+        "recordings_won_frac": 0.9629629629629629,
+        "p": 4.470348358154297e-08,
+        "q_bh": 9.148619895757631e-08,
+        "p_holm": 2.1010637283325195e-06,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.39294935207955056,
+        "ci_low": 0.3283126115417941,
+        "ci_high": 0.4489712102215912,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "site AP",
+      "task": "spatial",
+      "arm": "MaskGIT-flat",
+      "first_mean": 0.30923580579492665,
+      "arm_mean": 0.1174177563571804,
+      "clip": {
+        "n": 243,
+        "mean_delta": 0.19181804943774627,
+        "median_delta": 0.1393588543195618,
+        "wins_frac": 0.8765432098765432,
+        "p": 1.605390615772801e-35,
+        "q_bh": 3.1394305375112556e-35,
+        "p_holm": 7.063718709400325e-34,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 27,
+        "mean_delta": 0.1994076862848208,
+        "median_delta": 0.18538144078469107,
+        "recordings_won_frac": 0.9629629629629629,
+        "p": 2.9802322387695312e-08,
+        "q_bh": 6.556510925292969e-08,
+        "p_holm": 1.519918441772461e-06,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.1994076862848208,
+        "ci_low": 0.14953861740884586,
+        "ci_high": 0.2562323968524157,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "spatial",
+      "arm": "MaskGIT-flat",
+      "first_mean": 0.7224128656716958,
+      "arm_mean": 0.1174177563571804,
+      "clip": {
+        "n": 243,
+        "mean_delta": 0.6049951093145153,
+        "median_delta": 0.6100096193761653,
+        "wins_frac": 0.9917695473251029,
+        "p": 1.4663756466277082e-41,
+        "q_bh": 4.1626147388141394e-41,
+        "p_holm": 8.504978750440708e-40,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 27,
+        "mean_delta": 0.5923570383643715,
+        "median_delta": 0.6162428935921483,
+        "recordings_won_frac": 1.0,
+        "p": 1.4901161193847656e-08,
+        "q_bh": 3.642506069607205e-08,
+        "p_holm": 8.642673492431641e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.5923570383643715,
+        "ci_low": 0.5446148975413899,
+        "ci_high": 0.6392968615217139,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "site AP",
+      "task": "spatial",
+      "arm": "3D U-Net (det.)",
+      "first_mean": 0.30923580579492665,
+      "arm_mean": 0.33418275989396634,
+      "clip": {
+        "n": 243,
+        "mean_delta": -0.024946954099039628,
+        "median_delta": -0.05718534337098474,
+        "wins_frac": 0.345679012345679,
+        "p": 2.754541906894946e-05,
+        "q_bh": 3.231995837423403e-05,
+        "p_holm": 0.0003856358669652924,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 27,
+        "mean_delta": -0.0073856083580682115,
+        "median_delta": 0.00032647615142453797,
+        "recordings_won_frac": 0.5185185185185185,
+        "p": 0.6789510101079941,
+        "q_bh": 0.7112820105893272,
+        "p_holm": 1.0,
+        "verdict": "ns"
+      },
+      "bootstrap": {
+        "estimate": -0.0073856083580682115,
+        "ci_low": -0.060218874696587016,
+        "ci_high": 0.05076862237913784,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": false
+      },
+      "verdict_changed": true
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "spatial",
+      "arm": "3D U-Net (det.)",
+      "first_mean": 0.7224128656716958,
+      "arm_mean": 0.33418275989396634,
+      "clip": {
+        "n": 243,
+        "mean_delta": 0.3882301057777293,
+        "median_delta": 0.40307112488356095,
+        "wins_frac": 0.9670781893004116,
+        "p": 1.0701923384007595e-39,
+        "q_bh": 2.4147929686991495e-39,
+        "p_holm": 5.350961692003797e-38,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 27,
+        "mean_delta": 0.3855637437214823,
+        "median_delta": 0.38701322235125096,
+        "recordings_won_frac": 0.9629629629629629,
+        "p": 2.9802322387695312e-08,
+        "q_bh": 6.556510925292969e-08,
+        "p_holm": 1.519918441772461e-06,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.3855637437214823,
+        "ci_low": 0.32477081740035696,
+        "ci_high": 0.445063322178866,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "site AP",
+      "task": "spatial",
+      "arm": "3D U-Net seed 2",
+      "first_mean": 0.30923580579492665,
+      "arm_mean": 0.3475387576516322,
+      "clip": {
+        "n": 243,
+        "mean_delta": -0.038302951856705535,
+        "median_delta": -0.07789289649778486,
+        "wins_frac": 0.29218106995884774,
+        "p": 7.855943838100566e-09,
+        "q_bh": 1.0166515555188968e-08,
+        "p_holm": 1.6497482060011187e-07,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 27,
+        "mean_delta": -0.03007241237307764,
+        "median_delta": -0.04912250936498281,
+        "recordings_won_frac": 0.2962962962962963,
+        "p": 0.07722577452659607,
+        "q_bh": 0.08941931787290071,
+        "p_holm": 1.0,
+        "verdict": "ns"
+      },
+      "bootstrap": {
+        "estimate": -0.03007241237307764,
+        "ci_low": -0.07480167485970915,
+        "ci_high": 0.019924068365130578,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": false
+      },
+      "verdict_changed": true
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "spatial",
+      "arm": "3D U-Net seed 2",
+      "first_mean": 0.7224128656716958,
+      "arm_mean": 0.3475387576516322,
+      "clip": {
+        "n": 243,
+        "mean_delta": 0.37487410802006343,
+        "median_delta": 0.39330424349378235,
+        "wins_frac": 0.9670781893004116,
+        "p": 7.112732858726127e-40,
+        "q_bh": 1.647159188336577e-39,
+        "p_holm": 3.627493757950325e-38,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 27,
+        "mean_delta": 0.3628769397064729,
+        "median_delta": 0.40536984428406325,
+        "recordings_won_frac": 1.0,
+        "p": 1.4901161193847656e-08,
+        "q_bh": 3.642506069607205e-08,
+        "p_holm": 8.642673492431641e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.3628769397064729,
+        "ci_low": 0.3137111744448822,
+        "ci_high": 0.4104182687830494,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "A: ours vs arm",
+      "metric": "site AP",
+      "task": "spatial",
+      "arm": "3D CVAE",
+      "first_mean": 0.30923580579492665,
+      "arm_mean": 0.2416640037991186,
+      "clip": {
+        "n": 243,
+        "mean_delta": 0.06757180199580812,
+        "median_delta": 0.018249751702252903,
+        "wins_frac": 0.551440329218107,
+        "p": 0.004887436971251656,
+        "q_bh": 0.005120172065120782,
+        "p_holm": 0.02443718485625828,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 27,
+        "mean_delta": 0.07702863071491374,
+        "median_delta": 0.06204859991398267,
+        "recordings_won_frac": 0.7407407407407407,
+        "p": 0.01506437361240387,
+        "q_bh": 0.01867133630833156,
+        "p_holm": 0.27115872502326965,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.07702863071491374,
+        "ci_low": 0.015001822314896565,
+        "ci_high": 0.1419841958483899,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "spatial",
+      "arm": "3D CVAE",
+      "first_mean": 0.7224128656716958,
+      "arm_mean": 0.2416640037991186,
+      "clip": {
+        "n": 243,
+        "mean_delta": 0.4807488618725771,
+        "median_delta": 0.47316116366281985,
+        "wins_frac": 0.9876543209876543,
+        "p": 1.787342440221058e-41,
+        "q_bh": 4.915191710607909e-41,
+        "p_holm": 1.018785190926003e-39,
+        "verdict": "first"
+      },
+      "recording": {
+        "n_recordings": 27,
+        "mean_delta": 0.46997798279446423,
+        "median_delta": 0.46780487218635486,
+        "recordings_won_frac": 1.0,
+        "p": 1.4901161193847656e-08,
+        "q_bh": 3.642506069607205e-08,
+        "p_holm": 8.642673492431641e-07,
+        "verdict": "first"
+      },
+      "bootstrap": {
+        "estimate": 0.46997798279446423,
+        "ci_low": 0.4225342983699999,
+        "ci_high": 0.5198897565569799,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": true
+      },
+      "verdict_changed": false
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "spatial",
+      "arm": "Dich. Gaussian (ref)",
+      "first_mean": 0.7224128656716958,
+      "arm_mean": 0.7391891542207495,
+      "clip": {
+        "n": 243,
+        "mean_delta": -0.016776288549053824,
+        "median_delta": -0.01167747970844546,
+        "wins_frac": 0.35390946502057613,
+        "p": 7.357937601036616e-05,
+        "q_bh": 8.409071544041847e-05,
+        "p_holm": 0.0008829525121243939,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 27,
+        "mean_delta": -0.01055513176770932,
+        "median_delta": -0.009760768793239949,
+        "recordings_won_frac": 0.3333333333333333,
+        "p": 0.1348898708820343,
+        "q_bh": 0.14837885797023773,
+        "p_holm": 1.0,
+        "verdict": "ns"
+      },
+      "bootstrap": {
+        "estimate": -0.01055513176770932,
+        "ci_low": -0.029056309448188843,
+        "ci_high": 0.007416571077695201,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": false
+      },
+      "verdict_changed": true
+    },
+    {
+      "comparison": "B: site map vs arm",
+      "metric": "site AP",
+      "task": "spatial",
+      "arm": "Coupled GLM (ref)",
+      "first_mean": 0.7224128656716958,
+      "arm_mean": 0.7402487894486051,
+      "clip": {
+        "n": 243,
+        "mean_delta": -0.017835923776909422,
+        "median_delta": -0.011141526621835873,
+        "wins_frac": 0.3497942386831276,
+        "p": 0.0003343954923729557,
+        "q_bh": 0.00037249118137746965,
+        "p_holm": 0.0033830944398490917,
+        "verdict": "arm"
+      },
+      "recording": {
+        "n_recordings": 27,
+        "mean_delta": -0.010253052957150302,
+        "median_delta": -0.007202879636159222,
+        "recordings_won_frac": 0.25925925925925924,
+        "p": 0.1698138564825058,
+        "q_bh": 0.18448912803037668,
+        "p_holm": 1.0,
+        "verdict": "ns"
+      },
+      "bootstrap": {
+        "estimate": -0.010253052957150302,
+        "ci_low": -0.040871469651660365,
+        "ci_high": 0.01832612221484037,
+        "ci": 0.95,
+        "n_boot": 10000,
+        "excludes_zero": false
+      },
+      "verdict_changed": true
+    }
+  ],
+  "skipped": []
+}
